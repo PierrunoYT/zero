@@ -6,6 +6,10 @@ import (
 )
 
 func stringArg(args map[string]any, key string, fallback string, required bool) (string, error) {
+	return stringArgWithEmpty(args, key, fallback, required, false)
+}
+
+func stringArgWithEmpty(args map[string]any, key string, fallback string, required bool, allowEmpty bool) (string, error) {
 	value, ok := args[key]
 	if !ok || value == nil {
 		if required {
@@ -15,7 +19,10 @@ func stringArg(args map[string]any, key string, fallback string, required bool) 
 	}
 
 	text, ok := value.(string)
-	if !ok || text == "" {
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	if !allowEmpty && text == "" {
 		return "", fmt.Errorf("%s must be a non-empty string", key)
 	}
 	return text, nil
