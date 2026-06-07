@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/background"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -116,7 +117,6 @@ func TestTaskToolRunsResumeSpecialist(t *testing.T) {
 	}
 
 	result := NewTaskTool(executor).RunWithOptions(context.Background(), map[string]any{
-		"name":   "worker",
 		"prompt": "follow up",
 		"resume": "child_task",
 	}, tools.RunOptions{Depth: 2})
@@ -133,6 +133,29 @@ func TestTaskToolRunsResumeSpecialist(t *testing.T) {
 		if !containsSequence(gotArgs, want) {
 			t.Fatalf("resume args missing %v: %#v", want, gotArgs)
 		}
+	}
+}
+
+func TestTaskToolRejectsBackgroundResume(t *testing.T) {
+	calledRunChild := false
+	executor := Executor{
+		RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+			calledRunChild = true
+			return ChildRunResult{}, nil
+		},
+	}
+
+	result := NewTaskTool(executor).RunWithOptions(context.Background(), map[string]any{
+		"prompt":            "follow up",
+		"resume":            "child_task",
+		"run_in_background": true,
+	}, tools.RunOptions{Depth: 2})
+
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, "cannot run in background") {
+		t.Fatalf("background resume result = %#v", result)
+	}
+	if calledRunChild {
+		t.Fatal("RunChild was called for rejected background resume")
 	}
 }
 
@@ -155,6 +178,107 @@ func TestTaskToolRejectsResumeSpecialistMismatch(t *testing.T) {
 
 	if result.Status != tools.StatusError || !strings.Contains(result.Output, `belongs to specialist "worker"`) {
 		t.Fatalf("mismatch result = %#v", result)
+	}
+}
+
+func TestTaskToolRunsBackgroundSpecialist(t *testing.T) {
+	manager, err := background.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	var gotOutputFile string
+	var gotArgs []string
+	executor := Executor{
+		BinaryPath:        "/usr/local/bin/zero",
+		BackgroundManager: manager,
+		NewSessionID:      func() (string, error) { return "child_task", nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
+				SystemPrompt:  "Work carefully.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		LaunchBackground: func(binaryPath string, args []string, outputFile string, onExit func(exitCode int)) (int, error) {
+			if binaryPath != "/usr/local/bin/zero" {
+				t.Fatalf("binaryPath = %q", binaryPath)
+			}
+			gotArgs = append([]string(nil), args...)
+			gotOutputFile = outputFile
+			return 4321, nil
+		},
+	}
+
+	result := NewTaskTool(executor).RunWithOptions(context.Background(), map[string]any{
+		"name":              "worker",
+		"prompt":            "inspect auth",
+		"description":       "Auth check",
+		"run_in_background": true,
+	}, tools.RunOptions{SessionID: "parent_session"})
+
+	if result.Status != tools.StatusOK {
+		t.Fatalf("Task status = %s, output=%s", result.Status, result.Output)
+	}
+	for _, want := range []string{"Task launched in background.", "task_id: child_task", "pid: 4321", `Use TaskOutput with task_id "child_task"`} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("background output missing %q:\n%s", want, result.Output)
+		}
+	}
+	if result.Meta["task_id"] != "child_task" || result.Meta["session_id"] != "child_task" {
+		t.Fatalf("background meta = %#v", result.Meta)
+	}
+	if gotOutputFile != manager.OutputPath("child_task") {
+		t.Fatalf("output file = %q, manager path = %q", gotOutputFile, manager.OutputPath("child_task"))
+	}
+	task, ok := manager.Get("child_task")
+	if !ok {
+		t.Fatal("background task was not registered")
+	}
+	if task.Status != background.StatusRunning || task.PID != 4321 || task.ParentID != "parent_session" || task.SpecialistName != "worker" {
+		t.Fatalf("background task = %#v", task)
+	}
+	for _, want := range [][]string{
+		{"exec", "--init-session-id", "child_task"},
+		{"--output-format", "stream-json"},
+		{"--enabled-tools", "read_file"},
+		{"--tag", "specialist"},
+	} {
+		if !containsSequence(gotArgs, want) {
+			t.Fatalf("background args missing %v: %#v", want, gotArgs)
+		}
+	}
+}
+
+func TestTaskToolRejectsCanceledBackgroundBeforeRegistering(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calledManager := false
+	executor := Executor{
+		NewSessionID: func() (string, error) { return "child_task", nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
+				SystemPrompt:  "Work carefully.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		BackgroundManagerFunc: func() (*background.Manager, error) {
+			calledManager = true
+			return background.NewManager(t.TempDir())
+		},
+	}
+
+	result := NewTaskTool(executor).RunWithOptions(ctx, map[string]any{
+		"name":              "worker",
+		"prompt":            "inspect auth",
+		"run_in_background": true,
+	}, tools.RunOptions{SessionID: "parent_session"})
+
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, context.Canceled.Error()) {
+		t.Fatalf("canceled background result = %#v", result)
+	}
+	if calledManager {
+		t.Fatal("background manager was created after context cancellation")
 	}
 }
 
@@ -205,6 +329,11 @@ func TestTaskToolRejectsInvalidParameters(t *testing.T) {
 	result := NewTaskTool(Executor{}).Run(context.Background(), map[string]any{"name": "worker"})
 	if result.Status != tools.StatusError || !strings.Contains(result.Output, "prompt") {
 		t.Fatalf("missing prompt result = %#v", result)
+	}
+
+	result = NewTaskTool(Executor{}).Run(context.Background(), map[string]any{"prompt": "work"})
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, "name or resume") {
+		t.Fatalf("missing name/resume result = %#v", result)
 	}
 }
 
