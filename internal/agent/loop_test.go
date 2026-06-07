@@ -787,8 +787,11 @@ func TestRunAppendsConfirmationPolicyToSystemPrompt(t *testing.T) {
 	if system.Role != zeroruntime.MessageRoleSystem {
 		t.Fatalf("expected first message to be system, got %s", system.Role)
 	}
-	if !strings.Contains(system.Content, defaultSystemPrompt) {
-		t.Fatalf("system prompt lost base instruction: %q", system.Content)
+	// The overhauled core prompt: identity + the mandatory testing gate.
+	for _, marker := range []string{"You are Zero", "Testing gate"} {
+		if !strings.Contains(system.Content, marker) {
+			t.Fatalf("system prompt missing core marker %q: %q", marker, system.Content)
+		}
 	}
 	// Key markers from CONFIRMATION_POLICY.md must be present so the model self-polices.
 	for _, marker := range []string{"Confirmation Modes", "BLOCKED", "ALWAYS CONFIRM"} {
@@ -799,12 +802,53 @@ func TestRunAppendsConfirmationPolicyToSystemPrompt(t *testing.T) {
 }
 
 func TestSystemPromptEmbedsConfirmationPolicy(t *testing.T) {
-	prompt := buildSystemPrompt()
-	if !strings.HasPrefix(prompt, defaultSystemPrompt) {
-		t.Fatalf("system prompt should start with the base instruction, got %q", prompt)
+	prompt := buildSystemPrompt(Options{})
+	if !strings.HasPrefix(prompt, "You are Zero") {
+		t.Fatalf("system prompt should start with the core instructions, got %q", prompt)
 	}
 	if !strings.Contains(prompt, "Confirmation Modes") {
 		t.Fatalf("embedded confirmation policy missing from system prompt")
+	}
+	// No workspace context without a cwd (keeps headless/test runs deterministic).
+	if strings.Contains(prompt, "<environment>") {
+		t.Fatalf("system prompt should omit the environment block when cwd is unset")
+	}
+}
+
+func TestGitBranchForPromptResolvesRelativeWorktreeGitdir(t *testing.T) {
+	root := t.TempDir()
+	// The real gitdir for the worktree, where HEAD lives.
+	gitdir := filepath.Join(root, "realgit", "worktrees", "wt")
+	if err := os.MkdirAll(gitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitdir, "HEAD"), []byte("ref: refs/heads/feature-x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The worktree checkout: a .git FILE pointing at the gitdir via a RELATIVE path.
+	worktree := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: ../realgit/worktrees/wt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitBranchForPrompt(worktree); got != "feature-x" {
+		t.Fatalf("gitBranchForPrompt = %q, want feature-x (relative worktree gitdir resolved against cwd)", got)
+	}
+}
+
+func TestBuildSystemPromptInjectsWorkspaceContext(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("Always run `make lint` before committing."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildSystemPrompt(Options{Cwd: cwd})
+	if !strings.Contains(prompt, "<environment>") || !strings.Contains(prompt, "Working directory: "+cwd) {
+		t.Fatalf("expected environment block with cwd, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Project guidelines (AGENTS.md)") || !strings.Contains(prompt, "make lint") {
+		t.Fatalf("expected AGENTS.md project guidelines injected, got %q", prompt)
 	}
 }
 
