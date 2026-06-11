@@ -33,6 +33,19 @@ func TestComposerDeleteWordBeforeCursor(t *testing.T) {
 	}
 }
 
+func TestComposerDeleteWordBeforeSkipsTrailingSpace(t *testing.T) {
+	state := composerState{text: "alpha beta  ", cursor: len([]rune("alpha beta  "))}
+
+	got := deleteComposerWordBefore(state)
+
+	if got.text != "alpha " {
+		t.Fatalf("text = %q, want %q", got.text, "alpha ")
+	}
+	if got.cursor != len([]rune("alpha ")) {
+		t.Fatalf("cursor = %d, want %d", got.cursor, len([]rune("alpha ")))
+	}
+}
+
 func TestComposerDeleteWordAfterCursor(t *testing.T) {
 	state := composerState{text: "alpha  beta gamma", cursor: len([]rune("alpha  "))}
 
@@ -43,6 +56,66 @@ func TestComposerDeleteWordAfterCursor(t *testing.T) {
 	}
 	if got.cursor != len([]rune("alpha  ")) {
 		t.Fatalf("cursor = %d, want %d", got.cursor, len([]rune("alpha  ")))
+	}
+}
+
+func TestBackspaceAfterCompletedFileMentionRemovesWholeMention(t *testing.T) {
+	tests := []struct {
+		name       string
+		start      string
+		want       string
+		wantCursor int
+	}{
+		{
+			name:       "only mention",
+			start:      "@docs/NPM_WRAPPER_SMOKE.md ",
+			want:       "",
+			wantCursor: 0,
+		},
+		{
+			name:       "mention after prompt text",
+			start:      "read @docs/NPM_WRAPPER_SMOKE.md ",
+			want:       "read ",
+			wantCursor: len([]rune("read ")),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			m.input.SetValue(tc.start)
+			m.input.CursorEnd()
+
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+			next := updated.(model)
+
+			if got := next.composerValue(); got != tc.want {
+				t.Fatalf("composer value = %q, want %q", got, tc.want)
+			}
+			if got := next.currentComposerState().cursor; got != tc.wantCursor {
+				t.Fatalf("cursor = %d, want %d", got, tc.wantCursor)
+			}
+			if next.suggestionsActive() {
+				t.Fatal("completed mention deletion should not reopen the file picker")
+			}
+		})
+	}
+}
+
+func TestBackspaceInsideActiveFileMentionStillEditsQuery(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "docs/NPM_WRAPPER_SMOKE.md")
+	m := newModel(context.Background(), Options{Cwd: root})
+	m = typeRunes(t, m, "@docs")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	next := updated.(model)
+
+	if got := next.composerValue(); got != "@doc" {
+		t.Fatalf("composer value = %q, want active query edited", got)
+	}
+	if !next.suggestionsActive() || !next.suggestionsAreFiles {
+		t.Fatal("active file query backspace should keep the file picker open")
 	}
 }
 
@@ -121,5 +194,83 @@ func TestMultilineComposerAcceptsSpaceKey(t *testing.T) {
 	}
 	if !next.composerActive {
 		t.Fatal("space insertion should keep multiline composer state active")
+	}
+}
+
+func TestComposerTerminalWordKeybindings(t *testing.T) {
+	tests := []struct {
+		name       string
+		start      string
+		cursor     int
+		key        tea.KeyMsg
+		want       string
+		wantCursor int
+	}{
+		{
+			name:       "alt backspace skips trailing spaces",
+			start:      "alpha beta  ",
+			cursor:     len([]rune("alpha beta  ")),
+			key:        tea.KeyMsg{Type: tea.KeyBackspace, Alt: true},
+			want:       "alpha ",
+			wantCursor: len([]rune("alpha ")),
+		},
+		{
+			name:       "ctrl w skips trailing spaces",
+			start:      "alpha beta  ",
+			cursor:     len([]rune("alpha beta  ")),
+			key:        tea.KeyMsg{Type: tea.KeyCtrlW},
+			want:       "alpha ",
+			wantCursor: len([]rune("alpha ")),
+		},
+		{
+			name:       "alt b moves back a word",
+			start:      "alpha beta gamma",
+			cursor:     len([]rune("alpha beta gamma")),
+			key:        tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b"), Alt: true},
+			want:       "alpha beta gamma",
+			wantCursor: len([]rune("alpha beta ")),
+		},
+		{
+			name:       "ctrl left moves back a word",
+			start:      "alpha beta gamma",
+			cursor:     len([]rune("alpha beta gamma")),
+			key:        tea.KeyMsg{Type: tea.KeyCtrlLeft},
+			want:       "alpha beta gamma",
+			wantCursor: len([]rune("alpha beta ")),
+		},
+		{
+			name:       "alt f moves forward a word",
+			start:      "alpha beta gamma",
+			cursor:     len([]rune("alpha ")),
+			key:        tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f"), Alt: true},
+			want:       "alpha beta gamma",
+			wantCursor: len([]rune("alpha beta")),
+		},
+		{
+			name:       "ctrl right moves forward a word",
+			start:      "alpha beta gamma",
+			cursor:     len([]rune("alpha ")),
+			key:        tea.KeyMsg{Type: tea.KeyCtrlRight},
+			want:       "alpha beta gamma",
+			wantCursor: len([]rune("alpha beta")),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			m.input.SetValue(tc.start)
+			m.input.SetCursor(tc.cursor)
+
+			updated, _ := m.Update(tc.key)
+			next := updated.(model)
+
+			if got := next.composerValue(); got != tc.want {
+				t.Fatalf("composer value = %q, want %q", got, tc.want)
+			}
+			if got := next.currentComposerState().cursor; got != tc.wantCursor {
+				t.Fatalf("cursor = %d, want %d", got, tc.wantCursor)
+			}
+		})
 	}
 }

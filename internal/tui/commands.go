@@ -353,6 +353,55 @@ func formatCommandHelpLine(command commandDefinition) string {
 	return label + " - " + command.description
 }
 
+func commandSelectionRequiresInput(name string) bool {
+	command, ok := resolveCommand(name)
+	return ok && commandUsageRequiresInput(command.usage)
+}
+
+func commandRequiredInputHint(name string) string {
+	command, ok := resolveCommand(name)
+	if !ok {
+		return ""
+	}
+	placeholder := commandUsageRequiredPlaceholder(command.usage)
+	if placeholder == "" {
+		return ""
+	}
+	return "[" + placeholder + "]"
+}
+
+func commandUsageRequiresInput(usage string) bool {
+	return commandUsageRequiredPlaceholder(usage) != ""
+}
+
+func commandUsageRequiredPlaceholder(usage string) string {
+	optionalDepth := 0
+	var placeholder strings.Builder
+	inPlaceholder := false
+	for _, char := range usage {
+		if inPlaceholder {
+			if char == '>' {
+				return strings.TrimSpace(placeholder.String())
+			}
+			placeholder.WriteRune(char)
+			continue
+		}
+		switch char {
+		case '[':
+			optionalDepth++
+		case ']':
+			if optionalDepth > 0 {
+				optionalDepth--
+			}
+		case '<':
+			if optionalDepth == 0 {
+				inPlaceholder = true
+			}
+		}
+	}
+	return ""
+}
+
 func commandGroupOrder() []commandGroup {
 	return []commandGroup{
 		commandGroupModel,

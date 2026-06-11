@@ -272,8 +272,8 @@ func TestToolCardMarksAutoApprovedCalls(t *testing.T) {
 func TestComposerLineTracksRunState(t *testing.T) {
 	m := limeTestModel()
 	m.input.SetValue("add a flag")
-	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "run ↵") {
-		t.Fatalf("idle composer = %q, want run ↵ hint", got)
+	if got := plainRender(t, m.composerLine(96)); strings.Contains(got, "run ↵") {
+		t.Fatalf("idle composer = %q, should not show run hint", got)
 	}
 
 	m.pending = true
@@ -285,6 +285,56 @@ func TestComposerLineTracksRunState(t *testing.T) {
 	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, composerPlaceholderRunning) {
 		t.Fatalf("pending empty composer = %q, want running placeholder", got)
 	}
+}
+
+func TestComposerLineShowsRequiredCommandArgumentHint(t *testing.T) {
+	m := limeTestModel()
+	m.input.Width = 40
+	m.input.SetValue("/spec")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") {
+		t.Fatalf("composer line = %q, want /spec argument hint", got)
+	}
+
+	m.input.SetValue("/spec ")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") || strings.Contains(got, "/spec  [task]") {
+		t.Fatalf("composer line = %q, want /spec argument hint", got)
+	}
+
+	m.input.SetValue("/find ")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/find") || !strings.Contains(got, "[query]") {
+		t.Fatalf("composer line = %q, want /find query hint", got)
+	}
+
+	m.input.SetValue("/spec fix this")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); strings.Contains(got, "[task]") {
+		t.Fatalf("composer line = %q, should hide hint once an argument is present", got)
+	}
+
+	m.input.SetValue("/model ")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); strings.Contains(got, "[list|id]") {
+		t.Fatalf("composer line = %q, should not hint optional arguments", got)
+	}
+}
+
+func TestComposerBoxFramesInputAndBottomModelModeLabel(t *testing.T) {
+	m := limeTestModel()
+	m.input.SetValue("add a flag")
+
+	got := plainRender(t, m.composerBox(96))
+	for _, want := range []string{"╭", "│", "❯ add a flag", "╰", "claude-sonnet-4.5", "auto-approve"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("composer box = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "run ↵") {
+		t.Fatalf("composer box = %q, should not show run hint", got)
+	}
+	assertRenderedLineWidths(t, got, 96)
 }
 
 func TestMalformedAskUserToolResultIsHiddenFromChatSurface(t *testing.T) {
@@ -320,9 +370,18 @@ func TestMalformedToolArgumentResultIsHiddenFromChatSurface(t *testing.T) {
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))
-	for _, want := range []string{"● anthropic", "claude-sonnet-4.5", "interactive", "⏵⏵ auto-approve"} {
+	for _, want := range []string{"● anthropic"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status line = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "interactive") || strings.Contains(got, "claude-sonnet-4.5") || strings.Contains(got, "auto-approve") {
+		t.Fatalf("status line = %q, should not include surface, model, or permission mode", got)
+	}
+	divider := plainRender(t, m.composerDividerLine(110))
+	for _, want := range []string{"claude-sonnet-4.5", "auto-approve"} {
+		if !strings.Contains(divider, want) {
+			t.Fatalf("composer divider = %q, missing %q", divider, want)
 		}
 	}
 }
@@ -437,8 +496,8 @@ func TestDiffPreambleLinesCarryNoGutterNumbers(t *testing.T) {
 
 func TestSuggestionDigitsTypeNormallyWhilePending(t *testing.T) {
 	m := limeTestModel()
-	// /clear mid-run leaves the transcript empty while pending; the chips are
-	// not on screen, so digits must type into the composer.
+	// /clear mid-run leaves the transcript empty while pending, so digits must
+	// keep typing into the composer.
 	m.pending = true
 	m = typeRunes(t, m, "1")
 	if got := m.input.Value(); got != "1" {
@@ -522,16 +581,23 @@ func TestUnpromptedAllowRowsCollapseIntoAutoTag(t *testing.T) {
 	}
 }
 
-func TestModelPickerRowsCarryContextAndKeyEnvMeta(t *testing.T) {
+func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 	m := limeTestModel()
 	picker := m.newModelPicker()
 	if picker == nil {
 		t.Fatal("expected a model picker")
 	}
 	withMeta := 0
+	withCapability := 0
 	for _, item := range picker.items {
 		if strings.Contains(item.Meta, "K") || strings.Contains(item.Meta, "M") {
 			withMeta++
+		}
+		if strings.Contains(item.Meta, "tools") || strings.Contains(item.Meta, "reasoning") || strings.Contains(item.Meta, "vision") {
+			withCapability++
+		}
+		if strings.Contains(item.Meta, "API_KEY") {
+			t.Fatalf("picker item %q leaked credential env metadata: %q", item.Value, item.Meta)
 		}
 		if !item.Remote && !item.Local {
 			continue
@@ -540,13 +606,19 @@ func TestModelPickerRowsCarryContextAndKeyEnvMeta(t *testing.T) {
 	if withMeta == 0 {
 		t.Fatalf("expected catalog models to expose ctx metadata, got %#v", picker.items[:minInt(3, len(picker.items))])
 	}
+	if withCapability == 0 {
+		t.Fatalf("expected catalog models to expose capability metadata, got %#v", picker.items[:minInt(3, len(picker.items))])
+	}
 
 	m.picker = picker
 	got := plainRender(t, m.pickerOverlay(100))
-	for _, want := range []string{"select model", "↑/↓ · ⏎ · esc", "❯"} {
+	for _, want := range []string{"Choose a model", "Enter select", "Ctrl+F favorite", "❯"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("picker overlay = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "API_KEY") {
+		t.Fatalf("picker overlay leaked credential env metadata: %q", got)
 	}
 }
 

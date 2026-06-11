@@ -92,6 +92,40 @@ func TestResolveSelectsActiveProviderProfile(t *testing.T) {
 	}
 }
 
+func TestResolveLoadsFavoriteModelsFromUserConfigOnly(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"activeProvider": "user",
+		"providers": [{
+			"name": "user",
+			"provider": "openai",
+			"apiKey": "sk-user",
+			"model": "gpt-user"
+		}],
+		"preferences": {
+			"favoriteModels": [" rnj-1:8b ", "qwen3-coder:480b", "rnj-1:8b"]
+		}
+	}`)
+	projectPath := writeConfig(t, `{
+		"preferences": {
+			"favoriteModels": ["project-model"]
+		}
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	want := []string{"qwen3-coder:480b", "rnj-1:8b"}
+	if !reflect.DeepEqual(resolved.Preferences.FavoriteModels, want) {
+		t.Fatalf("FavoriteModels = %#v, want %#v", resolved.Preferences.FavoriteModels, want)
+	}
+}
+
 func TestResolveLoadsProviderCatalogSnakeAndCamelJSONFields(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "snake",

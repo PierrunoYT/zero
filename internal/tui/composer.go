@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -33,6 +34,9 @@ func deleteComposerWordBefore(state composerState) composerState {
 	}
 	runes := []rune(state.text)
 	start := state.cursor
+	for start > 0 && unicode.IsSpace(runes[start-1]) {
+		start--
+	}
 	for start > 0 && !unicode.IsSpace(runes[start-1]) {
 		start--
 	}
@@ -66,6 +70,34 @@ func deleteComposerLineBefore(state composerState) composerState {
 func deleteComposerLineAfter(state composerState) composerState {
 	state = normalizeComposerState(state)
 	return deleteComposerRange(state, state.cursor, composerLineEnd(state))
+}
+
+func moveComposerWordBefore(state composerState) composerState {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	pos := state.cursor
+	for pos > 0 && unicode.IsSpace(runes[pos-1]) {
+		pos--
+	}
+	for pos > 0 && !unicode.IsSpace(runes[pos-1]) {
+		pos--
+	}
+	state.cursor = pos
+	return state
+}
+
+func moveComposerWordAfter(state composerState) composerState {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	pos := state.cursor
+	for pos < len(runes) && unicode.IsSpace(runes[pos]) {
+		pos++
+	}
+	for pos < len(runes) && !unicode.IsSpace(runes[pos]) {
+		pos++
+	}
+	state.cursor = pos
+	return state
 }
 
 func sanitizeComposerPaste(text string) string {
@@ -150,6 +182,18 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		m.setComposerState(insertComposerText(state, "\n"))
 	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "d":
 		m.setComposerState(deleteComposerWordAfter(state))
+	case (msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlLeft) && msg.Alt:
+		m.setComposerState(moveComposerWordBefore(state))
+	case (msg.Type == tea.KeyRight || msg.Type == tea.KeyCtrlRight) && msg.Alt:
+		m.setComposerState(moveComposerWordAfter(state))
+	case msg.Type == tea.KeyCtrlLeft:
+		m.setComposerState(moveComposerWordBefore(state))
+	case msg.Type == tea.KeyCtrlRight:
+		m.setComposerState(moveComposerWordAfter(state))
+	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "b":
+		m.setComposerState(moveComposerWordBefore(state))
+	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "f":
+		m.setComposerState(moveComposerWordAfter(state))
 	case msg.Type == tea.KeySpace:
 		m.setComposerState(insertComposerText(state, " "))
 	case msg.Type == tea.KeyRunes && !msg.Alt:
@@ -158,6 +202,9 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 			text = sanitizeComposerPaste(text)
 		} else {
 			text = sanitizeComposerInput(text)
+		}
+		if shouldInsertCommandArgumentSpace(state, text) {
+			text = " " + text
 		}
 		m.setComposerState(insertComposerText(state, text))
 	case msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlB:
@@ -181,7 +228,11 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	case msg.Alt && msg.Type == tea.KeyDelete:
 		m.setComposerState(deleteComposerWordAfter(state))
 	case msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH:
-		m.setComposerState(deleteComposerRange(state, state.cursor-1, state.cursor))
+		if nextState, ok := deleteCompletedFileMentionBefore(state); ok && !m.suggestionsActive() {
+			m.setComposerState(nextState)
+		} else {
+			m.setComposerState(deleteComposerRange(state, state.cursor-1, state.cursor))
+		}
 	case msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlD:
 		m.setComposerState(deleteComposerRange(state, state.cursor, state.cursor+1))
 	default:
@@ -196,6 +247,24 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	return m, true
 }
 
+func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
+	if text == "" {
+		return false
+	}
+	first, _ := utf8.DecodeRuneInString(text)
+	if unicode.IsSpace(first) {
+		return false
+	}
+	state = normalizeComposerState(state)
+	if state.cursor != len([]rune(state.text)) {
+		return false
+	}
+	if strings.TrimRightFunc(state.text, unicode.IsSpace) != state.text {
+		return false
+	}
+	return commandArgumentHintForInput(state.text) != ""
+}
+
 func renderComposerState(state composerState, prompt string, width int) string {
 	state = normalizeComposerState(state)
 	lines := strings.Split(state.text, "\n")
@@ -207,6 +276,26 @@ func renderComposerState(state composerState, prompt string, width int) string {
 		lines[index] = fitStyledLine(prefix+line, width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func deleteCompletedFileMentionBefore(state composerState) (composerState, bool) {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	if state.cursor <= 0 || state.cursor > len(runes) || !isPathQueryBoundary(runes[state.cursor-1]) {
+		return state, false
+	}
+	tokenEnd := state.cursor
+	for tokenEnd > 0 && isPathQueryBoundary(runes[tokenEnd-1]) {
+		tokenEnd--
+	}
+	tokenStart := tokenEnd
+	for tokenStart > 0 && !isPathQueryBoundary(runes[tokenStart-1]) {
+		tokenStart--
+	}
+	if tokenStart >= tokenEnd || runes[tokenStart] != '@' || tokenEnd-tokenStart <= 1 {
+		return state, false
+	}
+	return deleteComposerRange(state, tokenStart, state.cursor), true
 }
 
 func deleteComposerRange(state composerState, start int, end int) composerState {

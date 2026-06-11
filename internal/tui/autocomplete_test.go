@@ -118,21 +118,106 @@ func TestUpDownMoveSuggestions(t *testing.T) {
 	}
 }
 
-func TestEnterCompletesSuggestion(t *testing.T) {
+func TestMouseWheelMovesSuggestions(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m = typeRunes(t, m, "/mod") // selects /model first
+	m = typeRunes(t, m, "/")
+
+	updated, _ := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m = updated.(model)
+	if m.suggestionIdx != 1 {
+		t.Fatalf("wheel down should select index 1, got %d", m.suggestionIdx)
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	m = updated.(model)
+	if m.suggestionIdx != 0 {
+		t.Fatalf("wheel up should select index 0, got %d", m.suggestionIdx)
+	}
+}
+
+func TestEnterRunsCommandSuggestion(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = typeRunes(t, m, "/he") // selects /help
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 
 	if cmd != nil {
-		t.Fatal("Enter on a suggestion should complete, not submit a run")
+		t.Fatal("Enter on a command suggestion should not start an agent run")
 	}
-	if got := m.input.Value(); got != "/model " {
-		t.Fatalf("expected input completed to %q, got %q", "/model ", got)
+	if got := m.input.Value(); got != "" {
+		t.Fatalf("Enter on a command suggestion should clear input, got %q", got)
 	}
 	if m.suggestionsActive() {
-		t.Fatal("completing a suggestion should dismiss the overlay")
+		t.Fatal("running a command suggestion should dismiss the overlay")
+	}
+	if !transcriptContains(m.transcript, "Commands") {
+		t.Fatal("running /help from suggestions should append help output")
+	}
+}
+
+func TestEnterPrefillsCommandSuggestionRequiringInput(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = typeRunes(t, m, "/sp") // selects /spec
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("Enter on an argument command suggestion should not start an agent run")
+	}
+	if got := m.input.Value(); got != "/spec" {
+		t.Fatalf("Enter should prefill command for arguments, got %q", got)
+	}
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec") || !strings.Contains(got, "[task]") {
+		t.Fatalf("prefilled command should show argument hint, got %q", got)
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("fix")})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("typing the argument should not start an agent run")
+	}
+	if got := m.input.Value(); got != "/spec fix" {
+		t.Fatalf("typing after the hint should insert one argument separator, got %q", got)
+	}
+	for range "fix" {
+		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = updated.(model)
+		if cmd != nil {
+			t.Fatal("backspacing the argument should not start an agent run")
+		}
+	}
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") || strings.Contains(got, "/spec  [task]") {
+		t.Fatalf("empty argument command should render one visual separator, got %q", got)
+	}
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("typing after deleting the argument should not start an agent run")
+	}
+	if got := m.input.Value(); got != "/spec x" {
+		t.Fatalf("typing after deleting the argument should keep one separator, got %q", got)
+	}
+	if m.suggestionsActive() {
+		t.Fatal("prefilling a command suggestion should dismiss the overlay")
+	}
+	if transcriptContains(m.transcript, "usage: /spec") {
+		t.Fatal("prefilling /spec should not run the command without a task")
+	}
+}
+
+func TestCommandSuggestionFooterReflectsInsertAction(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "/sp")
+
+	plain := plainRender(t, m.View())
+	if !strings.Contains(plain, "Enter insert") {
+		t.Fatalf("required-argument command footer should say Enter insert, got %q", plain)
+	}
+	if strings.Contains(plain, "Enter run") {
+		t.Fatalf("required-argument command footer should not say Enter run, got %q", plain)
 	}
 }
 
@@ -149,7 +234,7 @@ func TestTabCompletesAfterSelection(t *testing.T) {
 	}
 }
 
-func TestEscDismissesSuggestionsWithoutClearingInput(t *testing.T) {
+func TestEscDismissesCommandSuggestionsAndClearsInput(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/mo")
 
@@ -159,8 +244,8 @@ func TestEscDismissesSuggestionsWithoutClearingInput(t *testing.T) {
 	if m.suggestionsActive() {
 		t.Fatal("Esc should dismiss the suggestion overlay")
 	}
-	if m.input.Value() != "/mo" {
-		t.Fatalf("Esc should not clear the input, got %q", m.input.Value())
+	if m.input.Value() != "" {
+		t.Fatalf("Esc should clear slash command input, got %q", m.input.Value())
 	}
 }
 
@@ -224,8 +309,324 @@ func TestSuggestionOverlayRenders(t *testing.T) {
 	m = typeRunes(t, m, "/mo")
 
 	view := m.View()
-	if !strings.Contains(view, "/model") || !strings.Contains(view, "/mode") {
+	plain := plainRender(t, view)
+	if !strings.Contains(plain, "model") || !strings.Contains(plain, "mode") {
 		t.Fatal("view should render the suggestion overlay")
+	}
+	if strings.Contains(plain, "/model") || strings.Contains(plain, "/mode") {
+		t.Fatalf("suggestion overlay should display command names without slash prefixes, got %q", plain)
+	}
+	for _, want := range []string{"╭── Commands", "╰", "search > mo", "↑/↓ move", "Enter run", "Esc close"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("suggestion overlay should include %q in %q", want, plain)
+		}
+	}
+}
+
+func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 32
+	m.altScreen = true
+	m.headerPrinted = true
+	for i := 0; i < 20; i++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+i)))
+	}
+	m.chatScrollOffset = 12
+	m = typeRunes(t, m, "/")
+
+	plain := plainRender(t, m.View())
+	if !strings.Contains(plain, "Commands") || !strings.Contains(plain, "search >") {
+		t.Fatalf("suggestion overlay should stay visible above composer while transcript is scrolled, got %q", plain)
+	}
+	lines := strings.Split(plain, "\n")
+	if got := len(lines); got != m.height {
+		t.Fatalf("alt-screen view should keep terminal height, got %d lines want %d", got, m.height)
+	}
+	paletteLine := -1
+	composerLine := -1
+	for index, line := range lines {
+		switch {
+		case strings.Contains(line, "Commands"):
+			paletteLine = index
+		case strings.Contains(line, "no model") && strings.Contains(line, "auto-approve"):
+			composerLine = index
+		}
+	}
+	if paletteLine < 0 || composerLine < 0 {
+		t.Fatalf("expected palette and composer in view, palette=%d composer=%d view=%q", paletteLine, composerLine, plain)
+	}
+	if paletteLine >= composerLine-3 {
+		t.Fatalf("palette should be centered over chat, not anchored to composer; palette line %d composer line %d", paletteLine, composerLine)
+	}
+}
+
+func TestOverlayViewportLinesPreservesTextOutsidePanel(t *testing.T) {
+	lines := []string{
+		"left edge text stays visible after panel",
+		"second row text stays visible after panel",
+		"third row text stays visible after panel",
+	}
+	overlay := strings.Join([]string{
+		"          ╭── Files ─╮",
+		"          │ row      │",
+		"          ╰──────────╯",
+	}, "\n")
+
+	got := overlayViewportLines(append([]string(nil), lines...), overlay, 48)
+	plain := plainRender(t, strings.Join(got, "\n"))
+	if !strings.Contains(plain, "left edge ╭── Files ─╮") {
+		t.Fatalf("overlay should preserve text left of the panel, got %q", plain)
+	}
+	if !strings.Contains(plain, "visible after panel") {
+		t.Fatalf("overlay should preserve text right of the panel, got %q", plain)
+	}
+}
+
+func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "/")
+
+	plain := plainRender(t, m.View())
+	if strings.Contains(plain, "more") {
+		t.Fatalf("bare slash palette should not render a more-count row, got %q", plain)
+	}
+	if !strings.Contains(plain, "│ ❯ provider") || !strings.Contains(plain, "│   context") {
+		t.Fatalf("top of palette should render first visible command window, got %q", plain)
+	}
+	if strings.Contains(plain, "compact") {
+		t.Fatalf("top of palette should cap hidden commands without rendering them, got %q", plain)
+	}
+
+	for range suggestionPaletteMaxVisible + 1 {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(model)
+	}
+	plain = plainRender(t, m.View())
+	if strings.Contains(plain, "more") {
+		t.Fatalf("scrolled palette should not render a more-count row, got %q", plain)
+	}
+	selected := strings.TrimPrefix(m.suggestions[m.suggestionIdx].Name, "/")
+	if !strings.Contains(plain, "│ ❯ "+selected) || strings.Contains(plain, "│ ❯ provider") || strings.Contains(plain, "│   provider") {
+		t.Fatalf("scrolled palette should move the visible command window, got %q", plain)
+	}
+}
+
+func TestCommandPaletteStaysOpenForNoMatches(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "/,")
+
+	if !m.suggestionsActive() {
+		t.Fatal("command palette should stay active for a no-match slash query")
+	}
+	if len(m.suggestions) != 0 {
+		t.Fatalf("expected no command matches, got %v", suggestionNames(m))
+	}
+	plain := plainRender(t, m.View())
+	for _, want := range []string{"search > ,", "no matching commands"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("no-match palette should include %q in %q", want, plain)
+		}
+	}
+	if strings.Contains(plain, "/,") {
+		t.Fatalf("slash query should stay inside palette display, got %q", plain)
+	}
+}
+
+func TestEnterOnNoMatchCommandPaletteDoesNotSubmit(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = typeRunes(t, m, "/,")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("Enter on no-match command palette should not start a command")
+	}
+	if m.input.Value() != "/," {
+		t.Fatalf("Enter on no-match command palette should preserve search input, got %q", m.input.Value())
+	}
+	if !m.suggestionsActive() {
+		t.Fatal("Enter on no-match command palette should keep palette open")
+	}
+	if transcriptContains(m.transcript, "unknown command") {
+		t.Fatal("Enter on no-match command palette should not submit an unknown command")
+	}
+}
+
+func TestFilePaletteStaysOpenForNoMatches(t *testing.T) {
+	m := newModel(context.Background(), Options{Cwd: t.TempDir()})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "@missing")
+
+	if !m.suggestionsActive() {
+		t.Fatal("file palette should stay active for a no-match @ query")
+	}
+	if len(m.suggestions) != 0 {
+		t.Fatalf("expected no file matches, got %v", suggestionNames(m))
+	}
+	plain := plainRender(t, m.View())
+	for _, want := range []string{"Files", "search > missing", "no matching files"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("no-match file palette should include %q in %q", want, plain)
+		}
+	}
+	if strings.Contains(plain, "@missing") {
+		t.Fatalf("bare @ query should stay inside palette display without @ prefix, got %q", plain)
+	}
+}
+
+func TestEscDismissesFilePaletteAndRemovesTrailingToken(t *testing.T) {
+	m := newModel(context.Background(), Options{Cwd: t.TempDir()})
+	m = typeRunes(t, m, "read @missing")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+
+	if m.suggestionsActive() {
+		t.Fatal("Esc should dismiss the file palette")
+	}
+	if got := m.input.Value(); got != "read " {
+		t.Fatalf("Esc should remove only the trailing @ token, got %q", got)
+	}
+
+	m = typeRunes(t, m, "x")
+	if got := m.composerValue(); got != "read x" {
+		t.Fatalf("Esc should keep composer state synced after removing @ token, got %q", got)
+	}
+
+	m = newModel(context.Background(), Options{Cwd: t.TempDir()})
+	m = typeRunes(t, m, "compare @old with @new")
+	m.input.SetCursor(len([]rune("compare @old")))
+	m.recomputeSuggestions()
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+
+	if m.suggestionsActive() {
+		t.Fatal("Esc should dismiss the cursor-local file palette")
+	}
+	if got := m.input.Value(); got != "compare  with @new" {
+		t.Fatalf("Esc should remove only the cursor-local @ token, got %q", got)
+	}
+	if got := m.input.Position(); got != len([]rune("compare ")) {
+		t.Fatalf("cursor after cursor-local removal = %d, want %d", got, len([]rune("compare ")))
+	}
+	if got := m.composerValue(); got != "compare  with @new" {
+		t.Fatalf("Esc should keep composer synced after cursor-local removal, got %q", got)
+	}
+}
+
+func TestExtractPathQueryUsesCursorPosition(t *testing.T) {
+	query := extractPathQuery("read @internal/file.go after", len([]rune("read @internal/file")))
+	if query == nil {
+		t.Fatal("expected path query at cursor")
+	}
+	if query.Query != "internal/file.go" || query.StartIndex != len([]rune("read ")) || query.EndIndex != len([]rune("read @internal/file.go")) {
+		t.Fatalf("query = %#v", query)
+	}
+	if got := extractPathQuery("read @internal/file.go after", len([]rune("read @internal/file.go after"))); got != nil {
+		t.Fatalf("cursor after mention should not be in path context, got %#v", got)
+	}
+}
+
+func TestCompletePathQueryReplacesActiveMentionOnly(t *testing.T) {
+	text := "compare @old and @ne"
+	cursor := len([]rune(text))
+	got, gotCursor := completePathQuery(text, cursor, "@new/file.go")
+	want := "compare @old and @new/file.go "
+	if got != want {
+		t.Fatalf("completePathQuery text = %q, want %q", got, want)
+	}
+	if gotCursor != len([]rune(want)) {
+		t.Fatalf("completePathQuery cursor = %d, want %d", gotCursor, len([]rune(want)))
+	}
+}
+
+func TestFilePaletteDisplaysFilenamesAndPaths(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "cmd/server/main.go")
+	mustWriteFile(t, root, "main.go")
+
+	m := newModel(context.Background(), Options{Cwd: root})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "@main")
+
+	plain := plainRender(t, m.View())
+	if strings.Contains(plain, "@main") {
+		t.Fatalf("file palette should not render @ prefixes, got %q", plain)
+	}
+	if !strings.Contains(plain, "main.go") || !strings.Contains(plain, "cmd/server") {
+		t.Fatalf("file palette should show filename plus parent path, got %q", plain)
+	}
+	if got := suggestionNames(m)[0]; got != "@main.go" {
+		t.Fatalf("basename prefix match should rank before nested path match, got first suggestion %q from %v", got, suggestionNames(m))
+	}
+}
+
+func TestFileSuggestionsIncludeDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "tui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, root, "internal/tui/model.go")
+
+	got := suggestionTokens(fileSuggestions(root, "internal"))
+	if !contains(got, "@internal/") {
+		t.Fatalf("expected directory suggestion, got %v", got)
+	}
+}
+
+func TestEnterOnDirectorySuggestionKeepsFilePaletteOpen(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "internal/tui/model.go")
+	mustWriteFile(t, root, "internal/agent/loop.go")
+
+	m := newModel(context.Background(), Options{Cwd: root})
+	m = typeRunes(t, m, "@int")
+	if got := suggestionNames(m)[0]; got != "@internal/" {
+		t.Fatalf("expected internal directory first, got %q from %v", got, suggestionNames(m))
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("directory completion should not submit a prompt")
+	}
+	if got := m.input.Value(); got != "@internal/" {
+		t.Fatalf("directory completion should keep path active without trailing space, got %q", got)
+	}
+	if !m.suggestionsActive() || !m.suggestionsAreFiles {
+		t.Fatal("directory completion should keep the file palette open")
+	}
+	if names := suggestionNames(m); !contains(names, "@internal/tui/") || !contains(names, "@internal/agent/") {
+		t.Fatalf("directory completion should drill into that path, got %v", names)
+	}
+}
+
+func TestEnterOnFileSuggestionClosesFilePalette(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "internal/tui/model.go")
+
+	m := newModel(context.Background(), Options{Cwd: root})
+	m = typeRunes(t, m, "@model")
+	if got := suggestionNames(m)[0]; got != "@internal/tui/model.go" {
+		t.Fatalf("expected file suggestion first, got %q from %v", got, suggestionNames(m))
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("file completion should not submit a prompt")
+	}
+	if got := m.input.Value(); got != "@internal/tui/model.go " {
+		t.Fatalf("file completion should add trailing space, got %q", got)
+	}
+	if m.suggestionsActive() {
+		t.Fatal("file completion should close the file palette")
 	}
 }
 
@@ -322,4 +723,15 @@ func suggestionTokens(s []commandSuggestion) []string {
 		names = append(names, c.Name)
 	}
 	return names
+}
+
+func mustWriteFile(t *testing.T, root, rel string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

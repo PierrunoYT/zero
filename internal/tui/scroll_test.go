@@ -12,6 +12,7 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90
 	m.height = 14
+	m.mouseCapture = true
 	m.inputHistory = []string{"old prompt"}
 	m.historyIdx = len(m.inputHistory)
 	for index := 0; index < 12; index++ {
@@ -54,6 +55,19 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	}
 	if !strings.Contains(scrolled, "describe a task for zero") || !strings.Contains(scrolled, "openai") {
 		t.Fatalf("scrolled view should keep composer/status fixed, got:\n%s", scrolled)
+	}
+}
+
+func TestAltScreenTranscriptClampsFooterToTerminalHeight(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true, ProviderName: "openai", ModelName: "gpt-4.1"})
+	m.width = 80
+	m.height = 3
+	m.copyStatus = "Copied!"
+	m.transcript = appendRow(m.transcript, rowAssistant, "hello")
+
+	view := plainRender(t, m.View())
+	if got := len(viewLines(view)); got > m.height {
+		t.Fatalf("view rendered %d lines, want at most terminal height %d:\n%s", got, m.height, view)
 	}
 }
 

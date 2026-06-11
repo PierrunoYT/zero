@@ -7,11 +7,13 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -124,22 +126,34 @@ type model struct {
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
-	// row. Active only when suggestionsActive() (no modal, non-empty matches).
-	suggestions   []commandSuggestion
-	suggestionIdx int
+	// row. commandPaletteOpen keeps a zero-match command search active so invalid
+	// query text stays in the palette instead of leaking into the composer.
+	// filePaletteOpen does the same for a trailing "@token" file search.
+	suggestions        []commandSuggestion
+	suggestionIdx      int
+	commandPaletteOpen bool
+	filePaletteOpen    bool
 	// suggestionsAreFiles is true when the overlay is showing "@file" matches
 	// rather than "/command" matches, so completion inserts a path token instead
 	// of replacing the whole input.
 	suggestionsAreFiles bool
+	lastMouseSelection  mouseSelectionTarget
+	mouseCapture        bool
+	transcriptSelection transcriptSelectionState
+	copyStatus          string
+	copyStatusSeq       int
 
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
 	// the chosen value through the existing command handlers.
-	picker                    *commandPicker
-	providerWizard            *providerWizardState
-	favoriteModels            map[string]bool
-	modelPickerLiveProviderID string
-	modelPickerLiveModels     []providermodeldiscovery.Model
+	picker                       *commandPicker
+	providerWizard               *providerWizardState
+	favoriteModels               map[string]bool
+	modelPickerLoading           bool
+	modelPickerLoadingProviderID string
+	modelPickerLoadError         string
+	modelPickerLiveProviderID    string
+	modelPickerLiveModels        []providermodeldiscovery.Model
 
 	// pendingImages holds image attachments staged by /image for the next user
 	// turn; pendingImageLabels are their display names (base(path)) for the chip
@@ -292,6 +306,7 @@ func newModel(ctx context.Context, options Options) model {
 		providerName:           options.ProviderName,
 		modelName:              options.ModelName,
 		providerProfile:        options.ProviderProfile,
+		favoriteModels:         favoriteModelSet(options.FavoriteModels),
 		provider:               options.Provider,
 		newProvider:            options.NewProvider,
 		discoverProviderModels: options.DiscoverProviderModels,
@@ -325,14 +340,6 @@ const (
 	composerPlaceholderRunning = "running… esc to interrupt"
 )
 
-// emptyStateSuggestions are the three starter prompts offered on the empty
-// chat surface; pressing 1–3 while the composer is empty inserts one.
-var emptyStateSuggestions = []string{
-	"add a --version flag",
-	"explain internal/agent/loop.go",
-	"fix the failing test in internal/tools",
-}
-
 func (m model) Init() tea.Cmd {
 	return textinput.Blink
 }
@@ -350,14 +357,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
+	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
-	switch {
-	case flushCmd == nil:
-		return nm, cmd
-	case cmd == nil:
-		return nm, flushCmd
+	return nm, batchCommands(cmd, mouseCmd, flushCmd)
+}
+
+func batchCommands(cmds ...tea.Cmd) tea.Cmd {
+	filtered := make([]tea.Cmd, 0, len(cmds))
+	for _, cmd := range cmds {
+		if cmd != nil {
+			filtered = append(filtered, cmd)
+		}
+	}
+	switch len(filtered) {
+	case 0:
+		return nil
+	case 1:
+		return filtered[0]
 	default:
-		return nm, tea.Batch(flushCmd, cmd)
+		return tea.Batch(filtered...)
 	}
 }
 
@@ -367,18 +385,26 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
 		}
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			return m.scrollChat(chatWheelScrollLines), nil
-		case tea.MouseButtonWheelDown:
-			return m.scrollChat(-chatWheelScrollLines), nil
-		default:
-			return m, nil
+		return m.handleMouse(msg)
+	case transcriptCopiedMsg:
+		m.transcriptSelection = transcriptSelectionState{}
+		m.copyStatusSeq++
+		m.copyStatus = "Copied!"
+		seq := m.copyStatusSeq
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return transcriptCopyStatusExpiredMsg{seq: seq}
+		})
+	case transcriptCopyStatusExpiredMsg:
+		if msg.seq == m.copyStatusSeq {
+			m.copyStatus = ""
 		}
+		return m, nil
 	case tea.KeyMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
+		m.transcriptSelection = transcriptSelectionState{}
+		m.clearMouseSelection()
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			// cancelRun records the in-flight run into flushRunIDs and writes the
@@ -421,6 +447,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// An open picker cancels first; then an active suggestion overlay is
 			// dismissed. Neither cancels the run or clears the input.
 			if m.picker != nil {
+				if m.picker.kind == pickerModel {
+					m.clearModelPickerLoadState()
+				}
 				m.picker = nil
 				return m, nil
 			}
@@ -464,12 +493,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return next, nil
 				}
 			}
-			// Enter on a highlighted suggestion completes the input rather than
-			// submitting; Enter with no active suggestion submits as today.
+			// Enter on file suggestions inserts the @file token for continued
+			// composing. Command suggestions execute only when the selected command
+			// is self-contained; commands that require a value are inserted so the
+			// user can finish the argument first.
 			if m.suggestionsActive() {
-				next := m.completeSuggestion()
-				next.resetComposerFromInput()
-				return next, nil
+				return m.chooseSuggestion()
 			}
 			return m.handleSubmit()
 		case tea.KeyShiftTab:
@@ -487,10 +516,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.KeyCtrlF:
 			if m.picker != nil && m.picker.kind == pickerModel {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				return m.toggleModelFavorite(), nil
 			}
 		case tea.KeyBackspace, tea.KeyCtrlH:
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.deleteQueryRune()
 				return m, nil
 			}
@@ -523,6 +558,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.move(1)
 				return m, nil
 			}
@@ -541,6 +579,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.move(-1)
 				return m, nil
 			}
@@ -574,24 +615,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
 		if m.picker != nil {
+			if m.modelPickerIsLoading() {
+				return m, nil
+			}
 			if msg.Type == tea.KeyRunes {
 				m.picker.appendQuery(msg.Runes)
 			}
 			return m, nil
-		}
-		// On the empty chat surface a bare 1–3 keypress (composer empty, no modal)
-		// inserts the matching starter suggestion instead of typing the digit.
-		// !pending mirrors the render condition exactly — the chips are off
-		// screen during a run (e.g. after /clear mid-run), so digits must type.
-		if m.transcriptEmpty() && !m.pending && strings.TrimSpace(m.composerValue()) == "" {
-			if k := msg.String(); len(k) == 1 && k >= "1" && k <= "3" {
-				if index := int(k[0] - '1'); index < len(emptyStateSuggestions) {
-					m.input.SetValue(emptyStateSuggestions[index])
-					m.input.CursorEnd()
-					m.resetComposerFromInput()
-					return m, nil
-				}
-			}
 		}
 		if next, ok := m.applyComposerKey(msg); ok {
 			return next, nil
@@ -866,97 +896,69 @@ func (m model) transcriptEmpty() bool {
 func (m model) transcriptView() string {
 	width := chatWidth(m.width)
 
-	var body strings.Builder
-	// The title bar prints once into scrollback on the first WindowSizeMsg;
-	// until then (the very first frame) it renders managed so the surface
-	// never appears headless.
-	if !m.headerPrinted {
-		body.WriteString(m.titleBar(width))
-		body.WriteString("\n")
+	suggestionOverlay := m.suggestionOverlay(width)
+	providerOverlay := m.providerWizardOverlay(width)
+	pickerOverlay := m.pickerOverlay(width)
+	viewportOverlay := ""
+	switch {
+	case providerOverlay != "":
+		viewportOverlay = providerOverlay
+	case pickerOverlay != "":
+		viewportOverlay = pickerOverlay
+	case suggestionOverlay != "":
+		viewportOverlay = suggestionOverlay
+	}
+	emptyOverlay := ""
+	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
+		emptyOverlay = viewportOverlay
+	}
+	body, _ := m.transcriptBody(width, emptyOverlay)
+
+	footer := m.footerView(width)
+
+	overlayForViewport := viewportOverlay
+	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
+		overlayForViewport = ""
 	}
 
-	if m.transcriptEmpty() && !m.pending {
-		body.WriteString(m.emptyState(width))
-		body.WriteString("\n")
-	} else {
-		rc := buildRowContext(m.transcript)
-		shownAny := false
-		for index := m.flushed; index < len(m.transcript); index++ {
-			row := m.transcript[index]
-			// A welcome row carries no Lime visual (the empty state replaced it)
-			// and a resolved tool call collapses into its result's card.
-			if row.kind == rowWelcome || rc.skip(row) {
-				continue
-			}
-			// Blank-line separation before turns — including between the flushed
-			// history above and the first live row.
-			if (shownAny || m.flushedAny) && startsTurn(row.kind) {
-				body.WriteString("\n")
-			}
-			body.WriteString(m.renderRow(row, width, rc))
-			body.WriteString("\n")
-			shownAny = true
-		}
+	if m.altScreen && m.height > 0 {
+		return m.scrollableTranscriptView(body, footer, width, overlayForViewport)
 	}
 
-	if m.pending {
-		body.WriteString("\n")
-		switch {
-		case m.pendingPermission != nil:
-			body.WriteString(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
-		case m.pendingAskUser != nil:
-			body.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
-		default:
-			body.WriteString(m.interimBlock(width))
-		}
-		body.WriteString("\n")
+	if overlayForViewport != "" {
+		body += "\n" + overlayForViewport + "\n"
 	}
-	if m.pendingSpecReview != nil {
-		body.WriteString("\n")
-		body.WriteString(renderFocusedSpecReviewPrompt(*m.pendingSpecReview, width))
-		body.WriteString("\n")
-	}
+	return body + footer
+}
 
+func (m model) footerView(width int) string {
 	var footer strings.Builder
 	footer.WriteString("\n")
 	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
 		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		footer.WriteString("\n")
 	}
-	footer.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
-	footer.WriteString("\n")
-	footer.WriteString(m.composerLine(width))
+	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
+		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+		footer.WriteString("\n")
+	}
+	footer.WriteString(m.composerBox(width))
 	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
 		footer.WriteString("\n")
 		footer.WriteString(queued)
 	}
-	if overlay := m.suggestionOverlay(width); overlay != "" {
-		footer.WriteString("\n")
-		footer.WriteString(overlay)
-	}
-	if wizard := m.providerWizardOverlay(width); wizard != "" {
-		footer.WriteString("\n")
-		footer.WriteString(wizard)
-	}
-	if picker := m.pickerOverlay(width); picker != "" {
-		footer.WriteString("\n")
-		footer.WriteString(picker)
-	}
-	footer.WriteString("\n")
-	footer.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
 	footer.WriteString("\n")
 	footer.WriteString(m.statusLine(width))
-
-	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptView(body.String(), footer.String(), width)
-	}
-
-	return body.String() + footer.String()
+	return footer.String()
 }
 
-func (m model) scrollableTranscriptView(body string, footer string, width int) string {
+func (m model) scrollableTranscriptView(body string, footer string, width int, overlay string) string {
 	bodyLines := viewLines(body)
 	footerLines := viewLines(footer)
+	maxFooterLines := maxInt(0, m.height-1)
+	if len(footerLines) > maxFooterLines {
+		footerLines = footerLines[len(footerLines)-maxFooterLines:]
+	}
 	available := m.height - len(footerLines)
 	if available < 1 {
 		available = 1
@@ -973,11 +975,98 @@ func (m model) scrollableTranscriptView(body string, footer string, width int) s
 	for len(lines) < available {
 		lines = append(lines, "")
 	}
+	lines = overlayViewportLines(lines, overlay, width)
 	lines = append(lines, footerLines...)
 	for index, line := range lines {
 		lines[index] = fitStyledLine(line, width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func overlayViewportLines(lines []string, overlay string, width int) []string {
+	if strings.TrimSpace(overlay) == "" || len(lines) == 0 {
+		return lines
+	}
+	overlayLines := viewLines(overlay)
+	if len(overlayLines) == 0 {
+		return lines
+	}
+	left, overlayLines, overlayWidth := normalizeOverlayBlock(overlayLines, width)
+	if overlayWidth <= 0 {
+		return lines
+	}
+	start := maxInt(0, (len(lines)-len(overlayLines))/2)
+	for offset, line := range overlayLines {
+		target := start + offset
+		if target >= len(lines) {
+			break
+		}
+		lines[target] = overlayViewportLine(lines[target], line, left, overlayWidth, width)
+	}
+	return lines
+}
+
+func normalizeOverlayBlock(lines []string, width int) (int, []string, int) {
+	left := -1
+	for _, line := range lines {
+		if strings.TrimSpace(ansi.Strip(line)) == "" {
+			continue
+		}
+		spaces := leadingPlainSpaces(line)
+		if left < 0 || spaces < left {
+			left = spaces
+		}
+	}
+	if left < 0 {
+		left = 0
+	}
+	left = minInt(left, maxInt(0, width-1))
+
+	trimmed := make([]string, 0, len(lines))
+	blockWidth := 0
+	for _, line := range lines {
+		if left > 0 && len(line) >= left {
+			line = line[left:]
+		}
+		trimmed = append(trimmed, line)
+		blockWidth = maxInt(blockWidth, lipgloss.Width(line))
+	}
+	blockWidth = minInt(blockWidth, maxInt(0, width-left))
+	return left, trimmed, blockWidth
+}
+
+func leadingPlainSpaces(line string) int {
+	spaces := 0
+	for spaces < len(line) && line[spaces] == ' ' {
+		spaces++
+	}
+	return spaces
+}
+
+func overlayViewportLine(base string, overlay string, left int, overlayWidth int, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	left = clampInt(left, 0, width)
+	overlayWidth = minInt(overlayWidth, width-left)
+	rightStart := minInt(width, left+overlayWidth)
+
+	base = fitStyledLine(base, width)
+	prefix := padStyledLine(ansi.Cut(base, 0, left), left)
+	panel := padStyledLine(overlay, overlayWidth)
+	suffix := padStyledLine(ansi.Cut(base, rightStart, width), width-rightStart)
+	return prefix + panel + suffix
+}
+
+func padStyledLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	line = fitStyledLine(line, width)
+	if pad := width - lipgloss.Width(line); pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	return line
 }
 
 func viewLines(value string) []string {
@@ -1028,12 +1117,15 @@ func (m model) composerLine(width int) string {
 	if m.pending {
 		input.Placeholder = composerPlaceholderRunning
 	}
+	if m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value())) {
+		input.SetValue("")
+		input.Placeholder = ""
+		input.CursorEnd()
+	}
 	hint := ""
 	switch {
 	case m.pending:
 		hint = zeroTheme.faint.Render("esc stop")
-	case strings.TrimSpace(m.composerValue()) != "":
-		hint = zeroTheme.faint.Render("run ↵")
 	}
 	if m.composerActive && strings.Contains(m.composer.text, "\n") {
 		line := renderComposerState(m.composer, m.input.Prompt, width)
@@ -1044,11 +1136,65 @@ func (m model) composerLine(width int) string {
 		lines[len(lines)-1] = joinHeaderLine(fitStyledLine(lines[len(lines)-1], width-lipgloss.Width(hint)-2), hint, width)
 		return strings.Join(lines, "\n")
 	}
+	argumentHint := commandArgumentHintForInput(input.Value())
+	if argumentHint != "" && input.Position() != len([]rune(input.Value())) {
+		argumentHint = ""
+	}
+	if argumentHint != "" {
+		input.Width = 0
+		line := commandArgumentHintComposerLine(input, argumentHint)
+		if hint == "" {
+			return fitStyledLine(line, width)
+		}
+		return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+	}
 	line := input.View()
 	if hint == "" {
 		return fitStyledLine(line, width)
 	}
 	return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+}
+
+func commandArgumentHintComposerLine(input textinput.Model, argumentHint string) string {
+	hintRunes := []rune(argumentHint)
+	if len(hintRunes) == 0 {
+		return input.View()
+	}
+	input.Cursor.TextStyle = zeroTheme.faint
+	input.Cursor.SetChar(string(hintRunes[0]))
+	displayValue := strings.TrimRightFunc(input.Value(), unicode.IsSpace)
+	return input.PromptStyle.Render(input.Prompt) +
+		input.TextStyle.Inline(true).Render(displayValue) +
+		zeroTheme.faint.Render(" ") +
+		input.Cursor.View() +
+		zeroTheme.faint.Render(string(hintRunes[1:]))
+}
+
+func commandArgumentHintForInput(value string) string {
+	command := parseCommand(value)
+	if command.name == "" || strings.TrimSpace(command.text) != "" {
+		return ""
+	}
+	return commandRequiredInputHint(command.name)
+}
+
+func (m model) composerBox(width int) string {
+	if width < 8 {
+		return fitStyledLine(m.composerLine(width), width)
+	}
+	innerWidth := maxInt(1, width-4)
+	content := m.composerLine(innerWidth)
+	lines := strings.Split(content, "\n")
+
+	rendered := make([]string, 0, len(lines)+2)
+	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", width-2)+"╮"))
+	for _, line := range lines {
+		fitted := fitStyledLine(line, innerWidth)
+		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+	}
+	rendered = append(rendered, m.composerDividerLine(width))
+	return strings.Join(rendered, "\n")
 }
 
 // startsTurn reports whether a row begins a new conversational turn and therefore
@@ -1149,7 +1295,13 @@ func permissionDecisionReason(decision permissionDecision) string {
 // the picker. Behavior is identical to running "/model <id>", "/effort <v>",
 // or "/mode <name>".
 func (m model) choosePicker() (tea.Model, tea.Cmd) {
+	if m.modelPickerIsLoading() {
+		return m, nil
+	}
 	picker := m.picker
+	if picker != nil && picker.kind == pickerModel {
+		m.clearModelPickerLoadState()
+	}
 	m.picker = nil
 	if picker == nil {
 		return m, nil
@@ -1173,6 +1325,28 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, nil
+}
+
+func (m model) chooseSuggestion() (tea.Model, tea.Cmd) {
+	if !m.suggestionsActive() || len(m.suggestions) == 0 {
+		return m, nil
+	}
+	wasFiles := m.suggestionsAreFiles
+	wasDirectory := m.selectedSuggestionIsDirectory()
+	requiresInput := m.selectedCommandSuggestionRequiresInput()
+	next := m.completeSuggestion()
+	next.resetComposerFromInput()
+	if wasFiles && wasDirectory {
+		next.recomputeSuggestions()
+		return next, nil
+	}
+	if !wasFiles {
+		if requiresInput {
+			return next, nil
+		}
+		return next.handleSubmit()
+	}
+	return next, nil
 }
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
@@ -1250,9 +1424,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
 				return m, nil
 			}
-			if picker := m.newModelPicker(); picker != nil {
-				m.picker = picker
-				return m, m.modelPickerDiscoveryCmd()
+			next, cmd := m.openModelPicker()
+			if next.picker != nil {
+				return next, cmd
 			}
 		}
 		text := ""

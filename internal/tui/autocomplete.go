@@ -2,8 +2,13 @@ package tui
 
 import (
 	"io/fs"
+	"path"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/workspaceindex"
 )
@@ -15,24 +20,54 @@ type commandSuggestion struct {
 	Desc string
 }
 
-// maxCommandSuggestions caps how many rows the autocomplete overlay shows so a
-// short prefix can't flood the screen.
-const maxCommandSuggestions = 8
+const (
+	// maxCommandSuggestions caps command matches kept in memory; rendering still
+	// shows a smaller window so a bare "/" can report the remaining commands.
+	maxCommandSuggestions = 32
+	maxFileSuggestions    = 16
+)
+
+const fileIndexTTL = 30 * time.Second
+
+type fileSuggestionIndex struct {
+	files []string
+	dirs  []string
+}
+
+type cachedFileSuggestionIndex struct {
+	index     fileSuggestionIndex
+	expiresAt time.Time
+}
+
+type fileSuggestionCandidate struct {
+	path  string
+	isDir bool
+}
+
+var fileSuggestionIndexCache = struct {
+	sync.Mutex
+	entries map[string]cachedFileSuggestionIndex
+}{entries: map[string]cachedFileSuggestionIndex{}}
 
 // suggestionsActive reports whether the autocomplete overlay should drive key
-// handling: the input is a slash-command fragment, there is at least one match,
-// and no modal (permission / questionnaire) is competing for keys.
+// handling. A slash-command palette stays active even with zero matches so the
+// query remains in the palette instead of leaking back into the composer.
 func (m model) suggestionsActive() bool {
 	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil || m.providerWizard != nil {
 		return false
 	}
-	return len(m.suggestions) > 0
+	if len(m.suggestions) > 0 {
+		return true
+	}
+	return m.commandPaletteOpen || m.filePaletteOpen
 }
 
 func (m *model) clearSuggestions() {
 	m.suggestions = nil
 	m.suggestionIdx = 0
 	m.suggestionsAreFiles = false
+	m.commandPaletteOpen = false
+	m.filePaletteOpen = false
 }
 
 // recomputeSuggestions rebuilds the autocomplete match list from the current
@@ -49,9 +84,11 @@ func (m *model) recomputeSuggestions() {
 
 	// File reference: a trailing "@token" (even mid-prompt) drives a workspace
 	// file picker. Checked before the slash path so "@" is handled distinctly.
-	if token, ok := trailingAtToken(value); ok {
+	if query := extractPathQuery(value, m.input.Position()); query != nil {
+		m.commandPaletteOpen = false
+		m.filePaletteOpen = true
 		m.suggestionsAreFiles = true
-		m.suggestions = fileSuggestions(m.cwd, token)
+		m.suggestions = fileSuggestions(m.cwd, query.Query)
 		if m.suggestionIdx >= len(m.suggestions) || m.suggestionIdx < 0 {
 			m.suggestionIdx = 0
 		}
@@ -59,21 +96,17 @@ func (m *model) recomputeSuggestions() {
 	}
 	m.suggestionsAreFiles = false
 
+	if !commandSuggestionsOpen(value) {
+		m.suggestions = nil
+		m.suggestionIdx = 0
+		m.commandPaletteOpen = false
+		m.filePaletteOpen = false
+		return
+	}
 	trimmed := strings.TrimLeft(value, " ")
-	// A leading slash token (no whitespace yet) drives the command palette. A bare
-	// "/" now lists the full palette (the footer advertises "/ commands").
-	if !strings.HasPrefix(trimmed, "/") || strings.ContainsAny(trimmed, " \t") {
-		m.suggestions = nil
-		m.suggestionIdx = 0
-		return
-	}
 	token := strings.TrimSpace(trimmed)
-	if token == "" {
-		m.suggestions = nil
-		m.suggestionIdx = 0
-		return
-	}
 
+	m.commandPaletteOpen = true
 	matches := matchCommandSuggestions(token)
 	m.suggestions = matches
 	if m.suggestionIdx >= len(matches) {
@@ -82,6 +115,56 @@ func (m *model) recomputeSuggestions() {
 	if m.suggestionIdx < 0 {
 		m.suggestionIdx = 0
 	}
+}
+
+func commandSuggestionsOpen(value string) bool {
+	trimmed := strings.TrimLeft(value, " ")
+	return strings.HasPrefix(trimmed, "/") && strings.TrimSpace(trimmed) != "" && !strings.ContainsAny(trimmed, " \t")
+}
+
+func fileSuggestionOnlyInput(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return strings.HasPrefix(trimmed, "@") && !strings.ContainsAny(trimmed, " \t\n")
+}
+
+type pathQuery struct {
+	Query      string
+	StartIndex int
+	EndIndex   int
+}
+
+func extractPathQuery(text string, cursorPos int) *pathQuery {
+	runes := []rune(text)
+	cursorPos = clampInt(cursorPos, 0, len(runes))
+	at := -1
+	for i := cursorPos - 1; i >= 0; i-- {
+		if runes[i] == '@' {
+			at = i
+			break
+		}
+		if isPathQueryBoundary(runes[i]) {
+			break
+		}
+	}
+	if at < 0 {
+		return nil
+	}
+	end := at + 1
+	for end < len(runes) && !isPathQueryBoundary(runes[end]) {
+		end++
+	}
+	if cursorPos > end {
+		return nil
+	}
+	return &pathQuery{
+		Query:      string(runes[at+1 : end]),
+		StartIndex: at,
+		EndIndex:   end,
+	}
+}
+
+func isPathQueryBoundary(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
 // matchCommandSuggestions returns commands whose canonical name or any alias has
@@ -93,7 +176,7 @@ func matchCommandSuggestions(token string) []commandSuggestion {
 	if prefix == "" {
 		return nil
 	}
-	out := make([]commandSuggestion, 0, maxCommandSuggestions)
+	out := make([]commandSuggestion, 0, minInt(maxCommandSuggestions, len(commandDefinitions)))
 	for _, command := range commandDefinitions {
 		if !commandHasPrefix(command, prefix) {
 			continue
@@ -128,10 +211,11 @@ func (m *model) moveSuggestion(delta int) {
 	m.suggestionIdx = ((m.suggestionIdx+delta)%n + n) % n
 }
 
-// completeSuggestion replaces the input with the selected command name plus a
-// trailing space (ready for arguments) and dismisses the overlay.
+// completeSuggestion replaces the input with the selected suggestion and
+// dismisses the overlay. Required-argument commands stay tight ("/spec") so
+// the rendered argument hint can sit next to the cursor without dead padding.
 func (m model) completeSuggestion() model {
-	if !m.suggestionsActive() {
+	if !m.suggestionsActive() || len(m.suggestions) == 0 {
 		return m
 	}
 	idx := m.suggestionIdx
@@ -140,17 +224,46 @@ func (m model) completeSuggestion() model {
 	}
 	chosen := m.suggestions[idx].Name
 	if m.suggestionsAreFiles {
+		isDir := fileSuggestionIsDirectory(m.suggestions[idx])
 		// Replace only the trailing "@token" with the chosen path so any preceding
 		// prompt text ("read @foo") is preserved.
-		m.input.SetValue(replaceTrailingAtToken(m.input.Value(), chosen) + " ")
+		nextValue, nextCursor := completePathQueryWithTrailingSpace(m.input.Value(), m.input.Position(), chosen, !isDir)
+		m.input.SetValue(nextValue)
+		m.input.SetCursor(nextCursor)
 	} else {
-		m.input.SetValue(chosen + " ")
+		if commandSelectionRequiresInput(chosen) {
+			m.input.SetValue(chosen)
+		} else {
+			m.input.SetValue(chosen + " ")
+		}
+		m.input.CursorEnd()
 	}
-	m.input.CursorEnd()
 	m.suggestions = nil
 	m.suggestionIdx = 0
 	m.suggestionsAreFiles = false
+	m.commandPaletteOpen = false
+	m.filePaletteOpen = false
 	return m
+}
+
+func (m model) selectedSuggestionIsDirectory() bool {
+	if !m.suggestionsAreFiles || len(m.suggestions) == 0 {
+		return false
+	}
+	idx := clampInt(m.suggestionIdx, 0, len(m.suggestions)-1)
+	return fileSuggestionIsDirectory(m.suggestions[idx])
+}
+
+func (m model) selectedCommandSuggestionRequiresInput() bool {
+	if m.suggestionsAreFiles || len(m.suggestions) == 0 {
+		return false
+	}
+	idx := clampInt(m.suggestionIdx, 0, len(m.suggestions)-1)
+	return commandSelectionRequiresInput(m.suggestions[idx].Name)
+}
+
+func fileSuggestionIsDirectory(suggestion commandSuggestion) bool {
+	return suggestion.Desc == "directory" || strings.HasSuffix(suggestion.Name, "/")
 }
 
 // trailingAtToken returns the file-reference fragment at the end of value: the
@@ -175,14 +288,47 @@ func replaceTrailingAtToken(value, path string) string {
 	return path
 }
 
+func completePathQuery(value string, cursorPos int, selectedPath string) (string, int) {
+	return completePathQueryWithTrailingSpace(value, cursorPos, selectedPath, true)
+}
+
+func completePathQueryWithTrailingSpace(value string, cursorPos int, selectedPath string, trailingSpace bool) (string, int) {
+	query := extractPathQuery(value, cursorPos)
+	suffix := ""
+	if trailingSpace {
+		suffix = " "
+	}
+	if query == nil {
+		next := replaceTrailingAtToken(value, selectedPath) + suffix
+		return next, len([]rune(next))
+	}
+	replacement := []rune(selectedPath + suffix)
+	runes := []rune(value)
+	out := make([]rune, 0, len(runes)-query.EndIndex+query.StartIndex+len(replacement))
+	out = append(out, runes[:query.StartIndex]...)
+	out = append(out, replacement...)
+	out = append(out, runes[query.EndIndex:]...)
+	return string(out), query.StartIndex + len(replacement)
+}
+
+func removeTrailingAtToken(value string) string {
+	if _, ok := trailingAtToken(value); !ok {
+		return value
+	}
+	if i := strings.LastIndexAny(value, " \t\n"); i >= 0 {
+		return value[:i+1]
+	}
+	return ""
+}
+
 // maxFileWalk bounds how many filesystem entries the "@file" picker visits per
 // keystroke so a large workspace tree can't stall the TUI.
 const maxFileWalk = 4000
 
-// fileSuggestions lists workspace files whose path matches partial (case-
-// insensitive substring), for the "@file" picker. The walk skips VCS/dependency/
-// hidden directories and is bounded so it stays responsive per keystroke. Each
-// suggestion's Name is the "@<relpath>" token that completion inserts.
+// fileSuggestions lists ranked workspace files and directories for the "@file"
+// picker. The walk skips VCS/dependency directories, is TTL-cached, and is
+// bounded so it stays responsive. Each suggestion's Name is the "@<relpath>"
+// token that completion inserts.
 func fileSuggestions(cwd, partial string) []commandSuggestion {
 	return fileSuggestionsBounded(cwd, partial, maxFileWalk)
 }
@@ -194,14 +340,35 @@ func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSugges
 	if cwd == "" {
 		return nil
 	}
-	needle := strings.ToLower(strings.TrimSpace(partial))
-	out := make([]commandSuggestion, 0, maxCommandSuggestions)
+	index := cachedFileSuggestionsIndex(cwd, maxVisited)
+	return rankedFileSuggestions(index, partial, maxFileSuggestions)
+}
+
+func cachedFileSuggestionsIndex(cwd string, maxVisited int) fileSuggestionIndex {
+	key := filepath.Clean(cwd) + "\x00" + strconv.Itoa(maxVisited)
+	now := time.Now()
+	fileSuggestionIndexCache.Lock()
+	if cached, ok := fileSuggestionIndexCache.entries[key]; ok && now.Before(cached.expiresAt) {
+		fileSuggestionIndexCache.Unlock()
+		return cached.index
+	}
+	fileSuggestionIndexCache.Unlock()
+
+	index := buildFileSuggestionsIndex(cwd, maxVisited)
+	fileSuggestionIndexCache.Lock()
+	fileSuggestionIndexCache.entries[key] = cachedFileSuggestionIndex{index: index, expiresAt: now.Add(fileIndexTTL)}
+	fileSuggestionIndexCache.Unlock()
+	return index
+}
+
+func buildFileSuggestionsIndex(cwd string, maxVisited int) fileSuggestionIndex {
+	index := fileSuggestionIndex{}
 	visited := 0
-	_ = filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(cwd, func(currentPath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if visited >= maxVisited || len(out) >= maxCommandSuggestions {
+		if visited >= maxVisited {
 			return fs.SkipAll
 		}
 		// Count every entry (directories included) so the walk is bounded even in
@@ -209,14 +376,21 @@ func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSugges
 		// could be traversed in full on each keystroke and stall the TUI.
 		visited++
 		if d.IsDir() {
-			if path != cwd && workspaceindex.ShouldSkipDir(d.Name()) {
+			if currentPath != cwd && workspaceindex.ShouldSkipDir(d.Name()) {
 				return fs.SkipDir
+			}
+			if currentPath != cwd {
+				rel, relErr := filepath.Rel(cwd, currentPath)
+				if relErr == nil {
+					rel = filepath.ToSlash(rel)
+					index.dirs = append(index.dirs, rel)
+				}
 			}
 			return nil
 		}
-		rel, relErr := filepath.Rel(cwd, path)
+		rel, relErr := filepath.Rel(cwd, currentPath)
 		if relErr != nil {
-			rel = filepath.Base(path)
+			rel = filepath.Base(currentPath)
 		}
 		// Emit forward-slash paths on every platform (filepath.Rel uses "\" on
 		// Windows) so the inserted "@path" token is portable and matchable.
@@ -224,17 +398,147 @@ func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSugges
 		if workspaceindex.ShouldSkipFile(rel) {
 			return nil
 		}
-		if needle == "" || strings.Contains(strings.ToLower(rel), needle) {
-			out = append(out, commandSuggestion{Name: "@" + rel, Desc: "file"})
-		}
+		index.files = append(index.files, rel)
 		return nil
 	})
+	sort.Strings(index.files)
+	sort.Strings(index.dirs)
+	return index
+}
+
+func rankedFileSuggestions(index fileSuggestionIndex, partial string, limit int) []commandSuggestion {
+	query := strings.ToLower(strings.TrimSpace(partial))
+	candidates := make([]fileSuggestionCandidate, 0, len(index.files)+len(index.dirs))
+	for _, file := range index.files {
+		candidates = append(candidates, fileSuggestionCandidate{path: file})
+	}
+	for _, dir := range index.dirs {
+		candidates = append(candidates, fileSuggestionCandidate{path: dir, isDir: true})
+	}
+	type scoredCandidate struct {
+		candidate fileSuggestionCandidate
+		score     int
+	}
+	scored := make([]scoredCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		score, ok := scoreFileSuggestion(candidate, query)
+		if ok {
+			scored = append(scored, scoredCandidate{candidate: candidate, score: score})
+		}
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		left, right := scored[i], scored[j]
+		if left.score != right.score {
+			return left.score < right.score
+		}
+		leftDepth := strings.Count(left.candidate.path, "/")
+		rightDepth := strings.Count(right.candidate.path, "/")
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		if left.candidate.isDir != right.candidate.isDir {
+			return !left.candidate.isDir
+		}
+		return left.candidate.path < right.candidate.path
+	})
+
+	out := make([]commandSuggestion, 0, minInt(limit, len(scored)))
+	for _, item := range scored {
+		if len(out) >= limit {
+			break
+		}
+		name := "@" + item.candidate.path
+		desc := "file"
+		if item.candidate.isDir {
+			name += "/"
+			desc = "directory"
+		}
+		out = append(out, commandSuggestion{Name: name, Desc: desc})
+	}
 	return out
 }
 
-// dismissSuggestions clears the overlay without touching the input or the run.
+func scoreFileSuggestion(candidate fileSuggestionCandidate, query string) (int, bool) {
+	cleanPath := strings.TrimSuffix(filepath.ToSlash(candidate.path), "/")
+	base := strings.ToLower(path.Base(cleanPath))
+	full := strings.ToLower(cleanPath)
+	depth := strings.Count(cleanPath, "/")
+	dirPenalty := 0
+	if candidate.isDir {
+		dirPenalty = 5
+	}
+	if query == "" {
+		return depth*20 + len(base)/8 + dirPenalty, true
+	}
+	switch {
+	case base == query:
+		return 0 + depth + dirPenalty, true
+	case strings.HasPrefix(base, query):
+		return 20 + depth + dirPenalty, true
+	case strings.Contains(base, query):
+		return 40 + depth + dirPenalty, true
+	case strings.HasPrefix(full, query):
+		return 60 + depth + dirPenalty, true
+	case strings.Contains(full, query):
+		return 80 + depth + dirPenalty, true
+	default:
+		if gap, ok := fuzzySubsequenceGap(full, query); ok {
+			return 120 + gap + depth + dirPenalty, true
+		}
+		return 0, false
+	}
+}
+
+func fuzzySubsequenceGap(value, query string) (int, bool) {
+	if query == "" {
+		return 0, true
+	}
+	valueRunes := []rune(value)
+	gap := 0
+	last := -1
+	pos := 0
+	for _, q := range query {
+		found := -1
+		for pos < len(valueRunes) {
+			if valueRunes[pos] == q {
+				found = pos
+				pos++
+				break
+			}
+			pos++
+		}
+		if found < 0 {
+			return 0, false
+		}
+		if last >= 0 {
+			gap += found - last - 1
+		}
+		last = found
+	}
+	return gap, true
+}
+
+// dismissSuggestions clears the overlay without touching the run. Command
+// palette dismissal also clears the leading slash fragment because the palette
+// owns that search text while it is open.
 func (m model) dismissSuggestions() model {
+	if m.suggestionsAreFiles {
+		if query := extractPathQuery(m.input.Value(), m.input.Position()); query != nil {
+			runes := []rune(m.input.Value())
+			next := make([]rune, 0, len(runes)-(query.EndIndex-query.StartIndex))
+			next = append(next, runes[:query.StartIndex]...)
+			next = append(next, runes[query.EndIndex:]...)
+			m.input.SetValue(string(next))
+			m.input.SetCursor(query.StartIndex)
+		}
+		m.resetComposerFromInput()
+	} else {
+		m.clearComposer()
+	}
 	m.suggestions = nil
 	m.suggestionIdx = 0
+	m.suggestionsAreFiles = false
+	m.commandPaletteOpen = false
+	m.filePaletteOpen = false
 	return m
 }
