@@ -135,6 +135,13 @@ func runHooks(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 }
 
 func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runMCPWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runMCPWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "mcp subcommand required. Use `zero mcp permissions list`.")
 	}
@@ -144,10 +151,20 @@ func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 			return exitCrash
 		}
 		return exitSuccess
+	case "add":
+		return runMCPAdd(args[1:], stdout, stderr, deps)
+	case "remove", "rm":
+		return runMCPRemove(args[1:], stdout, stderr, deps)
+	case "enable":
+		return runMCPToggle(args[1:], stdout, stderr, deps, false)
+	case "disable":
+		return runMCPToggle(args[1:], stdout, stderr, deps, true)
+	case "check":
+		return runMCPCheck(ctx, args[1:], stdout, stderr, deps)
 	case "permissions":
 		return runMCPPermissions(args[1:], stdout, stderr, deps)
 	case "tools":
-		return runMCPTools(args[1:], stdout, stderr, deps)
+		return runMCPTools(ctx, args[1:], stdout, stderr, deps)
 	case "oauth":
 		return runMCPOAuth(args[1:], stdout, stderr, deps)
 	case "list":
@@ -173,7 +190,7 @@ func runMCPLegacyList(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		if options.json {
 			forwarded = append(forwarded, "--json")
 		}
-		return runMCPTools(forwarded, stdout, stderr, deps)
+		return runMCPTools(context.Background(), forwarded, stdout, stderr, deps)
 	}
 
 	cwd, err := deps.getwd()
@@ -200,7 +217,7 @@ func runMCPLegacyList(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, formatMCPServerList(cfg.Servers)); err != nil {
+	if _, err := fmt.Fprintln(stdout, redaction.RedactString(formatMCPServerList(cfg.Servers), redaction.Options{})); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -224,12 +241,16 @@ func redactMCPServerConfigs(servers map[string]config.MCPServerConfig) map[strin
 				clone.Headers[key] = "[REDACTED]"
 			}
 		}
+		clone.URL = redactMCPURL(clone.URL, "[REDACTED]")
 		redacted[name] = clone
 	}
 	return redacted
 }
 
-func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runMCPTools(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "mcp tools subcommand required. Use `zero mcp tools list`.")
 	}
@@ -257,11 +278,11 @@ func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 		}
 		registry := tools.NewRegistry()
-		runtime, err := registerMCPToolsForWorkspace(context.Background(), cwd, registry, deps, mcp.AutonomyLow)
+		mcpRuntime, err := registerMCPToolsForWorkspace(ctx, cwd, registry, deps, mcp.AutonomyLow)
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
-		defer closeMCPRuntime(stderr, runtime)
+		defer closeMCPRuntime(stderr, mcpRuntime)
 		items := mcpToolList(registry)
 		if options.json {
 			payload := struct {
@@ -563,10 +584,15 @@ func writeMCPHelp(w io.Writer) error {
   zero mcp <command>
 
 Commands:
-  list           List configured MCP servers, or tools with --tools
-  oauth          Manage OAuth credentials for remote MCP servers
-  permissions    Manage persistent MCP tool permissions
-  tools          Inspect configured MCP tools
+  add <server>      Add or update an MCP server in user config
+  remove <server>   Remove an MCP server from user config
+  enable <server>   Enable a user-configured MCP server
+  disable <server>  Disable a user-configured MCP server
+  check <server>    Connect to one MCP server and list its tools
+  list              List configured MCP servers, or tools with --tools
+  oauth             Manage OAuth credentials for remote MCP servers
+  permissions       Manage persistent MCP tool permissions
+  tools             Inspect configured MCP tools
 `)
 	return err
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -31,6 +32,10 @@ type Options struct {
 	Registry               *tools.Registry
 	SessionStore           *sessions.Store
 	SandboxStore           *sandbox.GrantStore
+	MCPConfig              config.MCPConfig
+	MCPPermissionStore     *mcp.PermissionStore
+	MCPTokenStore          *mcp.TokenStore
+	MCPCommand             func(context.Context, []string) MCPCommandResult
 	UsageTracker           *usage.Tracker
 	SessionCompactor       SessionCompactor
 
@@ -50,6 +55,13 @@ type Options struct {
 	// Setup configures the first-run/setup takeover. It is shown before the
 	// normal chat surface when Visible is true.
 	Setup SetupOptions
+}
+
+type MCPCommandResult struct {
+	Config   config.MCPConfig
+	Output   string
+	Error    string
+	ExitCode int
 }
 
 // SetupOptions configures the guided first-run provider setup takeover.

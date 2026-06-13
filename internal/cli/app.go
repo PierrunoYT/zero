@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -439,8 +440,29 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
-	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, mcp.AutonomyLow)
+	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot)
 	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+	mcpPermissionStore, err := deps.newMCPStore()
+	if err != nil {
+		return writeAppError(stderr, "failed to initialize MCP permissions: "+err.Error(), 1)
+	}
+	mcpTokenStore, err := deps.newMCPTokenStore()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "[zero] warning: failed to initialize MCP OAuth tokens: %s\n", err)
+		mcpTokenStore = nil
+		err = nil
+	}
+	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
+	if len(mcpConfig.Servers) > 0 {
+		mcpRuntime, err = deps.registerMCPTools(context.Background(), registry, mcpConfig, mcp.RegisterOptions{
+			PermissionStore: mcpPermissionStore,
+			Autonomy:        mcp.AutonomyLow,
+		})
+	}
+	if err != nil {
+		closeMCPRuntime(stderr, mcpRuntime)
 		return writeAppError(stderr, err.Error(), 1)
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
@@ -481,18 +503,40 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
 		Scope:         scope,
 	})
+	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
-		Cwd:             workspaceRoot,
-		UserConfigPath:  userConfigPath,
-		ProviderName:    resolved.Provider.Name,
-		ModelName:       resolved.Provider.Model,
-		ProviderProfile: resolved.Provider,
-		FavoriteModels:  resolved.Preferences.FavoriteModels,
-		Provider:        provider,
-		NewProvider:     deps.newProvider,
-		Registry:        registry,
-		SessionStore:    deps.newSessionStore(),
-		SandboxStore:    sandboxStore,
+		Cwd:                workspaceRoot,
+		UserConfigPath:     userConfigPath,
+		ProviderName:       resolved.Provider.Name,
+		ModelName:          resolved.Provider.Model,
+		ProviderProfile:    resolved.Provider,
+		FavoriteModels:     resolved.Preferences.FavoriteModels,
+		Provider:           provider,
+		NewProvider:        deps.newProvider,
+		Registry:           registry,
+		SessionStore:       deps.newSessionStore(),
+		SandboxStore:       sandboxStore,
+		MCPConfig:          mcpConfig,
+		MCPPermissionStore: mcpPermissionStore,
+		MCPTokenStore:      mcpTokenStore,
+		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			var stdout, stderr bytes.Buffer
+			exitCode := runMCPWithContext(ctx, args, &stdout, &stderr, deps)
+			nextConfig := lastKnownMCPConfig
+			if refreshed, err := deps.resolveMCPConfig(workspaceRoot); err == nil {
+				lastKnownMCPConfig = refreshed
+				nextConfig = refreshed
+			}
+			return tui.MCPCommandResult{
+				Config:   nextConfig,
+				Output:   strings.TrimSpace(stdout.String()),
+				Error:    strings.TrimSpace(stderr.String()),
+				ExitCode: exitCode,
+			}
+		},
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,

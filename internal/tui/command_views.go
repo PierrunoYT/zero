@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -42,6 +45,205 @@ func (m model) toolsText() string {
 			},
 		},
 	})
+}
+
+func (m *model) mcpText() string {
+	width := 0
+	if m.width > 0 {
+		width = chatWidth(m.width)
+	}
+	return renderMCPView(m.mcpViewState(), width)
+}
+
+func (m *model) refreshMCPViewState() {
+	m.mcpViewStateCache = BuildMCPViewState(MCPStateOptions{
+		Config:          m.mcpConfig,
+		Registry:        m.registry,
+		PermissionStore: m.mcpPermissionStore,
+		PermissionMode:  string(m.permissionMode),
+		TokenStore:      m.mcpTokenStore,
+	})
+	m.mcpViewStateReady = true
+}
+
+func (m *model) mcpViewState() MCPViewState {
+	if m.mcpViewStateReady {
+		return m.mcpViewStateCache
+	}
+	// Older tests may construct a zero-value model; keep that path useful, while
+	// production refreshes the cache before any MCP view can render.
+	m.refreshMCPViewState()
+	return m.mcpViewStateCache
+}
+
+func (m model) startMCPTranscriptCommand(args string) (model, tea.Cmd) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: m.mcpText()})
+		return m, nil
+	}
+	parsedArgs, err := splitMCPCommandArgs(args)
+	if err != nil {
+		text := strings.Join([]string{
+			"MCP action failed",
+			err.Error(),
+			"",
+			m.mcpText(),
+		}, "\n")
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
+		return m, nil
+	}
+	return m.startMCPCommand(mcpCommandRequest{origin: mcpCommandOriginTranscript, raw: args, args: parsedArgs})
+}
+
+func (m model) startMCPCommand(request mcpCommandRequest) (model, tea.Cmd) {
+	if m.mcpCommand == nil {
+		result := MCPCommandResult{
+			ExitCode: 1,
+			Error:    "MCP action unavailable",
+			Config:   m.mcpConfig,
+		}
+		return m.applyMCPCommandResultMessage(mcpCommandResultMsg{request: request, result: result}), nil
+	}
+	m.cancelMCPCommand()
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	m.mcpCommandSeq++
+	request.id = m.mcpCommandSeq
+	request.args = append([]string{}, request.args...)
+	m.mcpCommandCancel = cancel
+	runner := m.mcpCommand
+	return m, func() tea.Msg {
+		return mcpCommandResultMsg{
+			request: request,
+			result:  runner(ctx, request.args),
+		}
+	}
+}
+
+func (m *model) cancelMCPCommand() {
+	if m.mcpCommandCancel != nil {
+		m.mcpCommandCancel()
+		m.mcpCommandCancel = nil
+		m.mcpCommandSeq++
+	}
+}
+
+func (m model) applyMCPCommandResultMessage(msg mcpCommandResultMsg) model {
+	if msg.request.id != 0 && msg.request.id != m.mcpCommandSeq {
+		return m
+	}
+	m.mcpCommandCancel = nil
+	switch msg.request.origin {
+	case mcpCommandOriginManager:
+		text := ""
+		m, text = m.applyMCPCommandResult(strings.Join(msg.request.args, " "), msg.result)
+		m.mcpManager = &mcpManagerState{selected: msg.request.managerSelected, query: msg.request.managerQuery}
+		if items := m.mcpManagerItems(); len(items) > 0 {
+			m.mcpManager.selected = clampInt(m.mcpManager.selected, 0, len(items)-1)
+		}
+		if text != "" {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
+		}
+	case mcpCommandOriginWizard:
+		m = m.applyMCPAddWizardSaveResult(msg.result, msg.request.wizardDisabled)
+	default:
+		text := ""
+		m, text = m.applyMCPCommandResult(msg.request.raw, msg.result)
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
+	}
+	return m
+}
+
+func (m model) applyMCPCommandResult(args string, result MCPCommandResult) (model, string) {
+	if result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" {
+		message := strings.TrimSpace(result.Error)
+		if message == "" {
+			message = strings.TrimSpace(result.Output)
+		}
+		if message == "" {
+			message = "MCP command failed"
+		}
+		return m, strings.Join([]string{
+			"MCP action failed",
+			message,
+			"",
+			m.mcpText(),
+		}, "\n")
+	}
+	if len(result.Config.Servers) > 0 || len(m.mcpConfig.Servers) > 0 {
+		m.mcpConfig = result.Config
+		m.refreshMCPViewState()
+	}
+	output := strings.TrimSpace(result.Output)
+	if output == "" {
+		output = "zero mcp " + args
+	}
+	return m, strings.Join([]string{
+		"MCP action complete",
+		output,
+		"",
+		m.mcpText(),
+	}, "\n")
+}
+
+func splitMCPCommandArgs(args string) ([]string, error) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return nil, nil
+	}
+	out := []string{}
+	var current strings.Builder
+	var quote rune
+	hasToken := false
+	runes := []rune(args)
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				hasToken = true
+				continue
+			}
+			if r == '\\' && index+1 < len(runes) && runes[index+1] == quote {
+				index++
+				current.WriteRune(runes[index])
+				hasToken = true
+				continue
+			}
+			current.WriteRune(r)
+			hasToken = true
+			continue
+		}
+		switch {
+		case r == '\'' || r == '"':
+			quote = r
+			hasToken = true
+		case r == '\\' && index+1 < len(runes) && (runes[index+1] == '\'' || runes[index+1] == '"' || strings.TrimSpace(string(runes[index+1])) == ""):
+			index++
+			current.WriteRune(runes[index])
+			hasToken = true
+		case strings.TrimSpace(string(r)) == "":
+			if hasToken {
+				out = append(out, current.String())
+				current.Reset()
+				hasToken = false
+			}
+		default:
+			current.WriteRune(r)
+			hasToken = true
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote in MCP command")
+	}
+	if hasToken {
+		out = append(out, current.String())
+	}
+	return out, nil
 }
 
 func (m model) permissionsText() string {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
@@ -117,6 +118,260 @@ func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *tes
 	}
 	assertCoreRegistry(t, launchedOptions.Registry)
 	assertAgentOptions(t, launchedOptions, 12, agent.PermissionModeAsk)
+}
+
+func TestRunNoArgsLaunchesTUIWithMCPState(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	mcpConfig := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}
+	permissionStore, err := mcp.NewPermissionStore(mcp.StoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json")})
+	if err != nil {
+		t.Fatalf("NewPermissionStore() error = %v", err)
+	}
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	var launchedOptions tui.Options
+	var registeredConfig config.MCPConfig
+	var registeredStore *mcp.PermissionStore
+	runtimeClosed := false
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			return mcpConfig, nil
+		},
+		newMCPStore: func() (*mcp.PermissionStore, error) {
+			return permissionStore, nil
+		},
+		newMCPTokenStore: func() (*mcp.TokenStore, error) {
+			return tokenStore, nil
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registeredConfig = cfg
+			registeredStore = options.PermissionStore
+			return closeFunc(func() error {
+				runtimeClosed = true
+				return nil
+			}), nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if _, ok := registeredConfig.Servers["docs"]; !ok {
+		t.Fatalf("registered MCP config = %#v, want docs server", registeredConfig.Servers)
+	}
+	if registeredStore != permissionStore {
+		t.Fatalf("registered PermissionStore = %#v, want launched store %#v", registeredStore, permissionStore)
+	}
+	if _, ok := launchedOptions.MCPConfig.Servers["docs"]; !ok {
+		t.Fatalf("launched MCP config = %#v, want docs server", launchedOptions.MCPConfig.Servers)
+	}
+	if launchedOptions.MCPPermissionStore != permissionStore {
+		t.Fatalf("launched MCPPermissionStore = %#v, want %#v", launchedOptions.MCPPermissionStore, permissionStore)
+	}
+	if launchedOptions.MCPTokenStore != tokenStore {
+		t.Fatalf("launched MCPTokenStore = %#v, want %#v", launchedOptions.MCPTokenStore, tokenStore)
+	}
+	if launchedOptions.MCPCommand == nil {
+		t.Fatal("launched MCPCommand runner is nil")
+	}
+	if !runtimeClosed {
+		t.Fatal("MCP runtime was not closed after TUI exits")
+	}
+}
+
+func TestTUIMCPCommandUsesLastGoodConfigOnRefreshError(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	startupConfig := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}
+	refreshedConfig := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"github": {Type: "http", URL: "https://mcp.github.example"},
+	}}
+	resolveCalls := 0
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			resolveCalls++
+			switch resolveCalls {
+			case 1:
+				return startupConfig, nil
+			case 2, 3:
+				return refreshedConfig, nil
+			default:
+				return config.MCPConfig{}, errors.New("config temporarily unavailable")
+			}
+		},
+		newMCPStore: func() (*mcp.PermissionStore, error) {
+			return mcp.NewPermissionStore(mcp.StoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json")})
+		},
+		newMCPTokenStore: func() (*mcp.TokenStore, error) {
+			return mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return closeFunc(func() error { return nil }), nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			first := options.MCPCommand(ctx, []string{"list"})
+			if _, ok := first.Config.Servers["github"]; !ok {
+				t.Fatalf("first MCP result config = %#v, want refreshed github server", first.Config.Servers)
+			}
+			second := options.MCPCommand(ctx, []string{"list"})
+			if _, ok := second.Config.Servers["github"]; !ok {
+				t.Fatalf("second MCP result config = %#v, want refreshed github server", second.Config.Servers)
+			}
+			third := options.MCPCommand(ctx, []string{"list"})
+			if _, ok := third.Config.Servers["github"]; !ok {
+				t.Fatalf("third MCP result config = %#v, want last known github server after refresh error", third.Config.Servers)
+			}
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+}
+
+func TestRunNoArgsClosesPartialMCPRuntimeWhenRegistrationFails(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	permissionStore, err := mcp.NewPermissionStore(mcp.StoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json")})
+	if err != nil {
+		t.Fatalf("NewPermissionStore() error = %v", err)
+	}
+	tokenStore, err := mcp.NewTokenStore(mcp.TokenStoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json")})
+	if err != nil {
+		t.Fatalf("NewTokenStore() error = %v", err)
+	}
+	runtimeClosed := false
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {Type: "stdio", Command: "docs-mcp"},
+			}}, nil
+		},
+		newMCPStore: func() (*mcp.PermissionStore, error) {
+			return permissionStore, nil
+		},
+		newMCPTokenStore: func() (*mcp.TokenStore, error) {
+			return tokenStore, nil
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return closeFunc(func() error {
+				runtimeClosed = true
+				return nil
+			}), errors.New("register mcp tools failed")
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			t.Fatal("TUI should not launch after MCP registration fails")
+			return 0
+		},
+	})
+
+	if exitCode == 0 {
+		t.Fatalf("exitCode = %d, want failure", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "register mcp tools failed") {
+		t.Fatalf("stderr missing registration error: %s", stderr.String())
+	}
+	if !runtimeClosed {
+		t.Fatal("partial MCP runtime was not closed after registration error")
+	}
+}
+
+func TestRunNoArgsSoftFailsMCPTokenStoreInit(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	permissionStore, err := mcp.NewPermissionStore(mcp.StoreOptions{FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json")})
+	if err != nil {
+		t.Fatalf("NewPermissionStore() error = %v", err)
+	}
+	var launchedOptions tui.Options
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 8}, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			return config.MCPConfig{}, nil
+		},
+		newMCPStore: func() (*mcp.PermissionStore, error) {
+			return permissionStore, nil
+		},
+		newMCPTokenStore: func() (*mcp.TokenStore, error) {
+			return nil, errors.New("token store unreadable")
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if launchedOptions.MCPTokenStore != nil {
+		t.Fatalf("MCPTokenStore = %#v, want nil after soft failure", launchedOptions.MCPTokenStore)
+	}
+	if !strings.Contains(stderr.String(), "warning: failed to initialize MCP OAuth tokens") {
+		t.Fatalf("stderr missing soft-failure warning: %s", stderr.String())
+	}
 }
 
 func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {

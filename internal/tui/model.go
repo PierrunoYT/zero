@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -45,6 +46,14 @@ type model struct {
 	registry               *tools.Registry
 	sessionStore           *sessions.Store
 	sandboxStore           *sandbox.GrantStore
+	mcpConfig              config.MCPConfig
+	mcpPermissionStore     *internalmcp.PermissionStore
+	mcpTokenStore          *internalmcp.TokenStore
+	mcpCommand             func(context.Context, []string) MCPCommandResult
+	mcpViewStateCache      MCPViewState
+	mcpViewStateReady      bool
+	mcpCommandSeq          int
+	mcpCommandCancel       context.CancelFunc
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
@@ -148,6 +157,8 @@ type model struct {
 	// the chosen value through the existing command handlers.
 	picker                       *commandPicker
 	providerWizard               *providerWizardState
+	mcpManager                   *mcpManagerState
+	mcpAddWizard                 *mcpAddWizardState
 	favoriteModels               map[string]bool
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
@@ -195,6 +206,29 @@ type agentResponseMsg struct {
 type agentRowMsg struct {
 	runID int
 	row   transcriptRow
+}
+
+type mcpCommandOrigin int
+
+const (
+	mcpCommandOriginTranscript mcpCommandOrigin = iota
+	mcpCommandOriginManager
+	mcpCommandOriginWizard
+)
+
+type mcpCommandRequest struct {
+	id              int
+	origin          mcpCommandOrigin
+	args            []string
+	raw             string
+	managerSelected int
+	managerQuery    string
+	wizardDisabled  bool
+}
+
+type mcpCommandResultMsg struct {
+	request mcpCommandRequest
+	result  MCPCommandResult
 }
 
 type permissionDecision = agent.PermissionDecisionAction
@@ -303,7 +337,7 @@ func newModel(ctx context.Context, options Options) model {
 	})
 	notifier.SetFocused(true)
 
-	return model{
+	m := model{
 		ctx:                    ctx,
 		cwd:                    cwd,
 		userConfigPath:         options.UserConfigPath,
@@ -318,6 +352,10 @@ func newModel(ctx context.Context, options Options) model {
 		registry:               registry,
 		sessionStore:           sessionStore,
 		sandboxStore:           sandboxStore,
+		mcpConfig:              options.MCPConfig,
+		mcpPermissionStore:     options.MCPPermissionStore,
+		mcpTokenStore:          options.MCPTokenStore,
+		mcpCommand:             options.MCPCommand,
 		agentOptions:           options.AgentOptions,
 		sessionCompactor:       options.SessionCompactor,
 		runtimeMessageSink:     options.RuntimeMessageSink,
@@ -334,6 +372,8 @@ func newModel(ctx context.Context, options Options) model {
 		setup:                  newSetupState(options.Setup),
 		setupSave:              options.Setup.Save,
 	}
+	m.refreshMCPViewState()
+	return m
 }
 
 const (
@@ -432,6 +472,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlO:
 			return m.toggleDetailedTranscript(), nil
 		case tea.KeyEsc:
+			if m.mcpCommandCancel != nil {
+				m.cancelMCPCommand()
+				if m.mcpAddWizard != nil {
+					m.mcpAddWizard.result = mcpAddWizardResult{Title: "MCP setup cancelled", State: "cancelled", Message: "MCP action was cancelled.", ActionHint: "Edit config"}
+					m.mcpAddWizard.step = mcpAddWizardStepResult
+					return m, nil
+				}
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: "MCP action cancelled"})
+				return m, nil
+			}
 			if m.transcriptDetailed {
 				m.transcriptDetailed = false
 				return m, nil
@@ -447,6 +497,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.providerWizard != nil {
 				m.providerWizard = nil
+				return m, nil
+			}
+			if m.mcpAddWizard != nil {
+				m.mcpAddWizard = nil
+				return m, nil
+			}
+			if m.mcpManager != nil {
+				m.mcpManager = nil
 				return m, nil
 			}
 			// An open picker cancels first; then an active suggestion overlay is
@@ -490,6 +548,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
 			if m.picker != nil {
 				return m.choosePicker()
 			}
@@ -515,7 +579,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.picker == nil {
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
@@ -541,6 +605,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
@@ -562,6 +632,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -582,6 +658,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
+			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
 			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
@@ -616,6 +698,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.providerWizard != nil {
 			return m.handleProviderWizardKey(msg)
+		}
+		if m.mcpAddWizard != nil {
+			return m.handleMCPAddWizardKey(msg)
+		}
+		if m.mcpManager != nil {
+			return m.handleMCPManagerKey(msg)
 		}
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
@@ -866,6 +954,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applySetupModelsDiscovered(msg), nil
 	case modelPickerModelsDiscoveredMsg:
 		return m.applyModelPickerModelsDiscovered(msg), nil
+	case mcpCommandResultMsg:
+		return m.applyMCPCommandResultMessage(msg), nil
 	}
 
 	var cmd tea.Cmd
@@ -903,11 +993,17 @@ func (m model) transcriptView() string {
 
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
+	mcpAddOverlay := m.mcpAddWizardOverlay(width)
+	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	viewportOverlay := ""
 	switch {
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
+	case mcpAddOverlay != "":
+		viewportOverlay = mcpAddOverlay
+	case mcpOverlay != "":
+		viewportOverlay = mcpOverlay
 	case pickerOverlay != "":
 		viewportOverlay = pickerOverlay
 	case suggestionOverlay != "":
@@ -1421,6 +1517,11 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil
+	case commandMCP:
+		if strings.TrimSpace(command.text) == "" {
+			return m.openMCPManager(), nil
+		}
+		return m.startMCPTranscriptCommand(command.text)
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
@@ -1584,6 +1685,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "$ " + cmdText})
 		return m, runBashEscape(m.cwd, cmdText)
 	case commandPrompt:
+		if intent, ok := detectMCPSetupIntent(command.text); ok {
+			return m.openMCPAddWizardFromIntent(intent), nil
+		}
 		return m.launchPrompt(command.text)
 	default:
 		return m, nil
