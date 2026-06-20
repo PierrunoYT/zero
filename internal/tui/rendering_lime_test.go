@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -809,6 +810,65 @@ func TestBashCardBodyShowsCommandOutputAndExit(t *testing.T) {
 	}
 	if strings.Contains(got, "stdout:") || strings.Contains(got, "exit_code:") {
 		t.Fatalf("bash card = %q, must restyle section markers", got)
+	}
+}
+
+func TestExecCommandCardBodyShowsSessionAndExit(t *testing.T) {
+	m := limeTestModel()
+	runningDetail := "output:\nServing HTTP on 0.0.0.0 port 8000\nsession_id: 1000\nUse write_stdin with session_id 1000 to poll, send input, or interrupt it."
+	running := transcriptRow{kind: rowToolResult, id: "call_1", tool: "exec_command", status: tools.StatusOK, detail: runningDetail}
+	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "exec_command", detail: "python3 -m http.server 8000"}})
+	got := plainRender(t, m.renderRow(running, 90, rc))
+	for _, want := range []string{"❯ python3 -m http.server 8000", "Serving HTTP", "session 1000"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("exec_command card = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "Use write_stdin") || strings.Contains(got, "session_id:") {
+		t.Fatalf("exec_command card = %q, must restyle session markers", got)
+	}
+
+	exited := transcriptRow{kind: rowToolResult, id: "call_2", tool: "write_stdin", status: tools.StatusOK, detail: "output:\ndone\nexit_code: 0"}
+	got = plainRender(t, m.renderRow(exited, 90, buildRowContext(nil)))
+	for _, want := range []string{"done", "exit 0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("write_stdin card = %q, missing %q", got, want)
+		}
+	}
+
+	interrupted := transcriptRow{kind: rowToolResult, id: "call_3", tool: "write_stdin", status: tools.StatusOK, detail: "output:\n127.0.0.1 GET / HTTP/1.1 200\ninterrupted: true\nexit_code: -1"}
+	got = plainRender(t, m.renderRow(interrupted, 90, buildRowContext(nil)))
+	if !strings.Contains(got, "interrupted") || strings.Contains(got, "exit -1") {
+		t.Fatalf("interrupted write_stdin card = %q", got)
+	}
+}
+
+func TestToolCallSummaryDescribesExecSessions(t *testing.T) {
+	cases := []struct {
+		event streamjson.Event
+		want  string
+	}{
+		{
+			event: streamjson.Event{Name: "exec_command", Args: map[string]any{"cmd": "python3 -m http.server 8000"}},
+			want:  "python3 -m http.server 8000",
+		},
+		{
+			event: streamjson.Event{Name: "write_stdin", Args: map[string]any{"session_id": 1000}},
+			want:  "poll session 1000",
+		},
+		{
+			event: streamjson.Event{Name: "write_stdin", Args: map[string]any{"session_id": float64(1001), "chars": "\x03"}},
+			want:  "interrupt session 1001",
+		},
+		{
+			event: streamjson.Event{Name: "write_stdin", Args: map[string]any{"session_id": "1002", "chars": "q"}},
+			want:  "send input to session 1002",
+		},
+	}
+	for _, tc := range cases {
+		if got := toolCallSummary(tc.event); got != tc.want {
+			t.Fatalf("toolCallSummary(%#v) = %q, want %q", tc.event, got, tc.want)
+		}
 	}
 }
 

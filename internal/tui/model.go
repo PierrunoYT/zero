@@ -666,6 +666,7 @@ func (m model) noBlockingModal() bool {
 
 func (m model) quit() (tea.Model, tea.Cmd) {
 	m.stopPRWatcher()
+	m.stopAllBackgroundTerminalSessions()
 	return m, tea.Quit
 }
 
@@ -2784,6 +2785,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.startMCPTranscriptCommand(command.text)
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
+		return m, nil
+	case commandPS:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.backgroundTerminalsText()})
+		return m, nil
+	case commandStop:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.stopBackgroundTerminalsText(command.text)})
 		return m, nil
 	case commandSandboxSetup:
 		return m.startSandboxSetupCommand(command.text)

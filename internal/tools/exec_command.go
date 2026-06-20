@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,10 @@ const (
 	defaultMaxOutputTokens    = 10000
 	maxExecOutputTokenRequest = 200000
 	completedSessionRetention = 30 * time.Second
+	maxExecSessions           = 64
+	recentExecOutputBytes     = 4096
+	execSessionStopTimeout    = 3 * time.Second
+	execSessionEvictedMessage = "[zero] session evicted: too many background terminals\n"
 )
 
 type execSessionManager struct {
@@ -32,6 +37,7 @@ type execSessionManager struct {
 	nextID             int
 	sessions           map[int]*execSession
 	completedRetention time.Duration
+	maxSessions        int
 }
 
 func newExecSessionManager() *execSessionManager {
@@ -39,6 +45,7 @@ func newExecSessionManager() *execSessionManager {
 		nextID:             1000,
 		sessions:           make(map[int]*execSession),
 		completedRetention: completedSessionRetention,
+		maxSessions:        maxExecSessions,
 	}
 }
 
@@ -54,8 +61,23 @@ func (manager *execSessionManager) allocateID() int {
 
 func (manager *execSessionManager) store(session *execSession) {
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
+	var pruned *execSession
+	removePruned := false
+	if manager.maxSessions > 0 && len(manager.sessions) >= manager.maxSessions {
+		pruned = manager.sessionToPruneLocked()
+		if pruned != nil {
+			removePruned = pruned.doneClosed()
+			if removePruned {
+				delete(manager.sessions, pruned.id)
+			}
+		}
+	}
 	manager.sessions[session.id] = session
+	manager.mu.Unlock()
+	if pruned != nil && !removePruned {
+		pruned.output.Write([]byte(execSessionEvictedMessage))
+		pruned.terminate()
+	}
 }
 
 func (manager *execSessionManager) get(id int) (*execSession, bool) {
@@ -89,16 +111,133 @@ func (manager *execSessionManager) len() int {
 	return len(manager.sessions)
 }
 
+func (manager *execSessionManager) sessionToPruneLocked() *execSession {
+	if len(manager.sessions) == 0 {
+		return nil
+	}
+	sessions := make([]*execSession, 0, len(manager.sessions))
+	for _, session := range manager.sessions {
+		sessions = append(sessions, session)
+	}
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].lastUsedAt.Before(sessions[j].lastUsedAt)
+	})
+	for _, session := range sessions {
+		if session.doneClosed() {
+			return session
+		}
+	}
+	if len(sessions) <= 8 {
+		return nil
+	}
+	return sessions[0]
+}
+
+func (manager *execSessionManager) list() []ExecSessionSnapshot {
+	manager.mu.Lock()
+	sessions := make([]*execSession, 0, len(manager.sessions))
+	for _, session := range manager.sessions {
+		if !session.doneClosed() {
+			sessions = append(sessions, session)
+		}
+	}
+	manager.mu.Unlock()
+
+	snapshots := make([]ExecSessionSnapshot, 0, len(sessions))
+	for _, session := range sessions {
+		snapshots = append(snapshots, session.snapshot())
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].ID < snapshots[j].ID
+	})
+	return snapshots
+}
+
+func (manager *execSessionManager) stop(id int) bool {
+	session, ok := manager.get(id)
+	if !ok {
+		return false
+	}
+	session.terminate()
+	return true
+}
+
+func (manager *execSessionManager) stopAll() []int {
+	manager.mu.Lock()
+	sessions := make([]*execSession, 0, len(manager.sessions))
+	for _, session := range manager.sessions {
+		if !session.doneClosed() {
+			sessions = append(sessions, session)
+		}
+	}
+	manager.mu.Unlock()
+	ids := make([]int, 0, len(sessions))
+	for _, session := range sessions {
+		session.terminate()
+		ids = append(ids, session.id)
+	}
+	waitForExecSessions(sessions, execSessionStopTimeout)
+	sort.Ints(ids)
+	return ids
+}
+
+func waitForExecSessions(sessions []*execSession, timeout time.Duration) {
+	if timeout <= 0 || len(sessions) == 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for _, session := range sessions {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-session.done:
+		case <-timer.C:
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+}
+
+type ExecSessionSnapshot struct {
+	ID           int
+	Command      string
+	Cwd          string
+	RelativeCwd  string
+	StartedAt    time.Time
+	LastUsedAt   time.Time
+	TTY          bool
+	Status       string
+	ExitCode     *int
+	RecentOutput string
+}
+
+type ExecSessionController interface {
+	ExecSessions() []ExecSessionSnapshot
+	StopExecSession(id int) bool
+	StopAllExecSessions() []int
+}
+
 type execSession struct {
 	id          int
 	commandText string
 	cwd         string
 	relativeCwd string
 	startedAt   time.Time
+	lastUsedAt  time.Time
+	tty         bool
 	command     *exec.Cmd
 	plan        zeroSandbox.CommandPlan
 	cancel      context.CancelFunc
 	stdin       io.WriteCloser
+	cleanup     func()
 	output      *execOutputBuffer
 
 	doneOnce sync.Once
@@ -134,15 +273,51 @@ func (session *execSession) exitStatus() (int, bool) {
 	return *session.exitCode, true
 }
 
+func (session *execSession) touch() {
+	session.mu.Lock()
+	session.lastUsedAt = time.Now()
+	session.mu.Unlock()
+}
+
 func (session *execSession) terminate() {
 	if session.cancel != nil {
 		session.cancel()
 	}
 }
 
+func (session *execSession) snapshot() ExecSessionSnapshot {
+	session.mu.Lock()
+	startedAt := session.startedAt
+	lastUsedAt := session.lastUsedAt
+	exitCode := session.exitCode
+	var copiedExit *int
+	if exitCode != nil {
+		value := *exitCode
+		copiedExit = &value
+	}
+	session.mu.Unlock()
+	status := "running"
+	if copiedExit != nil {
+		status = "exited"
+	}
+	return ExecSessionSnapshot{
+		ID:           session.id,
+		Command:      session.commandText,
+		Cwd:          session.cwd,
+		RelativeCwd:  session.relativeCwd,
+		StartedAt:    startedAt,
+		LastUsedAt:   lastUsedAt,
+		TTY:          session.tty,
+		Status:       status,
+		ExitCode:     copiedExit,
+		RecentOutput: session.output.recentString(),
+	}
+}
+
 type execOutputBuffer struct {
 	mu     sync.Mutex
 	data   []byte
+	recent []byte
 	notify chan struct{}
 }
 
@@ -153,12 +328,22 @@ func newExecOutputBuffer() *execOutputBuffer {
 func (buffer *execOutputBuffer) Write(p []byte) (int, error) {
 	buffer.mu.Lock()
 	buffer.data = append(buffer.data, p...)
+	buffer.recent = append(buffer.recent, p...)
+	if len(buffer.recent) > recentExecOutputBytes {
+		buffer.recent = buffer.recent[len(buffer.recent)-recentExecOutputBytes:]
+	}
 	buffer.mu.Unlock()
 	select {
 	case buffer.notify <- struct{}{}:
 	default:
 	}
 	return len(p), nil
+}
+
+func (buffer *execOutputBuffer) recentString() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return string(buffer.recent)
 }
 
 func (buffer *execOutputBuffer) drainString() string {
@@ -201,6 +386,7 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 					"yield_time_ms":     {Type: "integer", Description: "Wait before yielding output. If the command is still running after this, the result includes session_id.", Default: defaultExecYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxExecYieldTimeMS)},
 					"max_output_tokens": {Type: "integer", Description: "Output token budget. Defaults to 10000; larger requests may be capped.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
 					"prefix_rule":       {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Optional reusable approval prefix for this command, for example [\"git\", \"status\"]. Only simple command prefixes are accepted."},
+					"tty":               {Type: "boolean", Description: "Run the command attached to a pseudo-terminal when supported. Use this for interactive terminal-style programs; defaults to false.", Default: false},
 				},
 				Required:             []string{"cmd"},
 				AdditionalProperties: false,
@@ -221,6 +407,18 @@ func (tool execCommandTool) RunWithSandbox(ctx context.Context, args map[string]
 	return tool.run(ctx, args, engine)
 }
 
+func (tool execCommandTool) ExecSessions() []ExecSessionSnapshot {
+	return tool.manager.list()
+}
+
+func (tool execCommandTool) StopExecSession(id int) bool {
+	return tool.manager.stop(id)
+}
+
+func (tool execCommandTool) StopAllExecSessions() []int {
+	return tool.manager.stopAll()
+}
+
 func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
 	commandText, err := aliasedStringArg(args, []string{"cmd", "command", "script", "shell"}, "", true, false)
 	if err != nil {
@@ -238,6 +436,10 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
 	}
+	ttyRequested, err := boolArg(args, "tty", false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
+	}
 	if issue := detectShellCommandIssue(commandText, runtimeGOOS()); issue != nil {
 		return shellIssueBlockResult(*issue)
 	}
@@ -249,7 +451,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		return errorResult("Error running exec_command: " + err.Error())
 	}
 
-	session, err := tool.startSession(commandText, absoluteCwd, relativeCwd, engine)
+	session, err := tool.startSession(commandText, absoluteCwd, relativeCwd, ttyRequested, engine)
 	if err != nil {
 		return errorResult("Error starting exec_command: " + err.Error())
 	}
@@ -269,12 +471,13 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		exitCode:        exitCode,
 		exited:          exited,
 		relativeCwd:     relativeCwd,
+		tty:             session.tty,
 		plan:            session.plan,
 		maxOutputTokens: maxOutputTokens,
 	})
 }
 
-func (tool execCommandTool) startSession(commandText string, absoluteCwd string, relativeCwd string, engine *zeroSandbox.Engine) (*execSession, error) {
+func (tool execCommandTool) startSession(commandText string, absoluteCwd string, relativeCwd string, ttyRequested bool, engine *zeroSandbox.Engine) (*execSession, error) {
 	id := tool.manager.allocateID()
 	commandCtx, cancel := context.WithCancel(context.Background())
 	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, engine)
@@ -282,18 +485,10 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 		cancel()
 		return nil, err
 	}
-	stdin, err := command.StdinPipe()
-	if err != nil {
-		plan.Cleanup()
-		cancel()
-		return nil, err
-	}
 	output := newExecOutputBuffer()
-	command.Stdout = output
-	command.Stderr = output
-	hardenProcessLifetime(command)
 	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
-	if err := command.Start(); err != nil {
+	stdin, tty, cleanup, err := startExecProcess(command, output, ttyRequested)
+	if err != nil {
 		_ = monitor.Stop()
 		plan.Cleanup()
 		cancel()
@@ -305,10 +500,13 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 		cwd:         absoluteCwd,
 		relativeCwd: relativeCwd,
 		startedAt:   time.Now(),
+		lastUsedAt:  time.Now(),
+		tty:         tty,
 		command:     command,
 		plan:        plan,
 		cancel:      cancel,
 		stdin:       stdin,
+		cleanup:     cleanup,
 		output:      output,
 		done:        make(chan struct{}),
 	}
@@ -318,6 +516,9 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 		err := command.Wait()
 		if blocks := monitor.Stop(); len(blocks) > 0 {
 			output.Write([]byte(appendSandboxBlocks("", blocks)))
+		}
+		if session.cleanup != nil {
+			session.cleanup()
 		}
 		plan.Cleanup()
 		cancel()
@@ -432,6 +633,9 @@ func (tool writeStdinTool) Run(ctx context.Context, args map[string]any) Result 
 }
 
 func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]any, _ RunOptions) Result {
+	if value, ok := args["session_id"]; !ok || value == nil {
+		return errorResult("Error: Invalid arguments for write_stdin: session_id is required")
+	}
 	sessionID, err := intArg(args, "session_id", 0, 1, 0)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_stdin: " + err.Error())
@@ -452,9 +656,14 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 	if !ok {
 		return errorResult(fmt.Sprintf("Error: Unknown exec session_id %d.", sessionID))
 	}
+	session.touch()
+	interrupted := false
 	if chars != "" {
-		if chars == "\x03" {
+		if shouldInterruptExecSession(chars, session.tty) {
+			interrupted = true
 			session.terminate()
+		} else if !session.tty {
+			return errorResult(fmt.Sprintf("Error: exec session_id %d does not accept stdin. Use empty chars to poll, or send chars \"\\u0003\" to interrupt/stop it.", sessionID))
 		} else if session.stdin != nil {
 			if _, err := io.WriteString(session.stdin, chars); err != nil && !session.doneClosed() {
 				return errorResult("Error writing to exec session: " + err.Error())
@@ -473,9 +682,31 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 		exitCode:        exitCode,
 		exited:          exited,
 		relativeCwd:     session.relativeCwd,
+		tty:             session.tty,
+		interrupted:     interrupted,
 		plan:            session.plan,
 		maxOutputTokens: maxOutputTokens,
 	})
+}
+
+func shouldInterruptExecSession(chars string, tty bool) bool {
+	if strings.Contains(chars, "\x03") {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(chars))
+	normalizedNoSpace := strings.ReplaceAll(normalized, " ", "")
+	switch normalizedNoSpace {
+	case `\u0003`, `\\u0003`, `\x03`, `\\x03`, "^c", "ctrl-c", "control-c", "sigint", "interrupt":
+		return true
+	}
+	if tty {
+		return false
+	}
+	switch normalized {
+	case "q", "quit", "exit", "stop", "kill", "terminate":
+		return true
+	}
+	return false
 }
 
 type execToolResultInput struct {
@@ -485,6 +716,8 @@ type execToolResultInput struct {
 	exitCode        int
 	exited          bool
 	relativeCwd     string
+	tty             bool
+	interrupted     bool
 	plan            zeroSandbox.CommandPlan
 	maxOutputTokens int
 }
@@ -493,19 +726,23 @@ func execToolResult(input execToolResultInput) Result {
 	output, truncated := truncateExecOutput(input.output, input.maxOutputTokens)
 	meta := map[string]string{
 		"cwd": input.relativeCwd,
+		"tty": strconv.FormatBool(input.tty),
 	}
 	addSandboxMeta(meta, input.plan)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)
+		if input.interrupted {
+			meta["interrupted"] = "true"
+		}
 	} else {
 		meta["session_id"] = strconv.Itoa(input.sessionID)
 	}
 
 	status := StatusOK
-	if input.exited && input.exitCode != 0 {
+	if input.exited && input.exitCode != 0 && !input.interrupted {
 		status = StatusError
 	}
-	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode)
+	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
 	return Result{
 		Status:    status,
 		Output:    body,
@@ -518,7 +755,7 @@ func execToolResult(input execToolResultInput) Result {
 	}
 }
 
-func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int) string {
+func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int, interrupted bool) string {
 	output = strings.TrimRight(output, "\r\n")
 	parts := []string{}
 	if output != "" {
@@ -526,7 +763,14 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 	}
 	if exited {
 		if output == "" {
-			parts = append(parts, "Command completed with no output.")
+			if interrupted {
+				parts = append(parts, "Command interrupted.")
+			} else {
+				parts = append(parts, "Command completed with no output.")
+			}
+		}
+		if interrupted {
+			parts = append(parts, "interrupted: true")
 		}
 		parts = append(parts, fmt.Sprintf("exit_code: %d", exitCode))
 	} else {
@@ -534,7 +778,7 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 			parts = append(parts, "Command is still running.")
 		}
 		parts = append(parts, fmt.Sprintf("session_id: %d", sessionID))
-		parts = append(parts, fmt.Sprintf("Use write_stdin with session_id %d to poll, send input, or interrupt it.", sessionID))
+		parts = append(parts, fmt.Sprintf("Use write_stdin with session_id %d and empty chars to poll; send chars \"\\u0003\" to interrupt/stop it.", sessionID))
 	}
 	return strings.Join(parts, "\n")
 }

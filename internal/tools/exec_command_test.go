@@ -2,9 +2,14 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -54,6 +59,9 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 	}
 	if start.Meta["session_id"] == "" {
 		t.Fatalf("expected running session metadata, got %#v output=%q", start.Meta, start.Output)
+	}
+	if !strings.Contains(start.Output, `chars "\u0003"`) {
+		t.Fatalf("running session output should explain Ctrl-C cleanup, got %q", start.Output)
 	}
 	sessionID, err := strconv.Atoi(start.Meta["session_id"])
 	if err != nil {
@@ -128,6 +136,121 @@ func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
 	}
 }
 
+func TestStopAllWaitsForSessionsToExit(t *testing.T) {
+	manager := newExecSessionManager()
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	cancelled := make(chan struct{})
+	session := &execSession{
+		id:     1000,
+		output: newExecOutputBuffer(),
+		done:   make(chan struct{}),
+	}
+	session.cancel = func() {
+		close(cancelled)
+		go func() {
+			<-release
+			session.markDone(nil, -1)
+		}()
+	}
+	manager.sessions[session.id] = session
+
+	go func() {
+		manager.stopAll()
+		close(returned)
+	}()
+
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("stopAll did not terminate the session")
+	}
+	select {
+	case <-returned:
+		t.Fatal("stopAll returned before session.done closed")
+	default:
+	}
+	close(release)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("stopAll did not return after session.done closed")
+	}
+}
+
+func TestStoreEvictsLiveSessionWithExplanation(t *testing.T) {
+	manager := newExecSessionManager()
+	manager.maxSessions = 9
+	evicted := &execSession{
+		id:         1000,
+		startedAt:  time.Unix(1000, 0),
+		lastUsedAt: time.Unix(1000, 0),
+		output:     newExecOutputBuffer(),
+		done:       make(chan struct{}),
+	}
+	evictedDone := make(chan struct{})
+	evicted.cancel = func() { close(evictedDone) }
+	manager.sessions[evicted.id] = evicted
+	for id := 1001; id <= 1008; id++ {
+		manager.sessions[id] = &execSession{
+			id:         id,
+			startedAt:  time.Unix(int64(id), 0),
+			lastUsedAt: time.Unix(int64(id), 0),
+			output:     newExecOutputBuffer(),
+			done:       make(chan struct{}),
+		}
+	}
+
+	manager.store(&execSession{
+		id:         1009,
+		startedAt:  time.Unix(1009, 0),
+		lastUsedAt: time.Unix(1009, 0),
+		output:     newExecOutputBuffer(),
+		done:       make(chan struct{}),
+	})
+
+	select {
+	case <-evictedDone:
+	case <-time.After(time.Second):
+		t.Fatal("live pruned session was not terminated")
+	}
+	if got := evicted.output.recentString(); !strings.Contains(got, "session evicted") {
+		t.Fatalf("evicted session output = %q, want explanation", got)
+	}
+	if _, ok := manager.get(evicted.id); !ok {
+		t.Fatal("evicted live session should remain visible until its reaper removes it")
+	}
+}
+
+func TestStartExecProcessFallsBackAfterPTYStartMutation(t *testing.T) {
+	original := startPTYProcessFunc
+	t.Cleanup(func() { startPTYProcessFunc = original })
+	startPTYProcessFunc = func(command *exec.Cmd, _ *execOutputBuffer) (io.WriteCloser, func(), error) {
+		command.SysProcAttr = &syscall.SysProcAttr{}
+		command.Cancel = func() error { return nil }
+		command.WaitDelay = time.Second
+		return nil, nil, errors.New("pty start failed")
+	}
+
+	command := exec.CommandContext(context.Background(), os.Args[0], "--zero-bash-helper", "success")
+	output := newExecOutputBuffer()
+	stdin, tty, cleanup, err := startExecProcess(command, output, true)
+	if err != nil {
+		t.Fatalf("startExecProcess fallback failed: %v", err)
+	}
+	if tty {
+		t.Fatal("fallback process must report tty=false")
+	}
+	_ = stdin.Close()
+	if err := command.Wait(); err != nil {
+		t.Fatalf("fallback command wait failed: %v", err)
+	}
+	cleanup()
+	if got := output.drainString(); !strings.Contains(got, "hello from bash") {
+		t.Fatalf("fallback output = %q", got)
+	}
+}
+
 // resilientTempDir is like t.TempDir() but tolerates the Windows handle-release
 // lag: a SIGKILL'd child process that had the dir as its cwd may not have
 // released it the instant it is reaped, so the immediate RemoveAll t.TempDir()
@@ -196,11 +319,192 @@ func TestWriteStdinInterruptTerminatesSession(t *testing.T) {
 		"chars":         "\x03",
 		"yield_time_ms": 1000,
 	})
+	if interrupted.Status != StatusOK {
+		t.Fatalf("interrupted session status = %s: %s", interrupted.Status, interrupted.Output)
+	}
 	if interrupted.Meta["session_id"] != "" {
 		t.Fatalf("interrupted session should not remain running, meta=%#v output=%q", interrupted.Meta, interrupted.Output)
 	}
 	if interrupted.Meta["exit_code"] == "" {
 		t.Fatalf("interrupted session should report exit_code, meta=%#v output=%q", interrupted.Meta, interrupted.Output)
+	}
+	if interrupted.Meta["interrupted"] != "true" {
+		t.Fatalf("interrupted session should report interrupted metadata, meta=%#v output=%q", interrupted.Meta, interrupted.Output)
+	}
+}
+
+func TestWriteStdinRejectsInputForNonTTYSession(t *testing.T) {
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           helperCommand("long-sleep"),
+		"yield_time_ms": 10,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("session_id is not numeric: %v", err)
+	}
+
+	result := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"chars":         "hello\n",
+		"yield_time_ms": 10,
+	})
+	if result.Status != StatusError {
+		t.Fatalf("write_stdin status = %s, want error", result.Status)
+	}
+	if !strings.Contains(result.Output, "does not accept stdin") {
+		t.Fatalf("unexpected output: %q", result.Output)
+	}
+	manager.stop(sessionID)
+}
+
+func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
+	for _, chars := range []string{`\u0003`, "exit\n"} {
+		root := t.TempDir()
+		manager := newExecSessionManager()
+		execTool := NewScopedExecCommandTool(root, nil, manager)
+		writeTool := NewWriteStdinTool(manager)
+
+		start := execTool.Run(context.Background(), map[string]any{
+			"cmd":           helperCommand("long-sleep"),
+			"yield_time_ms": 10,
+		})
+		if start.Status != StatusOK {
+			t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+		}
+		sessionID, err := strconv.Atoi(start.Meta["session_id"])
+		if err != nil {
+			t.Fatalf("session_id is not numeric: %v", err)
+		}
+
+		result := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"chars":         chars,
+			"yield_time_ms": 1000,
+		})
+		if result.Status != StatusOK {
+			t.Fatalf("stop input %q status = %s: %s", chars, result.Status, result.Output)
+		}
+		if result.Meta["session_id"] != "" {
+			t.Fatalf("stop input %q should not leave session running, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+		if result.Meta["exit_code"] == "" {
+			t.Fatalf("stop input %q should report exit_code, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+		if result.Meta["interrupted"] != "true" {
+			t.Fatalf("stop input %q should report interrupted metadata, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+	}
+}
+
+func TestShouldInterruptExecSession(t *testing.T) {
+	cases := []struct {
+		chars string
+		tty   bool
+		want  bool
+	}{
+		{chars: "\x03", tty: false, want: true},
+		{chars: `\u0003`, tty: false, want: true},
+		{chars: `\\u0003`, tty: false, want: true},
+		{chars: "^C", tty: false, want: true},
+		{chars: "ctrl-c", tty: false, want: true},
+		{chars: "control-c", tty: false, want: true},
+		{chars: "sigint", tty: false, want: true},
+		{chars: "interrupt", tty: false, want: true},
+		{chars: "q", tty: false, want: true},
+		{chars: "quit", tty: false, want: true},
+		{chars: "exit\n", tty: false, want: true},
+		{chars: "stop", tty: false, want: true},
+		{chars: "kill", tty: false, want: true},
+		{chars: "terminate", tty: false, want: true},
+		{chars: "exit\n", tty: true, want: false},
+		{chars: "quit", tty: true, want: false},
+		{chars: "hello\n", tty: false, want: false},
+		{chars: "hello\n", tty: true, want: false},
+	}
+	for _, tc := range cases {
+		if got := shouldInterruptExecSession(tc.chars, tc.tty); got != tc.want {
+			t.Fatalf("shouldInterruptExecSession(%q, tty=%v) = %v, want %v", tc.chars, tc.tty, got, tc.want)
+		}
+	}
+}
+
+func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pty transport is currently implemented for linux")
+	}
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           "read line; echo got:$line",
+		"tty":           true,
+		"yield_time_ms": 10,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	if start.Meta["tty"] != "true" {
+		t.Fatalf("expected tty metadata, got %#v output=%q", start.Meta, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("session_id is not numeric: %v", err)
+	}
+
+	result := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"chars":         "hello\n",
+		"yield_time_ms": 1000,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("write_stdin status = %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "got:hello") {
+		t.Fatalf("expected PTY input output, got %q", result.Output)
+	}
+	if result.Meta["exit_code"] != "0" {
+		t.Fatalf("expected exited session, got meta=%#v output=%q", result.Meta, result.Output)
+	}
+}
+
+func TestExecSessionSnapshotsAndStopAll(t *testing.T) {
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager).(execCommandTool)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           helperCommand("long-sleep"),
+		"yield_time_ms": 10,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("session_id is not numeric: %v", err)
+	}
+
+	snapshots := execTool.ExecSessions()
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one session snapshot, got %#v", snapshots)
+	}
+	if snapshots[0].ID != sessionID || snapshots[0].Command == "" || snapshots[0].Status != "running" {
+		t.Fatalf("unexpected snapshot: %#v", snapshots[0])
+	}
+
+	stopped := execTool.StopAllExecSessions()
+	if len(stopped) != 1 || stopped[0] != sessionID {
+		t.Fatalf("StopAllExecSessions = %#v, want [%d]", stopped, sessionID)
 	}
 }
 
@@ -247,6 +551,22 @@ func TestWriteStdinReportsUnknownSession(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "Unknown exec session_id 1234") {
 		t.Fatalf("unexpected output: %q", result.Output)
+	}
+}
+
+func TestWriteStdinRequiresPositiveSessionID(t *testing.T) {
+	tool := NewWriteStdinTool(newExecSessionManager())
+	for _, args := range []map[string]any{
+		{},
+		{"session_id": 0},
+	} {
+		result := tool.Run(context.Background(), args)
+		if result.Status != StatusError {
+			t.Fatalf("Run(%#v) status = %s, want error", args, result.Status)
+		}
+		if !strings.Contains(result.Output, "Invalid arguments for write_stdin") {
+			t.Fatalf("Run(%#v) output = %q, want invalid arguments", args, result.Output)
+		}
 	}
 }
 
