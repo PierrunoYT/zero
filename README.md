@@ -82,6 +82,18 @@ If you are testing before the first public release, build from source:
 go build -o zero ./cmd/zero
 ```
 
+On Linux, build the sandbox helper too if you want native sandboxing:
+
+```bash
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
+go build -o zero-seccomp ./cmd/zero-seccomp   # optional compatibility wrapper
+```
+
+Put `zero` and `zero-linux-sandbox` in the same directory on `PATH`
+(`~/.local/bin` is a good default). macOS does not need an extra helper binary.
+Windows source builds can use the main `zero.exe` as their sandbox helper; release
+archives still ship standalone Windows helper executables.
+
 More install details: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## First Run

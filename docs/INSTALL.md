@@ -108,6 +108,36 @@ go build -o zero ./cmd/zero
 
 Source builds require Go 1.25+.
 
+### Sandbox Helpers For Source Builds
+
+Release archives include the platform sandbox helpers. If you build directly
+from source, build the helpers you need:
+
+Linux:
+
+```bash
+go build -o zero ./cmd/zero
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
+go build -o zero-seccomp ./cmd/zero-seccomp
+```
+
+Put `zero` and `zero-linux-sandbox` in the same directory on `PATH`, for example
+`~/.local/bin`. `zero-seccomp` is kept as a compatibility wrapper; the sandbox
+helper applies the Unix-socket filter itself when that sandbox option is enabled.
+Linux native sandboxing also requires Bubblewrap to be installed.
+
+macOS uses the system sandbox and does not need an extra helper binary.
+
+Windows source builds can use the main `zero.exe` as the command runner and setup
+helper through Zero's built-in self-dispatch path. If you want a release-style
+layout anyway, build the standalone helper executables next to `zero.exe`:
+
+```powershell
+go build -o zero.exe ./cmd/zero
+go build -o zero-windows-command-runner.exe ./cmd/zero-windows-command-runner
+go build -o zero-windows-sandbox-setup.exe ./cmd/zero-windows-sandbox-setup
+```
+
 ## Release Archive Format
 
 Release archives are named:
