@@ -630,6 +630,16 @@ func (session *execSession) collect(ctx context.Context, wait time.Duration) (st
 			if session.output.consumeTruncated() {
 				truncated = true
 			}
+			// A background process that keeps writing output faster than this
+			// loop can drain it (a chatty dev server, a watch-mode rebuild loop,
+			// a crash-restart spew) would otherwise never let drainString return
+			// empty, so the deadline check below — only reached on an empty
+			// drain — would never fire. That turns `wait` into an unbounded
+			// block regardless of what the caller asked for. Check it here too,
+			// so continuous output can never starve the timeout.
+			if time.Now().After(deadline) {
+				return finish()
+			}
 			continue
 		}
 		if session.doneClosed() {

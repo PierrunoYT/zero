@@ -450,6 +450,65 @@ func TestExecToolResultSurfacesBufferTruncationOutsideByteBudget(t *testing.T) {
 	}
 }
 
+// TestCollectRespectsDeadlineUnderContinuousOutput asserts collect() returns
+// close to its requested deadline even while output keeps arriving. Before
+// the corresponding fix, the deadline was only checked in the branch reached
+// when drainString returns empty — a background process producing output
+// fast/continuously enough to keep the buffer perpetually non-empty could
+// theoretically starve that check indefinitely. This synthetic writer
+// (8 goroutines, tight loop) did not reliably reproduce that starvation under
+// Go's scheduler in practice — the reader still won the race often enough —
+// so this test doesn't prove the old code could hang; it just pins down the
+// intended behavior (bounded by wait) going forward.
+func TestCollectRespectsDeadlineUnderContinuousOutput(t *testing.T) {
+	session := &execSession{
+		id:     1000,
+		output: newExecOutputBuffer(),
+		done:   make(chan struct{}),
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	// Several concurrent writers, each pushing a decent-sized chunk in a tight
+	// loop: a single slow writer lets the reader win the race often enough
+	// (the runtime schedules a gap between writes) to mask the bug. Enough
+	// parallel writers keep the buffer non-empty essentially continuously,
+	// closer to a real chatty process whose PTY reads land in bursts.
+	const writers = 8
+	chunk := []byte(strings.Repeat("x", 256))
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					session.output.Write(chunk)
+				}
+			}
+		}()
+	}
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+	})
+
+	const wait = 200 * time.Millisecond
+	start := time.Now()
+	_, _ = session.collect(context.Background(), wait)
+	elapsed := time.Since(start)
+
+	// Generous slack over `wait` for scheduling jitter under a continuously
+	// writing goroutine — this must stay a small multiple of wait, not
+	// "however long the writer keeps going" (which is what the bug produced:
+	// this test would hang past the 30s test timeout without the fix).
+	if elapsed > 3*wait {
+		t.Fatalf("collect took %v under continuous output, want close to the %v deadline", elapsed, wait)
+	}
+}
+
 // resilientTempDir is like t.TempDir() but tolerates the Windows handle-release
 // lag: a SIGKILL'd child process that had the dir as its cwd may not have
 // released it the instant it is reaped, so the immediate RemoveAll t.TempDir()
