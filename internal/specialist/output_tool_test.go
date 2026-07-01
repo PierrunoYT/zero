@@ -124,10 +124,16 @@ func TestOutputToolBlocksUntilTaskCompletes(t *testing.T) {
 	tool := NewOutputTool(manager)
 	tool.PollInterval = time.Millisecond
 
+	// timeout is a ceiling, not a target: the test still returns as soon as the
+	// 5ms write lands (PollInterval keeps it responsive), it just tolerates a
+	// slow/contended CI runner without failing. A 100ms budget against a 5ms
+	// write only left 20x margin, which Windows CI runners (coarser default
+	// timer granularity, heavier scheduling contention than Linux/macOS) blew
+	// through and failed the test on an otherwise-unrelated PR merge.
 	result := tool.Run(context.Background(), map[string]any{
 		"task_id": "child_task",
 		"block":   true,
-		"timeout": 100,
+		"timeout": 2000,
 	})
 
 	if result.Status != tools.StatusOK || !strings.Contains(result.Output, "output:\nfinished") {
