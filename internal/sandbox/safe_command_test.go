@@ -88,6 +88,38 @@ func TestDetectInteractiveCommandHonorsWindows(t *testing.T) {
 	}
 }
 
+func TestDetectInteractiveCommandSuggestsWindowsAlternativesOnWindows(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		avoid   []string
+		want    string
+	}{
+		{command: "more file.txt", avoid: []string{"cat", "head", "tail"}, want: "type"},
+		{command: "less file.txt", avoid: []string{"cat", "head", "tail"}, want: "type"},
+		{command: "htop", avoid: []string{"ps aux"}, want: "tasklist"},
+		{command: "tail -f app.log", avoid: []string{"tail -n"}, want: "read_file"},
+	} {
+		result := DetectInteractiveCommand(tc.command, "windows")
+		if !result.Interactive {
+			t.Fatalf("DetectInteractiveCommand(%q, windows) = not interactive, want interactive", tc.command)
+		}
+		for _, bad := range tc.avoid {
+			if strings.Contains(result.Suggestion, bad) {
+				t.Fatalf("DetectInteractiveCommand(%q, windows).Suggestion = %q, want it to avoid POSIX-only %q", tc.command, result.Suggestion, bad)
+			}
+		}
+		if !strings.Contains(result.Suggestion, tc.want) {
+			t.Fatalf("DetectInteractiveCommand(%q, windows).Suggestion = %q, want it to mention %q", tc.command, result.Suggestion, tc.want)
+		}
+	}
+
+	// The same commands on Linux should keep the original POSIX suggestion.
+	result := DetectInteractiveCommand("more file.txt", "linux")
+	if !strings.Contains(result.Suggestion, "cat") {
+		t.Fatalf("DetectInteractiveCommand(more, linux).Suggestion = %q, want the POSIX suggestion unchanged", result.Suggestion)
+	}
+}
+
 func TestDetectInteractiveCommandFindsAcrossSeparators(t *testing.T) {
 	// Interactive commands hidden after a shell operator should still be caught.
 	for _, command := range []string{
