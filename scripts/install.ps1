@@ -149,9 +149,20 @@ try {
   $targetPath = Join-Path $InstallDir "zero.exe"
   Write-Host "Installed $targetPath"
 
-  $pathEntries = $env:PATH -split [System.IO.Path]::PathSeparator
-  if ($pathEntries -notcontains $InstallDir) {
-    Write-Host "Add $InstallDir to PATH to run zero from any directory."
+  $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+  $userPathEntries = @()
+  if (-not [string]::IsNullOrEmpty($userPath)) {
+    $userPathEntries = $userPath -split [System.IO.Path]::PathSeparator
+  }
+  if ($userPathEntries -notcontains $InstallDir) {
+    $newUserPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
+    [Environment]::SetEnvironmentVariable("PATH", $newUserPath, "User")
+    Write-Host "Added $InstallDir to your user PATH. Restart your terminal to use 'zero'."
+  }
+
+  $sessionPathEntries = $env:PATH -split [System.IO.Path]::PathSeparator
+  if ($sessionPathEntries -notcontains $InstallDir) {
+    $env:PATH = "$env:PATH;$InstallDir"
   }
 } finally {
   if (Test-Path $tempDir) {
