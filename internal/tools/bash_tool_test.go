@@ -180,6 +180,9 @@ func TestDetectShellCommandIssueAllowsUnrelatedCommands(t *testing.T) {
 		`dir /b`,
 		`findstr /r "summary" file.txt`,
 		`echo header text`,
+		`tail-log.sh`,
+		`grep-cli --version`,
+		`sed.exe --help`,
 	} {
 		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
 			t.Fatalf("expected unrelated command to pass for %q, got %#v", command, issue)

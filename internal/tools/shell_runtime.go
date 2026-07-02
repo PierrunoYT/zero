@@ -24,7 +24,7 @@ var (
 	// family commands cmd.exe has no equivalent for (unlike `dir`/`findstr`,
 	// which sound similar enough that a model might reach for the POSIX name
 	// instead) — most often seen piped in, e.g. `git log ... | head`.
-	windowsPosixUtilityPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)(head|tail|grep|wc|awk|sed|cut|xargs|tr)\b`)
+	windowsPosixUtilityPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)(head|tail|grep|wc|awk|sed|cut|xargs|tr)(?:\s+|$)`)
 )
 
 func detectShellRuntime(goos string) shellRuntime {
