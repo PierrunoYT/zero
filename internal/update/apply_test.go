@@ -31,10 +31,15 @@ func TestApplyReturnsNoopWhenUpToDate(t *testing.T) {
 
 func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 	binaryName := "zero"
-	optionalName := "zero-seccomp"
-	if runtime.GOOS == "windows" {
+	// macOS ships no optional helper binaries (matching scripts/postinstall.mjs),
+	// so there's nothing to refresh there; only linux/windows have one to check.
+	optionalName := ""
+	switch runtime.GOOS {
+	case "windows":
 		binaryName = "zero.exe"
 		optionalName = "zero-windows-command-runner.exe"
+	case "linux":
+		optionalName = "zero-seccomp"
 	}
 
 	installDir := t.TempDir()
@@ -44,9 +49,12 @@ func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 	}
 	// Only pre-existing optional helpers should be refreshed; an absent one
 	// (e.g. the platform's other optional helper) must not be introduced.
-	existingHelperPath := filepath.Join(installDir, optionalName)
-	if err := os.WriteFile(existingHelperPath, []byte("old-helper"), 0o755); err != nil {
-		t.Fatalf("WriteFile helper: %v", err)
+	var existingHelperPath string
+	if optionalName != "" {
+		existingHelperPath = filepath.Join(installDir, optionalName)
+		if err := os.WriteFile(existingHelperPath, []byte("old-helper"), 0o755); err != nil {
+			t.Fatalf("WriteFile helper: %v", err)
+		}
 	}
 
 	archiveName := "zero-v0.2.0-linux-x64.tar.gz"
@@ -110,16 +118,18 @@ func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 		t.Fatalf("executable content = %q, want %q", data, wantBinary)
 	}
 
-	helperData, err := os.ReadFile(existingHelperPath)
-	if err != nil {
-		t.Fatalf("ReadFile helper: %v", err)
-	}
-	wantHelper := "new-helper"
-	if runtime.GOOS == "windows" {
-		wantHelper = "new-helper-exe"
-	}
-	if string(helperData) != wantHelper {
-		t.Fatalf("helper content = %q, want %q", helperData, wantHelper)
+	if optionalName != "" {
+		helperData, err := os.ReadFile(existingHelperPath)
+		if err != nil {
+			t.Fatalf("ReadFile helper: %v", err)
+		}
+		wantHelper := "new-helper"
+		if runtime.GOOS == "windows" {
+			wantHelper = "new-helper-exe"
+		}
+		if string(helperData) != wantHelper {
+			t.Fatalf("helper content = %q, want %q", helperData, wantHelper)
+		}
 	}
 
 	if entries, err := os.ReadDir(installDir); err == nil {
@@ -127,7 +137,7 @@ func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 			name := entry.Name()
 			// On Windows, replaceBinary leaves "<name>.old" behind (the running
 			// binary is renamed aside, not deleted) for later best-effort cleanup.
-			if name == binaryName || name == optionalName || name == binaryName+".old" || name == optionalName+".old" {
+			if name == binaryName || (optionalName != "" && name == optionalName) || name == binaryName+".old" || (optionalName != "" && name == optionalName+".old") {
 				continue
 			}
 			t.Fatalf("unexpected extra file left in install dir: %s", name)
