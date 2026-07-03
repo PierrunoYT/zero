@@ -18,7 +18,9 @@ func replaceBinary(targetPath string, newPath string) error {
 		return fmt.Errorf("rename running binary aside: %w", err)
 	}
 	if err := os.Rename(newPath, targetPath); err != nil {
-		_ = os.Rename(oldPath, targetPath)
+		if restoreErr := os.Rename(oldPath, targetPath); restoreErr != nil {
+			return fmt.Errorf("install new binary: %w; additionally failed to restore the original binary: %v (original preserved at %s)", err, restoreErr, oldPath)
+		}
 		return fmt.Errorf("install new binary: %w", err)
 	}
 	return nil

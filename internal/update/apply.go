@@ -9,9 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/release"
 )
+
+// DefaultDownloadTimeout bounds the archive/checksum download phase of a
+// standalone Apply, separately from Options.Timeout (which only covers the
+// small release-metadata check), so a stalled connection can't hang forever.
+const DefaultDownloadTimeout = 5 * time.Minute
 
 // ApplyResult reports the outcome of Apply.
 type ApplyResult struct {
@@ -20,6 +27,7 @@ type ApplyResult struct {
 	InstallMethod InstallMethod `json:"installMethod,omitempty"`
 	BinaryPath    string        `json:"binaryPath,omitempty"`
 	Message       string        `json:"message,omitempty"`
+	Warnings      []string      `json:"warnings,omitempty"`
 }
 
 // windowsOptionalBinaries/linuxOptionalBinaries mirror the helper binary
@@ -38,9 +46,6 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if !checkResult.UpdateAvailable {
-		return ApplyResult{Result: checkResult, Message: "already up to date"}, nil
-	}
 
 	executablePath, err := os.Executable()
 	if err != nil {
@@ -51,8 +56,14 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 	}
 	// Best-effort: remove a "<binary>.old" left behind by a previous Windows
 	// replaceBinary call now that enough time (a whole separate invocation)
-	// has passed for the old process to have released the file.
+	// has passed for the old process to have released the file. Runs
+	// regardless of whether an update is available, so it isn't stuck waiting
+	// on a future upgrade that may never come.
 	CleanupStaleBinary(executablePath)
+
+	if !checkResult.UpdateAvailable {
+		return ApplyResult{Result: checkResult, Message: "already up to date"}, nil
+	}
 
 	method := DetectInstallMethod(executablePath)
 	switch method {
@@ -68,7 +79,8 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 			Message:       fmt.Sprintf("updated via npm to %s", checkResult.LatestVersion),
 		}, nil
 	default:
-		if err := applyStandaloneUpdate(ctx, checkResult, executablePath); err != nil {
+		warnings, err := applyStandaloneUpdate(ctx, checkResult, executablePath)
+		if err != nil {
 			return ApplyResult{}, err
 		}
 		return ApplyResult{
@@ -77,6 +89,7 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 			InstallMethod: method,
 			BinaryPath:    executablePath,
 			Message:       fmt.Sprintf("updated to %s", checkResult.LatestVersion),
+			Warnings:      warnings,
 		}, nil
 	}
 }
@@ -86,7 +99,14 @@ func FormatApply(result ApplyResult) string {
 	if !result.Applied {
 		return Format(result.Result)
 	}
-	return fmt.Sprintf("[zero] %s (%s -> %s)\nBinary: %s", result.Message, result.CurrentVersion, result.LatestVersion, result.BinaryPath)
+	lines := []string{
+		fmt.Sprintf("[zero] %s (%s -> %s)", result.Message, result.CurrentVersion, result.LatestVersion),
+		"Binary: " + result.BinaryPath,
+	}
+	for _, warning := range result.Warnings {
+		lines = append(lines, "Warning: "+warning)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func applyNpmUpdate(ctx context.Context) error {
@@ -103,38 +123,41 @@ func applyNpmUpdate(ctx context.Context) error {
 	return nil
 }
 
-func applyStandaloneUpdate(ctx context.Context, result Result, executablePath string) error {
+func applyStandaloneUpdate(ctx context.Context, result Result, executablePath string) ([]string, error) {
 	asset := result.ReleaseAsset
 	if !asset.Verified {
-		return fmt.Errorf("release asset for %s-%s could not be verified", asset.Platform, asset.Arch)
+		return nil, fmt.Errorf("release asset for %s-%s could not be verified", asset.Platform, asset.Arch)
 	}
 
 	tempDir, err := os.MkdirTemp("", "zero-update-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() {
 		_ = os.RemoveAll(tempDir)
 	}()
 
+	downloadCtx, cancel := context.WithTimeout(ctx, DefaultDownloadTimeout)
+	defer cancel()
+
 	archivePath := filepath.Join(tempDir, asset.ArchiveName)
-	if err := downloadFile(ctx, asset.ArchiveURL, archivePath); err != nil {
-		return fmt.Errorf("download release archive: %w", err)
+	if err := downloadFile(downloadCtx, asset.ArchiveURL, archivePath); err != nil {
+		return nil, fmt.Errorf("download release archive: %w", err)
 	}
 	checksumPath := filepath.Join(tempDir, asset.ChecksumName)
-	if err := downloadFile(ctx, asset.ChecksumURL, checksumPath); err != nil {
-		return fmt.Errorf("download release checksum: %w", err)
+	if err := downloadFile(downloadCtx, asset.ChecksumURL, checksumPath); err != nil {
+		return nil, fmt.Errorf("download release checksum: %w", err)
 	}
 	if _, err := release.VerifySHA256Checksum(checksumPath); err != nil {
-		return fmt.Errorf("verify release checksum: %w", err)
+		return nil, fmt.Errorf("verify release checksum: %w", err)
 	}
 
 	extractDir := filepath.Join(tempDir, "extracted")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
-		return err
+		return nil, err
 	}
 	if err := extractArchive(archivePath, extractDir); err != nil {
-		return fmt.Errorf("extract release archive: %w", err)
+		return nil, fmt.Errorf("extract release archive: %w", err)
 	}
 
 	binaryName := "zero"
@@ -148,17 +171,18 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 
 	newBinaryPath, err := findByBasename(extractDir, binaryName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if newBinaryPath == "" {
-		return fmt.Errorf("release archive did not contain %s", binaryName)
+		return nil, fmt.Errorf("release archive did not contain %s", binaryName)
 	}
 
 	targetDir := filepath.Dir(executablePath)
 	if err := installBinary(newBinaryPath, executablePath); err != nil {
-		return err
+		return nil, err
 	}
 
+	var warnings []string
 	for _, name := range optionalBinaries {
 		source, err := findByBasename(extractDir, name)
 		if err != nil || source == "" {
@@ -168,10 +192,12 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 		if _, err := os.Stat(destPath); err != nil {
 			continue // only refresh helpers this install already has
 		}
-		_ = installBinary(source, destPath)
+		if err := installBinary(source, destPath); err != nil {
+			warnings = append(warnings, fmt.Sprintf("failed to update helper %s: %v", name, err))
+		}
 	}
 
-	return nil
+	return warnings, nil
 }
 
 // installBinary stages sourcePath next to targetPath (same directory, so the

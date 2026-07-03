@@ -52,6 +52,9 @@ func runUpdateCommand(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}
 		options.apply = true
 	}
+	if options.apply && options.target != "" {
+		return writeUsageError(stderr, "--target cannot be combined with --apply; it only verifies release assets for --check.")
+	}
 	updateOptions := update.Options{
 		CurrentVersion: version,
 		Repository:     options.repository,
@@ -202,7 +205,7 @@ Flags:
       --repo <owner/repo>     Repository to check when no endpoint is provided
       --endpoint <url|repo>   Release API URL or owner/repo slug to check
       --timeout <duration>    Release check timeout (default 5s)
-      --target <platform>     Release target to verify (for example windows-x64)
+      --target <platform>     Release target to verify with --check (for example windows-x64); not valid with --apply
   -h, --help                  Show this help
 `)
 	return err

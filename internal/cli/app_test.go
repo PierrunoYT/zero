@@ -1370,6 +1370,32 @@ func TestRunUpdateRejectsCheckAndApplyTogether(t *testing.T) {
 	}
 }
 
+func TestRunUpdateRejectsTargetWithApply(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "--apply", "--target", "linux-arm64"},
+		{"upgrade", "--target", "linux-arm64"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+				applyUpdate: func(context.Context, update.Options) (update.ApplyResult, error) {
+					t.Fatal("applyUpdate should not run when --target is combined with --apply")
+					return update.ApplyResult{}, nil
+				},
+			})
+
+			if exitCode != exitUsage {
+				t.Fatalf("expected usage exit code, got %d", exitCode)
+			}
+			if got := stderr.String(); !strings.Contains(got, "--target cannot be combined with --apply") {
+				t.Fatalf("expected --target/--apply usage error, got %q", got)
+			}
+		})
+	}
+}
+
 func TestRunUpdateReportsApplyError(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

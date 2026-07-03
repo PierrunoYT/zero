@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/release"
@@ -102,8 +103,10 @@ func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 		},
 	}
 
-	if err := applyStandaloneUpdate(context.Background(), result, executablePath); err != nil {
+	if warnings, err := applyStandaloneUpdate(context.Background(), result, executablePath); err != nil {
 		t.Fatalf("applyStandaloneUpdate returned error: %v", err)
+	} else if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
 	}
 
 	data, err := os.ReadFile(executablePath)
@@ -142,6 +145,98 @@ func TestApplyStandaloneUpdateReplacesBinary(t *testing.T) {
 			}
 			t.Fatalf("unexpected extra file left in install dir: %s", name)
 		}
+	}
+}
+
+func TestApplyStandaloneUpdateWarnsWhenHelperRefreshFails(t *testing.T) {
+	binaryName := "zero"
+	optionalName := "zero-seccomp"
+	if runtime.GOOS == "windows" {
+		binaryName = "zero.exe"
+		optionalName = "zero-windows-command-runner.exe"
+	} else if runtime.GOOS == "darwin" {
+		t.Skip("macOS ships no optional helper binaries to refresh")
+	}
+
+	installDir := t.TempDir()
+	executablePath := filepath.Join(installDir, binaryName)
+	if err := os.WriteFile(executablePath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile executable: %v", err)
+	}
+	// The helper must already exist for a refresh to be attempted at all.
+	existingHelperPath := filepath.Join(installDir, optionalName)
+	if err := os.WriteFile(existingHelperPath, []byte("old-helper"), 0o755); err != nil {
+		t.Fatalf("WriteFile helper: %v", err)
+	}
+	// Force installBinary's staging copy to fail by occupying its staged
+	// "<helper>.new" path with a directory instead of a file.
+	if err := os.MkdirAll(existingHelperPath+".new", 0o755); err != nil {
+		t.Fatalf("MkdirAll staged path: %v", err)
+	}
+
+	archiveName := "zero-v0.2.0-linux-x64.tar.gz"
+	archiveDir := t.TempDir()
+	archivePath := filepath.Join(archiveDir, archiveName)
+	writeTestTarGz(t, archivePath, map[string]string{
+		"zero":                            "new-binary",
+		"zero.exe":                        "new-binary-exe",
+		"zero-seccomp":                    "new-helper",
+		"zero-windows-command-runner.exe": "new-helper-exe",
+	})
+	checksum, err := release.SHA256File(archivePath)
+	if err != nil {
+		t.Fatalf("SHA256File: %v", err)
+	}
+	checksumText, err := release.FormatSHA256Checksum(checksum, archiveName)
+	if err != nil {
+		t.Fatalf("FormatSHA256Checksum: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + archiveName:
+			http.ServeFile(w, r, archivePath)
+		case "/" + archiveName + ".sha256":
+			_, _ = w.Write([]byte(checksumText))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result := Result{
+		LatestVersion: "0.2.0",
+		ReleaseAsset: AssetCheck{
+			Platform:      "linux",
+			Arch:          "x64",
+			ArchiveName:   archiveName,
+			ArchiveURL:    server.URL + "/" + archiveName,
+			ChecksumName:  archiveName + ".sha256",
+			ChecksumURL:   server.URL + "/" + archiveName + ".sha256",
+			ArchiveFound:  true,
+			ChecksumFound: true,
+			Verified:      true,
+		},
+	}
+
+	warnings, err := applyStandaloneUpdate(context.Background(), result, executablePath)
+	if err != nil {
+		t.Fatalf("applyStandaloneUpdate returned error: %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], optionalName) {
+		t.Fatalf("expected one warning mentioning %s, got %v", optionalName, warnings)
+	}
+
+	data, err := os.ReadFile(executablePath)
+	if err != nil {
+		t.Fatalf("ReadFile executable: %v", err)
+	}
+	wantBinary := "new-binary"
+	if runtime.GOOS == "windows" {
+		wantBinary = "new-binary-exe"
+	}
+	if string(data) != wantBinary {
+		t.Fatalf("main binary should still be updated despite helper failure: got %q, want %q", data, wantBinary)
 	}
 }
 
@@ -193,7 +288,7 @@ func TestApplyStandaloneUpdateRejectsChecksumMismatch(t *testing.T) {
 		},
 	}
 
-	if err := applyStandaloneUpdate(context.Background(), result, executablePath); err == nil {
+	if _, err := applyStandaloneUpdate(context.Background(), result, executablePath); err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
 
