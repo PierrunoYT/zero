@@ -96,7 +96,11 @@ func TestDetectInteractiveCommandSuggestsWindowsAlternativesOnWindows(t *testing
 	}{
 		{command: "more file.txt", avoid: []string{"cat", "head", "tail"}, want: "type"},
 		{command: "less file.txt", avoid: []string{"cat", "head", "tail"}, want: "type"},
+		{command: "most file.txt", avoid: []string{"cat", "head", "tail"}, want: "type"},
+		{command: "top", avoid: []string{"ps aux"}, want: "tasklist"},
 		{command: "htop", avoid: []string{"ps aux"}, want: "tasklist"},
+		{command: "btop", avoid: []string{"ps aux"}, want: "tasklist"},
+		{command: "btm", avoid: []string{"ps aux"}, want: "tasklist"},
 		{command: "tail -f app.log", avoid: []string{"tail -n"}, want: "read_file"},
 	} {
 		result := DetectInteractiveCommand(tc.command, "windows")

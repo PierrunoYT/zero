@@ -486,8 +486,12 @@ func TestBashToolBlocksInteractiveCommandThroughSandbox(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("expected error status, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "interactive") || !strings.Contains(result.Output, "cat") {
-		t.Fatalf("expected pager guard message with cat suggestion, got %q", result.Output)
+	wantSuggestion := "cat"
+	if runtime.GOOS == "windows" {
+		wantSuggestion = "type"
+	}
+	if !strings.Contains(result.Output, "interactive") || !strings.Contains(result.Output, wantSuggestion) {
+		t.Fatalf("expected pager guard message with %q suggestion, got %q", wantSuggestion, result.Output)
 	}
 }
 
