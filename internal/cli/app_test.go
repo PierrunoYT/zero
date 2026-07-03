@@ -1267,6 +1267,127 @@ func TestRunUpdateReportsUpToDate(t *testing.T) {
 	}
 }
 
+func TestRunUpdateApplyTextAndJSON(t *testing.T) {
+	applyResult := update.ApplyResult{
+		Result: update.Result{
+			CurrentVersion:  "dev",
+			LatestVersion:   "0.2.0",
+			UpdateAvailable: true,
+		},
+		Applied:       true,
+		InstallMethod: update.InstallMethodStandalone,
+		BinaryPath:    "/usr/local/bin/zero",
+		Message:       "updated to 0.2.0",
+	}
+	var gotOptions update.Options
+	deps := appDeps{
+		applyUpdate: func(_ context.Context, options update.Options) (update.ApplyResult, error) {
+			gotOptions = options
+			return applyResult, nil
+		},
+		checkUpdate: func(context.Context, update.Options) (update.Result, error) {
+			t.Fatal("checkUpdate should not run for --apply")
+			return update.Result{}, nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"update", "--apply"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated to 0.2.0") {
+		t.Fatalf("unexpected apply text: %q", stdout.String())
+	}
+	if gotOptions.CurrentVersion != "dev" {
+		t.Fatalf("unexpected options passed to applyUpdate: %#v", gotOptions)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"update", "--apply", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var payload struct {
+		Applied       bool   `json:"applied"`
+		InstallMethod string `json:"installMethod"`
+		BinaryPath    string `json:"binaryPath"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("apply JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if !payload.Applied || payload.InstallMethod != string(update.InstallMethodStandalone) || payload.BinaryPath != applyResult.BinaryPath {
+		t.Fatalf("unexpected apply JSON: %#v", payload)
+	}
+}
+
+func TestRunUpgradeDefaultsToApply(t *testing.T) {
+	var applyCalled bool
+	deps := appDeps{
+		applyUpdate: func(context.Context, update.Options) (update.ApplyResult, error) {
+			applyCalled = true
+			return update.ApplyResult{Message: "already up to date"}, nil
+		},
+		checkUpdate: func(context.Context, update.Options) (update.Result, error) {
+			t.Fatal("checkUpdate should not run for `zero upgrade`")
+			return update.Result{}, nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"upgrade"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !applyCalled {
+		t.Fatal("expected `zero upgrade` to call applyUpdate")
+	}
+}
+
+func TestRunUpdateRejectsCheckAndApplyTogether(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"update", "--check", "--apply"}, &stdout, &stderr, appDeps{
+		checkUpdate: func(context.Context, update.Options) (update.Result, error) {
+			t.Fatal("checkUpdate should not run")
+			return update.Result{}, nil
+		},
+		applyUpdate: func(context.Context, update.Options) (update.ApplyResult, error) {
+			t.Fatal("applyUpdate should not run")
+			return update.ApplyResult{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit code, got %d", exitCode)
+	}
+	if got := stderr.String(); !strings.Contains(got, "only one of --check or --apply") {
+		t.Fatalf("expected --check/--apply usage error, got %q", got)
+	}
+}
+
+func TestRunUpdateReportsApplyError(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"update", "--apply"}, &stdout, &stderr, appDeps{
+		applyUpdate: func(context.Context, update.Options) (update.ApplyResult, error) {
+			return update.ApplyResult{}, errors.New("download failed")
+		},
+	})
+
+	if exitCode == exitSuccess {
+		t.Fatalf("expected non-success exit code, got %d", exitCode)
+	}
+	if got := stderr.String(); !strings.Contains(got, "download failed") {
+		t.Fatalf("expected apply error, got %q", got)
+	}
+}
+
 func assertHelpOutput(t *testing.T, args []string) {
 	t.Helper()
 

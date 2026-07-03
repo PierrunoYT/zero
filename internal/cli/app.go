@@ -80,6 +80,7 @@ type appDeps struct {
 	runTUI                 func(context.Context, tui.Options) int
 	runEditor              func(string) error
 	checkUpdate            func(context.Context, update.Options) (update.Result, error)
+	applyUpdate            func(context.Context, update.Options) (update.ApplyResult, error)
 	now                    func() time.Time
 }
 
@@ -180,6 +181,7 @@ func defaultAppDeps() appDeps {
 		runTUI:           tui.Run,
 		runEditor:        openEditor,
 		checkUpdate:      update.Check,
+		applyUpdate:      update.Apply,
 		now:              time.Now,
 	}
 }
@@ -383,6 +385,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSandbox(args[1:], stdout, stderr, deps)
 	case "update":
 		return runUpdate(args[1:], stdout, stderr, deps)
+	case "upgrade":
+		return runUpgrade(args[1:], stdout, stderr, deps)
 	case "worktrees", "worktree":
 		return runWorktrees(args[1:], stdout, stderr, deps)
 	case "verify":
@@ -514,6 +518,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.checkUpdate == nil {
 		deps.checkUpdate = defaults.checkUpdate
+	}
+	if deps.applyUpdate == nil {
+		deps.applyUpdate = defaults.applyUpdate
 	}
 	if deps.now == nil {
 		deps.now = defaults.now
