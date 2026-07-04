@@ -44,7 +44,7 @@ Useful flags:
 | Flag | Purpose |
 |---|---|
 | `--repo <owner/repo>` | Check another GitHub repository. |
-| `--endpoint <url|owner/repo>` | Check a specific release API URL or repository slug. |
+| `--endpoint <url\|owner/repo>` | Check a specific release API URL or repository slug. |
 | `--timeout <duration>` | Override the default release check timeout. |
 | `--target <platform-arch>` | Validate release metadata for another supported target (`--check` only). |
 
