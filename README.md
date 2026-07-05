@@ -283,6 +283,32 @@ zero cron             scheduled agent jobs
 zero update           check for newer releases
 ```
 
+## Extending Zero
+
+### Project instructions
+
+Zero appends project-specific guidance to the system prompt from the first
+`AGENTS.md`, `ZERO.md`, or `.zero/AGENTS.md` file found in each directory from
+the git root down to your current working directory (checked in that order
+per directory). Files are injected general-to-specific, capped at 8 KiB per
+file and 32 KiB total.
+
+### Plugins
+
+Plugins are discovered from `~/.config/zero/plugins/<name>/plugin.json`
+(user scope) and `<repo>/.zero/plugins/<name>/plugin.json` (project scope),
+and managed with `zero plugins`. A manifest can declare:
+
+- `tools` — custom tools (`command`, `args`, `inputSchema`, and a
+  `permission` of `allow`, `prompt`, or `deny`)
+- `hooks` — commands run on `beforeTool`, `afterTool`, `sessionStart`, or
+  `sessionEnd`
+- `prompts` and `skills` — additional prompt/skill files
+
+MCP servers (`zero mcp`) and standalone markdown skills (`zero skills`) use
+the same extension points and can also be wired up outside of a plugin
+manifest.
+
 ## Appearance And Accessibility
 
 | Control | Effect |
