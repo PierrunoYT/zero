@@ -8,7 +8,7 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
-  <a href="https://discord.com/invite/N9CrWCH7b"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
+  <a href="https://discord.com/invite/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
   <a href="README.md">English</a> | <strong>中文</strong>
 </p>
@@ -291,7 +291,7 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 
 ## 社区
 
-加入 [Discord 服务器](https://discord.com/invite/N9CrWCH7b) 提问、反馈和讨论。
+加入 [Discord 服务器](https://discord.com/invite/CaQDS6wdFn) 提问、反馈和讨论。
 
 ## 贡献
 
