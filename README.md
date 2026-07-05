@@ -294,8 +294,8 @@ per directory). Files are injected general-to-specific, capped at 8 KiB per
 file and 32 KiB total.
 
 A personal `ZERO.md` under `config.UserConfigDir()/zero/ZERO.md`
-(`~/.config/zero/ZERO.md` on Linux/macOS, `%AppData%\Roaming\zero\ZERO.md` on
-Windows) applies across every workspace, ahead of any project guidelines.
+(`$XDG_CONFIG_HOME/zero/ZERO.md` or `~/.config/zero/ZERO.md` on Linux/macOS,
+`%AppData%\Roaming\zero\ZERO.md` on Windows) applies across every workspace, ahead of any project guidelines.
 
 ### Plugins
 
