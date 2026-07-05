@@ -300,7 +300,8 @@ Plugins are discovered from `~/.config/zero/plugins/<name>/plugin.json`
 and managed with `zero plugins`. A manifest can declare:
 
 - `tools` — custom tools (`command`, `args`, `inputSchema`, and a
-  `permission` of `allow`, `prompt`, or `deny`)
+  `permission` of `prompt` or `deny`; `allow` is honored only when manifest tool
+  auto-approval is enabled)
 - `hooks` — commands run on `beforeTool`, `afterTool`, `sessionStart`, or
   `sessionEnd`
 - `prompts` and `skills` — additional prompt/skill files
