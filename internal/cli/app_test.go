@@ -1504,6 +1504,7 @@ func assertHelpOutput(t *testing.T, args []string) {
 		"mcp",
 		"sandbox",
 		"update",
+		"upgrade",
 		"worktrees",
 		"verify",
 		"serve",
