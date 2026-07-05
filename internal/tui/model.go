@@ -29,6 +29,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -62,6 +63,7 @@ type model struct {
 	ctx                         context.Context
 	cwd                         string
 	userCommands                []usercommands.Command // file-sourced /commands (.zero/commands)
+	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath              string
 	doctorUserConfigPath        string
 	projectConfigPath           string
@@ -735,6 +737,7 @@ func newModel(ctx context.Context, options Options) model {
 		cwd:                         cwd,
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
+		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
@@ -3730,6 +3733,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
+	case pickerSkill:
+		// Fill the composer with "/name " so the user adds their request before
+		// submitting (a bare second Enter runs it without one); names the slash
+		// path cannot reach run immediately instead.
+		m, cmd = m.chooseSkillFromPicker(item)
 	case pickerTheme:
 		// The hovered palette is already live from the preview; handleThemeCommand
 		// records the choice (m.themeMode) and re-applies it, and reports the switch.
@@ -3844,6 +3852,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.quit()
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
+		return m, nil
+	case commandSkills:
+		// With skills installed, /skills opens a searchable picker (like /model);
+		// the text card remains only as the no-skills install hint.
+		if picker := m.newSkillPicker(); picker != nil {
+			m.picker = picker
+			return m, nil
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.skillsText()})
 		return m, nil
 	case commandMCP:
 		if strings.TrimSpace(command.text) == "" {
@@ -4038,6 +4055,11 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		// from .zero/commands/<name>.md — expand its template and run it as a
 		// normal prompt before reporting "unknown".
 		if next, cmd, handled := m.handleUserCommand(command.text); handled {
+			return next, cmd
+		}
+		// Then an installed skill: "/<skill-name> [args]" runs the skill directly
+		// (deterministic invocation, vs waiting for the model to pull it in).
+		if next, cmd, handled := m.handleSkillCommand(command.text); handled {
 			return next, cmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
