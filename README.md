@@ -282,7 +282,7 @@ zero verify           detect and run local verification checks
 zero changes          inspect and commit local git changes
 zero usage            token usage and estimated cost
 zero cron             scheduled agent jobs
-zero update           check for newer releases
+zero update --check   check for newer releases
 zero upgrade          download, verify, and install the latest release
 ```
 

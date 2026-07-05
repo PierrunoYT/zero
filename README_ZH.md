@@ -246,7 +246,7 @@ zero verify           检测和运行本地验证检查
 zero changes          检查和提交本地 Git 变更
 zero usage            Token 使用量和估算成本
 zero cron             定时智能体任务
-zero update           检查更新版本
+zero update --check   检查更新版本
 zero upgrade          下载、验证并安装最新版本
 ```
 
