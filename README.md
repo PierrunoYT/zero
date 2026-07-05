@@ -285,7 +285,7 @@ zero update           check for newer releases
 
 ## Extending Zero
 
-### Project instructions
+### Project and personal instructions
 
 Zero appends project-specific guidance to the system prompt from the first
 `AGENTS.md`, `ZERO.md`, or `.zero/AGENTS.md` file found in each directory from
@@ -293,11 +293,17 @@ the git root down to your current working directory (checked in that order
 per directory). Files are injected general-to-specific, capped at 8 KiB per
 file and 32 KiB total.
 
+A personal `ZERO.md` under `config.UserConfigDir()/zero/ZERO.md`
+(`~/.config/zero/ZERO.md` on Linux/macOS, `%AppData%\Roaming\zero\ZERO.md` on
+Windows) applies across every workspace, ahead of any project guidelines.
+
 ### Plugins
 
-Plugins are discovered from `~/.config/zero/plugins/<name>/plugin.json`
-(user scope) and `<repo>/.zero/plugins/<name>/plugin.json` (project scope),
-and managed with `zero plugins`. A manifest can declare:
+Plugins are discovered from `~/.config/zero/plugins/<name>/plugin.json` (user
+scope — `$XDG_CONFIG_HOME` or `~/.config` on every OS, independent of the
+`config.UserConfigDir()` path used above) and `<cwd>/.zero/plugins/<name>/plugin.json`
+(project scope — resolved from the current working directory, not the repo
+root), and managed with `zero plugins`. A manifest can declare:
 
 - `tools` — custom tools (`command`, `args`, `inputSchema`, and a
   `permission` of `prompt` or `deny`; `allow` is honored only when manifest tool
