@@ -26,6 +26,8 @@ const (
 	secretRetryDelay    = 2 * time.Millisecond
 )
 
+var openSecretLockFile = os.OpenFile
+
 // Crypter encrypts a blob at rest with AES-256-GCM under a per-user random secret
 // persisted (0600) at secretPath.
 type Crypter struct {
@@ -107,7 +109,7 @@ func createSecretFile(path string) ([]byte, error) {
 	lockPath := path + ".lock"
 	var lastErr error
 	for attempt := 0; attempt < secretRetryAttempts; attempt++ {
-		lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		lock, err := openSecretLockFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_ = lock.Close()
 			defer os.Remove(lockPath)

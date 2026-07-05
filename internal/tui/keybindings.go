@@ -279,6 +279,12 @@ var reservedBindings = []struct {
 	{parseBinding("esc"), "cancel / close"},
 	{parseBinding("enter"), "submit"},
 	{parseBinding("shift+tab"), "cycle permission mode"},
+	{parseBinding("tab"), "navigation / completion"},
+	{parseBinding("backspace"), "composer edit / attachment removal"},
+	{parseBinding("up"), "history/navigation"},
+	{parseBinding("down"), "history/navigation"},
+	{parseBinding("pgup"), "transcript scroll"},
+	{parseBinding("pgdown"), "transcript scroll"},
 	{parseBinding("ctrl+f"), "favorite model (in the /model picker)"},
 	{parseBinding("?"), "help overlay"},
 }
@@ -291,17 +297,36 @@ var reservedBindings = []struct {
 // as a startup notice.
 func sanitizeKeyBindings(b keyBindings) (keyBindings, []string) {
 	entries := []struct {
-		name    string
-		binding *parsedBinding
+		name           string
+		binding        *parsedBinding
+		defaultBinding parsedBinding
 	}{
-		{"toggleDetailed", &b.toggleDetailed},
-		{"toggleMouse", &b.toggleMouse},
-		{"cycleReasoning", &b.cycleReasoning},
-		{"togglePlan", &b.togglePlan},
-		{"toggleSidebar", &b.toggleSidebar},
+		{"toggleDetailed", &b.toggleDetailed, parseBinding("ctrl+o")},
+		{"toggleMouse", &b.toggleMouse, parseBinding("ctrl+e")},
+		{"cycleReasoning", &b.cycleReasoning, parseBinding("ctrl+t")},
+		{"togglePlan", &b.togglePlan, parseBinding("ctrl+p")},
+		{"toggleSidebar", &b.toggleSidebar, parseBinding("ctrl+b")},
 	}
 
 	var warnings []string
+	for _, e := range entries {
+		if e.binding.isZero() {
+			continue
+		}
+		for _, other := range entries {
+			if other.name == e.name || !other.binding.isZero() {
+				continue
+			}
+			if *e.binding == other.defaultBinding {
+				warnings = append(warnings, fmt.Sprintf(
+					"keybindings.%s (%s) conflicts with keybindings.%s default (%s); using the default instead.",
+					e.name, e.binding.Label(), other.name, other.defaultBinding.Label()))
+				*e.binding = parsedBinding{}
+				break
+			}
+		}
+	}
+
 	for _, e := range entries {
 		if e.binding.isZero() {
 			continue

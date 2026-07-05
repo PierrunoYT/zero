@@ -349,3 +349,38 @@ func TestSanitizeKeyBindingsNoCollisions(t *testing.T) {
 			sanitized.toggleDetailed.Label(), sanitized.toggleSidebar.Label())
 	}
 }
+
+// A configured binding must not shadow another action that is still on its
+// built-in default chord.
+func TestSanitizeKeyBindingsDropsCollisionWithOtherDefault(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleDetailed: "ctrl+t", // collides with cycleReasoning default
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if !sanitized.toggleDetailed.isZero() {
+		t.Errorf("toggleDetailed should be reverted to default, got %q", sanitized.toggleDetailed.Label())
+	}
+	if !sanitized.cycleReasoning.isZero() {
+		t.Errorf("cycleReasoning should remain default (zero), got %q", sanitized.cycleReasoning.Label())
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}
+
+// Bare hardcoded keys handled directly in updateModel (e.g. Tab navigation)
+// are reserved too and must not be shadowed by configurable bindings.
+func TestSanitizeKeyBindingsDropsBareHardcodedCollision(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleDetailed: "tab",
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if !sanitized.toggleDetailed.isZero() {
+		t.Errorf("toggleDetailed should be reverted to default, got %q", sanitized.toggleDetailed.Label())
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("want exactly 1 warning, got %d: %v", len(warnings), warnings)
+	}
+}
