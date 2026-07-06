@@ -76,7 +76,7 @@ func (tracker *FileTracker) Version(absPath string) (FileVersion, bool) {
 // this session (as opposed to an overwrite of something that already existed).
 // Zero surfaces this list at the end of a headless run so a scratch/debug file
 // left behind by the model (e.g. `_fix_test.py`) is caught before it can be
-// committed by accident — see the completion summary in cli.scratchFileWarning.
+// committed by accident in the completion summary.
 func (tracker *FileTracker) RecordCreated(absPath string) {
 	if tracker == nil {
 		return

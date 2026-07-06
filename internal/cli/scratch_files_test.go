@@ -10,6 +10,9 @@ import (
 
 func runGitForScratchTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
@@ -29,7 +32,7 @@ func TestScratchFileWarningFlagsUntrackedCreatedFile(t *testing.T) {
 	runGitForScratchTest(t, root, "add", "README.md")
 	runGitForScratchTest(t, root, "commit", "-m", "init")
 
-	scratchPath := filepath.Join(root, "_debug.py")
+	scratchPath := filepath.Join(root, "scratch file.py")
 	if err := os.WriteFile(scratchPath, []byte("print('debug')"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -38,8 +41,8 @@ func TestScratchFileWarningFlagsUntrackedCreatedFile(t *testing.T) {
 	if warning == "" {
 		t.Fatal("expected a warning about the untracked scratch file")
 	}
-	if !strings.Contains(warning, "_debug.py") {
-		t.Fatalf("expected warning to mention _debug.py, got %q", warning)
+	if !strings.Contains(warning, "scratch file.py") {
+		t.Fatalf("expected warning to mention scratch file.py, got %q", warning)
 	}
 }
 

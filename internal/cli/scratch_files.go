@@ -44,7 +44,7 @@ func scratchFileWarning(workspaceRoot string, createdFiles []string) string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	args := append([]string{"-C", workspaceRoot, "status", "--porcelain", "--untracked-files=all", "--"}, existing...)
+	args := append([]string{"-C", workspaceRoot, "status", "--porcelain", "-z", "--untracked-files=all", "--"}, existing...)
 	output, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
 		// Not a git repo (or git failed for some other reason) — nothing
@@ -53,12 +53,11 @@ func scratchFileWarning(workspaceRoot string, createdFiles []string) string {
 	}
 
 	var untracked []string
-	for _, line := range strings.Split(string(output), "\n") {
-		if !strings.HasPrefix(line, "?? ") {
+	for _, entry := range strings.Split(string(output), "\x00") {
+		if !strings.HasPrefix(entry, "?? ") {
 			continue
 		}
-		relative := strings.TrimSpace(strings.TrimPrefix(line, "??"))
-		relative = strings.Trim(relative, "\"")
+		relative := strings.TrimPrefix(entry, "?? ")
 		untracked = append(untracked, relative)
 	}
 	if len(untracked) == 0 {
