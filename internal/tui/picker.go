@@ -440,23 +440,29 @@ func pickerItemDedupKey(item pickerItem) string {
 
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
 	result := []pickerItem{}
-	seen := map[string]bool{}
+	// Favorites keep the pre-provider-aware semantics: one row per favorited
+	// model ID, regardless of how many providers offer it. Track seen favorite
+	// model IDs by Value alone so a model favorited once doesn't surface twice
+	// just because it's in multiple provider catalogs.
+	favoriteSeen := map[string]bool{}
 	all := append(append([]pickerItem{}, recent...), catalog...)
 	for _, item := range all {
-		if item.Value == "" || !m.favoriteModels[item.Value] {
-			continue
-		}
-		key := pickerItemDedupKey(item)
-		if seen[key] {
+		if item.Value == "" || !m.favoriteModels[item.Value] || favoriteSeen[item.Value] {
 			continue
 		}
 		item.Group = "Favorites"
 		item.Favorite = true
 		result = append(result, item)
-		seen[key] = true
+		favoriteSeen[item.Value] = true
 	}
+	// Recent and Catalog use the provider-aware de-dup key so the same model ID
+	// offered by different providers shows as distinct, independently selectable
+	// rows. They still skip any model ID already surfaced under Favorites, so a
+	// favorited model doesn't appear in a second group (preserving the prior
+	// "favorited models are hidden from the rest" behavior).
+	seen := map[string]bool{}
 	for _, item := range recent {
-		if item.Value == "" {
+		if item.Value == "" || favoriteSeen[item.Value] {
 			continue
 		}
 		key := pickerItemDedupKey(item)
@@ -469,7 +475,7 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 		seen[key] = true
 	}
 	for _, item := range catalog {
-		if item.Value == "" {
+		if item.Value == "" || favoriteSeen[item.Value] {
 			continue
 		}
 		key := pickerItemDedupKey(item)
@@ -881,9 +887,12 @@ func (m model) persistFavoriteModels() error {
 // back to the front rather than leaving a stale older copy), caps the result,
 // and persists it. Called after every successful /model switch (typed command
 // or picker), so the "Recent" section reflects real switching history even
-// across sessions. A no-op when modelID is blank or there is no user config
-// path to persist to (in-memory history alone would not survive restart, and
-// silently diverging from the persisted list would be confusing).
+// across sessions. Returns the receiver unchanged when modelID is blank.
+// Persistence is skipped when there is no user config path, but the in-memory
+// history is still updated so the picker reflects the selection for the rest
+// of the session — note that such in-memory-only history will not survive a
+// restart, which is why a missing config path is logged separately rather than
+// silently diverging from the persisted list.
 func (m model) recordRecentModel(provider, modelID string) model {
 	provider = strings.TrimSpace(provider)
 	modelID = strings.TrimSpace(modelID)

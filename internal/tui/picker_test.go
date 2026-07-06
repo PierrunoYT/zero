@@ -557,6 +557,59 @@ func TestAssembleModelPickerItemsDedupesByProviderAndModelPairNotModelIDAlone(t 
 	}
 }
 
+// Favorites keep the pre-provider-aware semantics: one row per favorited
+// model ID, even when that model ID is offered by multiple providers. Recent
+// and Catalog must also skip any model ID already surfaced under Favorites,
+// so a favorited model doesn't reappear in a second group. Recent/Catalog
+// still de-dup among themselves by provider+model so cross-provider rows stay
+// distinct.
+func TestAssembleModelPickerItemsFavoritesDedupByModelIDAndHideFromOtherGroups(t *testing.T) {
+	m := model{favoriteModels: map[string]bool{"shared-model": true}}
+	recent := []pickerItem{
+		{Value: "shared-model", OwnerProvider: "provider-a"},
+		{Value: "shared-model", OwnerProvider: "provider-b"},
+	}
+	catalog := []pickerItem{
+		{Value: "shared-model", OwnerProvider: "provider-a"},
+		{Value: "shared-model", OwnerProvider: "provider-c"},
+		{Value: "other-model", OwnerProvider: "provider-a"},
+	}
+	items := m.assembleModelPickerItems(recent, catalog)
+
+	var favorites []pickerItem
+	for _, item := range items {
+		if item.Group == "Favorites" {
+			favorites = append(favorites, item)
+		}
+	}
+	if len(favorites) != 1 {
+		t.Fatalf("expected exactly one Favorites row for shared-model, got %#v", favorites)
+	}
+	for _, item := range items {
+		if item.Group != "Favorites" && item.Value == "shared-model" {
+			t.Fatalf("favorited model id leaked into %s: %#v", item.Group, item)
+		}
+	}
+	var otherRecent []pickerItem
+	for _, item := range items {
+		if item.Group == "Recent" && item.Value == "other-model" {
+			otherRecent = append(otherRecent, item)
+		}
+	}
+	if len(otherRecent) != 0 {
+		t.Fatalf("other-model is not in recent; got %#v", items)
+	}
+	var otherCatalog []pickerItem
+	for _, item := range items {
+		if item.Group != "Favorites" && item.Group != "Recent" && item.Value == "other-model" {
+			otherCatalog = append(otherCatalog, item)
+		}
+	}
+	if len(otherCatalog) != 1 {
+		t.Fatalf("expected other-model to appear once in Catalog, got %#v", items)
+	}
+}
+
 // End-to-end: the picker's "Recent" section shows the active model plus prior
 // history, newest first, with the active entry deduped against a stale copy
 // already present in history.
