@@ -306,53 +306,71 @@ func sanitizeKeyBindings(b keyBindings) (keyBindings, []string) {
 		{"toggleSidebar", &b.toggleSidebar, parseBinding("ctrl+b")},
 	}
 
+	// Each pass below can revert a binding to its default, which can newly
+	// collide with another entry that was already checked earlier in the
+	// same pass (e.g. toggleMouse="ctrl+p" doesn't collide with togglePlan
+	// while togglePlan="ctrl+t" is explicit, but once togglePlan reverts to
+	// its own default of ctrl+p later in the same pass, toggleMouse's
+	// explicit ctrl+p now silently shadows it). Repeat all three checks to a
+	// fixed point so a reversion is always re-evaluated against the others.
 	var warnings []string
-	for _, e := range entries {
-		if e.binding.isZero() {
-			continue
-		}
-		for _, other := range entries {
-			if other.name == e.name || !other.binding.isZero() {
+	for {
+		changed := false
+
+		for _, e := range entries {
+			if e.binding.isZero() {
 				continue
 			}
-			if *e.binding == other.defaultBinding {
-				warnings = append(warnings, fmt.Sprintf(
-					"keybindings.%s (%s) conflicts with keybindings.%s default (%s); using the default instead.",
-					e.name, e.binding.Label(), other.name, other.defaultBinding.Label()))
-				*e.binding = parsedBinding{}
-				break
+			for _, other := range entries {
+				if other.name == e.name || !other.binding.isZero() {
+					continue
+				}
+				if *e.binding == other.defaultBinding {
+					warnings = append(warnings, fmt.Sprintf(
+						"keybindings.%s (%s) conflicts with keybindings.%s default (%s); using the default instead.",
+						e.name, e.binding.Label(), other.name, other.defaultBinding.Label()))
+					*e.binding = parsedBinding{}
+					changed = true
+					break
+				}
 			}
 		}
-	}
 
-	for _, e := range entries {
-		if e.binding.isZero() {
-			continue
-		}
-		for _, reserved := range reservedBindings {
-			if *e.binding == reserved.binding {
-				warnings = append(warnings, fmt.Sprintf(
-					"keybindings.%s (%s) conflicts with the built-in %s shortcut; using the default instead.",
-					e.name, e.binding.Label(), reserved.description))
-				*e.binding = parsedBinding{}
-				break
+		for _, e := range entries {
+			if e.binding.isZero() {
+				continue
+			}
+			for _, reserved := range reservedBindings {
+				if *e.binding == reserved.binding {
+					warnings = append(warnings, fmt.Sprintf(
+						"keybindings.%s (%s) conflicts with the built-in %s shortcut; using the default instead.",
+						e.name, e.binding.Label(), reserved.description))
+					*e.binding = parsedBinding{}
+					changed = true
+					break
+				}
 			}
 		}
-	}
 
-	claimedBy := map[parsedBinding]string{}
-	for _, e := range entries {
-		if e.binding.isZero() {
-			continue
+		claimedBy := map[parsedBinding]string{}
+		for _, e := range entries {
+			if e.binding.isZero() {
+				continue
+			}
+			if other, ok := claimedBy[*e.binding]; ok {
+				warnings = append(warnings, fmt.Sprintf(
+					"keybindings.%s (%s) conflicts with keybindings.%s; using the default instead.",
+					e.name, e.binding.Label(), other))
+				*e.binding = parsedBinding{}
+				changed = true
+				continue
+			}
+			claimedBy[*e.binding] = e.name
 		}
-		if other, ok := claimedBy[*e.binding]; ok {
-			warnings = append(warnings, fmt.Sprintf(
-				"keybindings.%s (%s) conflicts with keybindings.%s; using the default instead.",
-				e.name, e.binding.Label(), other))
-			*e.binding = parsedBinding{}
-			continue
+
+		if !changed {
+			break
 		}
-		claimedBy[*e.binding] = e.name
 	}
 
 	return b, warnings

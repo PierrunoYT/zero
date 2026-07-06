@@ -369,6 +369,30 @@ func TestSanitizeKeyBindingsDropsCollisionWithOtherDefault(t *testing.T) {
 	}
 }
 
+// A reversion to default made during one collision pass must be
+// re-evaluated against entries already processed earlier in that same pass:
+// toggleMouse="ctrl+p" doesn't collide with togglePlan while togglePlan is
+// still explicitly "ctrl+t", but once togglePlan reverts to its own default
+// of ctrl+p (because ctrl+t collides with cycleReasoning's default),
+// toggleMouse's explicit ctrl+p would otherwise silently shadow it.
+func TestSanitizeKeyBindingsResolvesChainedDefaultCollision(t *testing.T) {
+	cfg := config.KeyBindingsConfig{
+		ToggleMouse: "ctrl+p", // collides with togglePlan's default once togglePlan reverts
+		TogglePlan:  "ctrl+t", // collides with cycleReasoning's default, reverts to togglePlan's own default (ctrl+p)
+	}
+	sanitized, warnings := sanitizeKeyBindings(resolveKeyBindings(cfg))
+
+	if !sanitized.toggleMouse.isZero() {
+		t.Errorf("toggleMouse should be reverted to default once togglePlan adopts ctrl+p, got %q", sanitized.toggleMouse.Label())
+	}
+	if !sanitized.togglePlan.isZero() {
+		t.Errorf("togglePlan should be reverted to default, got %q", sanitized.togglePlan.Label())
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("want exactly 2 warnings, got %d: %v", len(warnings), warnings)
+	}
+}
+
 // Bare hardcoded keys handled directly in updateModel (e.g. Tab navigation)
 // are reserved too and must not be shadowed by configurable bindings.
 func TestSanitizeKeyBindingsDropsBareHardcodedCollision(t *testing.T) {
