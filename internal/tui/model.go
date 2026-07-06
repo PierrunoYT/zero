@@ -403,6 +403,11 @@ type model struct {
 	mcpManager                   *mcpManagerState
 	mcpAddWizard                 *mcpAddWizardState
 	favoriteModels               map[string]bool
+	// recentModels is the automatic history of provider+model switches, newest
+	// first, capped to config.MaxRecentModels. Unlike favoriteModels (manual
+	// pins), this is maintained by recordRecentModel on every successful
+	// switch and persisted via config.SetRecentModels.
+	recentModels []config.RecentModelEntry
 	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
 	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
 	modelPickerLoading           bool
@@ -765,6 +770,7 @@ func newModel(ctx context.Context, options Options) model {
 		modelCatalog:                modelCatalog,
 		providerProfile:             options.ProviderProfile,
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
+		recentModels:                normalizeRecentModelEntries(options.RecentModels),
 		recapsEnabled:               options.RecapsEnabled,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,

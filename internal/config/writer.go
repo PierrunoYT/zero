@@ -131,6 +131,32 @@ func SetFavoriteModels(path string, models []string) (FileConfig, error) {
 	return cfg, nil
 }
 
+// SetRecentModels persists the automatic recent-model-switch history,
+// mirroring SetFavoriteModels (read-modify-atomic-write). Unlike favorites,
+// order is preserved (newest first) rather than sorted, since it reflects
+// switch recency, not an alphabetical preference list.
+func SetRecentModels(path string, entries []RecentModelEntry) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	cfg.Preferences.RecentModels = normalizeRecentModels(entries)
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
 // SetRecapsEnabled persists the post-turn recap preference, mirroring
 // SetFavoriteModels (read-modify-atomic-write).
 func SetRecapsEnabled(path string, enabled bool) (FileConfig, error) {
@@ -189,6 +215,32 @@ func normalizeFavoriteModels(models []string) []string {
 	}
 	sort.Strings(favorites)
 	return favorites
+}
+
+// normalizeRecentModels trims, drops entries with no model id, de-duplicates
+// by provider+model pair (keeping the first/newest occurrence), and caps the
+// result to MaxRecentModels. Order is preserved — the caller is responsible
+// for passing entries newest-first.
+func normalizeRecentModels(entries []RecentModelEntry) []RecentModelEntry {
+	seen := map[string]bool{}
+	recent := make([]RecentModelEntry, 0, len(entries))
+	for _, entry := range entries {
+		provider := strings.TrimSpace(entry.Provider)
+		model := strings.TrimSpace(entry.Model)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(provider) + "\x00" + model
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		recent = append(recent, RecentModelEntry{Provider: provider, Model: model})
+		if len(recent) >= MaxRecentModels {
+			break
+		}
+	}
+	return recent
 }
 
 func writeConfigFile(path string, cfg FileConfig) error {

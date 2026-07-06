@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -497,6 +498,197 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "openai/gpt-4.1 ·") {
 		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	}
+}
+
+// recentModelPairsForPicker pins the active provider+model first (even before
+// it is recorded to history), then follows persisted history in order,
+// de-duplicating by provider+model pair and capping to config.MaxRecentModels
+// (issue: /model picker's "Recent" section only ever showed the active model).
+func TestRecentModelPairsForPickerPinsActiveDedupesAndCaps(t *testing.T) {
+	m := model{
+		providerName: "openrouter",
+		modelName:    "google/gemini-2.5-pro",
+		recentModels: []config.RecentModelEntry{
+			{Provider: "openrouter", Model: "google/gemini-2.5-pro"}, // dup of active: collapses
+			{Provider: "openrouter", Model: "a"},
+			{Provider: "openrouter", Model: "b"},
+			{Provider: "openrouter", Model: "c"},
+			{Provider: "openrouter", Model: "d"},
+			{Provider: "openrouter", Model: "e"}, // beyond the cap: dropped
+		},
+	}
+	got := m.recentModelPairsForPicker()
+	want := []config.RecentModelEntry{
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		{Provider: "openrouter", Model: "a"},
+		{Provider: "openrouter", Model: "b"},
+		{Provider: "openrouter", Model: "c"},
+		{Provider: "openrouter", Model: "d"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recentModelPairsForPicker() = %#v, want %#v", got, want)
+	}
+	if len(got) != config.MaxRecentModels {
+		t.Fatalf("len = %d, want config.MaxRecentModels (%d)", len(got), config.MaxRecentModels)
+	}
+}
+
+// The picker's cross-group de-dup must key on provider+model, not model id
+// alone: the same model id can be offered by two different providers, and
+// those are distinct, independently selectable rows (issue: recents should
+// "de-duplicate by provider+model pair, not model name alone").
+func TestAssembleModelPickerItemsDedupesByProviderAndModelPairNotModelIDAlone(t *testing.T) {
+	m := model{}
+	recent := []pickerItem{
+		{Value: "shared-model", OwnerProvider: "provider-a"},
+		{Value: "shared-model", OwnerProvider: "provider-b"},
+	}
+	items := m.assembleModelPickerItems(recent, nil)
+	if len(items) != 2 {
+		t.Fatalf("expected both provider-a and provider-b rows to survive de-dup, got %#v", items)
+	}
+	owners := map[string]bool{}
+	for _, item := range items {
+		owners[item.OwnerProvider] = true
+	}
+	if !owners["provider-a"] || !owners["provider-b"] {
+		t.Fatalf("expected rows from both providers, got %#v", items)
+	}
+}
+
+// End-to-end: the picker's "Recent" section shows the active model plus prior
+// history, newest first, with the active entry deduped against a stale copy
+// already present in history.
+func TestModelPickerRecentSectionShowsHistoryPastTheActiveModel(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "openrouter",
+		ModelName:    "google/gemini-2.5-pro",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		RecentModels: []config.RecentModelEntry{
+			{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+			{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		},
+	})
+
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected a model picker")
+	}
+	recentValues := []string{}
+	for _, item := range picker.items {
+		if item.Group != "Recent" {
+			break
+		}
+		recentValues = append(recentValues, item.Value)
+	}
+	want := []string{"google/gemini-2.5-pro", "minimax/minimax-m2.1"}
+	if !reflect.DeepEqual(recentValues, want) {
+		t.Fatalf("Recent section values = %#v, want %#v (active pinned first, history deduped)", recentValues, want)
+	}
+}
+
+// Typed /model switches must record + persist recent history, moving a
+// re-selected pair back to the front rather than leaving a stale duplicate.
+func TestModelCommandRecordsAndPersistsRecentHistory(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+
+	m.input.SetValue("/model anthropic/claude-sonnet-4.5")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("modelName = %q, want the switch to apply", m.modelName)
+	}
+
+	m.input.SetValue("/model minimax/minimax-m2.1")
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+
+	want := []config.RecentModelEntry{
+		{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+		{Provider: "openrouter", Model: "anthropic/claude-sonnet-4.5"},
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+	}
+	if !reflect.DeepEqual(m.recentModels, want) {
+		t.Fatalf("recentModels = %#v, want %#v", m.recentModels, want)
+	}
+	persisted := readTUIConfigFixture(t, configPath)
+	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
+		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
+
+	// Re-selecting the oldest pair moves it to the front instead of leaving a
+	// stale duplicate further down the list.
+	m.input.SetValue("/model google/gemini-2.5-pro")
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	want = []config.RecentModelEntry{
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+		{Provider: "openrouter", Model: "anthropic/claude-sonnet-4.5"},
+	}
+	if !reflect.DeepEqual(m.recentModels, want) {
+		t.Fatalf("recentModels after re-selecting = %#v, want %#v", m.recentModels, want)
+	}
+}
+
+// switchProviderModel (the picker's cross-provider path) must also record
+// history, tagged with the provider actually switched to.
+func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openai",
+		ModelName:      "gpt-5.1",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "kimi-k2.7-code:cloud"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+
+	next, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+
+	want := []config.RecentModelEntry{
+		{Provider: "ollama", Model: "kimi-k2.7-code:cloud"},
+		{Provider: "openai", Model: "gpt-5.1"},
+	}
+	if !reflect.DeepEqual(next.recentModels, want) {
+		t.Fatalf("recentModels = %#v, want %#v", next.recentModels, want)
+	}
+	persisted := readTUIConfigFixture(t, configPath)
+	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
+		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
 	}
 }
 

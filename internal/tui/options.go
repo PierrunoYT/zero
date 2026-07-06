@@ -31,6 +31,7 @@ type Options struct {
 	ProviderProfile             config.ProviderProfile
 	SavedProviders              []config.ProviderProfile // all configured providers, for the /model multi-provider list
 	FavoriteModels              []string
+	RecentModels                []config.RecentModelEntry
 	RecapsEnabled               bool
 	Provider                    zeroruntime.Provider
 	NewProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)

@@ -189,12 +189,11 @@ func (m model) newModelPicker() *commandPicker {
 		return nil
 	}
 	activeModel := strings.TrimSpace(m.modelName)
-	recent := []pickerItem{}
-	if activeModel != "" {
-		recent = append(recent, m.modelPickerRecentItem(registry, activeModel))
-	}
-
 	activeProvider := strings.TrimSpace(m.providerName)
+	recent := []pickerItem{}
+	for _, pair := range m.recentModelPairsForPicker() {
+		recent = append(recent, m.modelPickerRecentItem(registry, pair.Provider, pair.Model))
+	}
 	catalog := []pickerItem{}
 	// List every saved provider's models, grouped per provider (one contiguous
 	// section each), so /model shows all configured providers and you can switch
@@ -427,56 +426,119 @@ func (m *model) clearModelPickerLoadState() {
 	m.modelPickerLoadError = ""
 }
 
+// pickerItemDedupKey identifies a picker row for cross-group de-duplication.
+// Rows tagged with an owning provider are keyed by provider+model, not model
+// id alone — the same model id can be offered by multiple providers (e.g. a
+// model name available from both a direct provider and an OpenAI-compatible
+// gateway), and those are distinct, independently selectable rows.
+func pickerItemDedupKey(item pickerItem) string {
+	if owner := strings.TrimSpace(item.OwnerProvider); owner != "" {
+		return strings.ToLower(owner) + "\x00" + item.Value
+	}
+	return item.Value
+}
+
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
 	result := []pickerItem{}
 	seen := map[string]bool{}
 	all := append(append([]pickerItem{}, recent...), catalog...)
 	for _, item := range all {
-		if item.Value == "" || !m.favoriteModels[item.Value] || seen[item.Value] {
+		if item.Value == "" || !m.favoriteModels[item.Value] {
+			continue
+		}
+		key := pickerItemDedupKey(item)
+		if seen[key] {
 			continue
 		}
 		item.Group = "Favorites"
 		item.Favorite = true
 		result = append(result, item)
-		seen[item.Value] = true
+		seen[key] = true
 	}
 	for _, item := range recent {
-		if item.Value == "" || seen[item.Value] {
+		if item.Value == "" {
+			continue
+		}
+		key := pickerItemDedupKey(item)
+		if seen[key] {
 			continue
 		}
 		item.Group = "Recent"
 		item.Favorite = m.favoriteModels[item.Value]
 		result = append(result, item)
-		seen[item.Value] = true
+		seen[key] = true
 	}
 	for _, item := range catalog {
-		if item.Value == "" || seen[item.Value] {
+		if item.Value == "" {
+			continue
+		}
+		key := pickerItemDedupKey(item)
+		if seen[key] {
 			continue
 		}
 		item.Favorite = m.favoriteModels[item.Value]
 		result = append(result, item)
-		seen[item.Value] = true
+		seen[key] = true
 	}
 	return result
 }
 
-func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID string) pickerItem {
+// recentModelPairsForPicker returns the provider+model pairs to show under
+// "Recent", newest first: the active provider/model is always pinned first
+// (even before it has been recorded to history), followed by persisted
+// history, de-duplicated by provider+model pair and capped to
+// config.MaxRecentModels.
+func (m model) recentModelPairsForPicker() []config.RecentModelEntry {
+	pairs := make([]config.RecentModelEntry, 0, config.MaxRecentModels)
+	seen := map[string]bool{}
+	add := func(provider, modelID string) {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" || len(pairs) >= config.MaxRecentModels {
+			return
+		}
+		provider = strings.TrimSpace(provider)
+		key := strings.ToLower(provider) + "\x00" + modelID
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		pairs = append(pairs, config.RecentModelEntry{Provider: provider, Model: modelID})
+	}
+	add(m.providerName, m.modelName)
+	for _, entry := range m.recentModels {
+		add(entry.Provider, entry.Model)
+	}
+	return pairs
+}
+
+// modelPickerRecentItem resolves one "Recent" row for a provider+model pair,
+// tagging it with OwnerProvider so choosing it can switch providers (like any
+// other cross-provider picker row) even when it isn't the active provider.
+func (m model) modelPickerRecentItem(registry modelregistry.Registry, providerName, modelID string) pickerItem {
+	providerName = strings.TrimSpace(providerName)
 	if entry, ok := registry.Resolve(modelID); ok {
 		item := registryModelPickerItem(entry, "Recent")
 		item.Value = modelID
+		item.OwnerProvider = providerName
 		return item
 	}
-	if provider, ok := m.activeProviderDescriptor(); ok {
-		for _, model := range providermodelcatalog.Models(provider) {
-			if model.ID == modelID {
-				item := providerModelPickerItem(provider, model, "Recent")
-				item.Value = modelID
-				return item
+	if profile, ok := m.savedProviderByName(providerName); ok {
+		if descriptor, hasDescriptor := m.descriptorForProfile(profile); hasDescriptor {
+			for _, model := range providermodelcatalog.Models(descriptor) {
+				if model.ID == modelID {
+					item := providerModelPickerItem(descriptor, model, "Recent")
+					item.Value = modelID
+					item.OwnerProvider = profile.Name
+					return item
+				}
 			}
+			item := providerModelPickerItem(descriptor, providermodelcatalog.Model{ID: modelID}, "Recent")
+			item.Value = modelID
+			item.OwnerProvider = profile.Name
+			return item
 		}
-		return providerModelPickerItem(provider, providermodelcatalog.Model{ID: modelID}, "Recent")
 	}
-	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID}
+	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID, OwnerProvider: providerName}
 }
 
 func registryModelPickerItem(entry modelregistry.ModelEntry, group string) pickerItem {
@@ -812,6 +874,59 @@ func (m model) persistFavoriteModels() error {
 	}
 	_, err := config.SetFavoriteModels(m.userConfigPath, favoriteModelValues(m.favoriteModels))
 	return err
+}
+
+// recordRecentModel prepends provider+model to the in-memory recent-selection
+// history, de-duplicates by provider+model pair (moving a re-selected pair
+// back to the front rather than leaving a stale older copy), caps the result,
+// and persists it. Called after every successful /model switch (typed command
+// or picker), so the "Recent" section reflects real switching history even
+// across sessions. A no-op when modelID is blank or there is no user config
+// path to persist to (in-memory history alone would not survive restart, and
+// silently diverging from the persisted list would be confusing).
+func (m model) recordRecentModel(provider, modelID string) model {
+	provider = strings.TrimSpace(provider)
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return m
+	}
+	entries := make([]config.RecentModelEntry, 0, len(m.recentModels)+1)
+	entries = append(entries, config.RecentModelEntry{Provider: provider, Model: modelID})
+	entries = append(entries, m.recentModels...)
+	m.recentModels = normalizeRecentModelEntries(entries)
+	if path := strings.TrimSpace(m.userConfigPath); path != "" {
+		if _, err := config.SetRecentModels(path, m.recentModels); err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "recent model save error: " + err.Error()})
+		}
+	}
+	return m
+}
+
+// normalizeRecentModelEntries trims, drops entries with no model id,
+// de-duplicates by provider+model pair (keeping the first/newest occurrence),
+// and caps the result to config.MaxRecentModels. Mirrors the config package's
+// own normalization so options loaded outside of config.Resolve (e.g. tests
+// constructing Options directly) get the same guarantees.
+func normalizeRecentModelEntries(entries []config.RecentModelEntry) []config.RecentModelEntry {
+	seen := map[string]bool{}
+	out := make([]config.RecentModelEntry, 0, len(entries))
+	for _, entry := range entries {
+		provider := strings.TrimSpace(entry.Provider)
+		modelID := strings.TrimSpace(entry.Model)
+		if modelID == "" {
+			continue
+		}
+		key := strings.ToLower(provider) + "\x00" + modelID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, config.RecentModelEntry{Provider: provider, Model: modelID})
+		if len(out) >= config.MaxRecentModels {
+			break
+		}
+	}
+	return out
 }
 
 func favoriteModelSet(models []string) map[string]bool {

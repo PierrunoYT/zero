@@ -97,6 +97,11 @@ type ToolsConfig struct {
 
 type PreferencesConfig struct {
 	FavoriteModels []string `json:"favoriteModels,omitempty"`
+	// RecentModels is the short automatic history of provider+model pairs the
+	// user has switched to via /model, newest first. Unlike FavoriteModels
+	// (manual pins), this list is maintained automatically on every switch and
+	// capped to MaxRecentModels entries. See RecentModelEntry.
+	RecentModels []RecentModelEntry `json:"recentModels,omitempty"`
 	// Theme is the persisted TUI palette preference — "auto" or a registered theme
 	// name (e.g. "dracula"). Applied at startup below the --theme flag and
 	// ZERO_THEME, so a /theme choice survives restart. Empty = unset (defaults auto).
@@ -106,6 +111,18 @@ type PreferencesConfig struct {
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
 }
+
+// RecentModelEntry is one provider-qualified model selection recorded in
+// Preferences.RecentModels. Provider is the saved provider profile's Name (not
+// a display label), so a recent entry can be resolved back to a concrete
+// profile the same way the /model picker's cross-provider rows are.
+type RecentModelEntry struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// MaxRecentModels caps the persisted/displayed recent-selection history.
+const MaxRecentModels = 5
 
 // RecapsEnabled reports whether post-turn recaps are on. Unset defaults to ON.
 func (p PreferencesConfig) RecapsEnabled() bool {

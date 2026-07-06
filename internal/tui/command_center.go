@@ -411,6 +411,9 @@ func (m model) handleModelCommand(args string) (model, string) {
 		return m, "Model\nProvider rebuild is not available for this TUI session."
 	}
 
+	previousProviderName := m.providerProfile.Name
+	previousModel := m.modelName
+
 	nextProfile := m.providerProfile
 	if provider, ok := m.activeProviderDescriptor(); ok {
 		nextProfile = m.normalizeProfileForProvider(provider)
@@ -444,6 +447,13 @@ func (m model) handleModelCommand(args string) (model, string) {
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(nextProfile.Name)
 	m.modelName = target.modelID
+	// Record the outgoing pair too, not just the destination: otherwise the
+	// model a session started on (never itself the target of a recordRecentModel
+	// call) would silently drop out of "Recent" the moment you switch away from
+	// it once. Recording old-then-new leaves new at the front (recordRecentModel
+	// prepends), with old right behind it.
+	m = m.recordRecentModel(previousProviderName, previousModel)
+	m = m.recordRecentModel(nextProfile.Name, target.modelID)
 	resetEffort := false
 	if m.reasoningEffort != "" && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
 		// Drop an unsupported carry-over preference and fall back to the
@@ -504,6 +514,8 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	if !ok {
 		return m, "Model\nunknown provider " + strconv.Quote(providerName), nil
 	}
+	previousProviderName := m.providerProfile.Name
+	previousModel := m.modelName
 	target = m.profileWithCredential(target)
 	target.Model = strings.TrimSpace(modelID)
 	descriptor, hasDescriptor := m.descriptorForProfile(target)
@@ -521,6 +533,11 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	m.providerProfile = target
 	m.providerName = target.Name
 	m.modelName = target.Model
+	// Record the outgoing pair too — see the matching comment in
+	// handleModelCommand for why (keeps the session's starting model from
+	// silently dropping out of "Recent" on the first switch away from it).
+	m = m.recordRecentModel(previousProviderName, previousModel)
+	m = m.recordRecentModel(target.Name, target.Model)
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(target.Name)
 	if strings.TrimSpace(m.userConfigPath) != "" {
