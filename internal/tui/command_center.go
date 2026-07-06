@@ -411,7 +411,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 		return m, "Model\nProvider rebuild is not available for this TUI session."
 	}
 
-	previousProviderName := m.providerProfile.Name
+	previousProviderName := m.providerName
 	previousModel := m.modelName
 
 	nextProfile := m.providerProfile
@@ -455,7 +455,11 @@ func (m model) handleModelCommand(args string) (model, string) {
 	// instead of two separate disk writes for this one switch.
 	m = m.recordRecentModels(
 		config.RecentModelEntry{Provider: previousProviderName, Model: previousModel},
-		config.RecentModelEntry{Provider: nextProfile.Name, Model: target.modelID},
+		// Record under m.providerName (the same resolved value recentModelPairsForPicker
+		// pins the active row with), not the raw nextProfile.Name: for a provider profile
+		// with no Name set, those two diverge and the pinned active row would fail to
+		// dedupe against the entry just persisted here, showing the same switch twice.
+		config.RecentModelEntry{Provider: m.providerName, Model: target.modelID},
 	)
 	resetEffort := false
 	if m.reasoningEffort != "" && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
@@ -517,7 +521,7 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	if !ok {
 		return m, "Model\nunknown provider " + strconv.Quote(providerName), nil
 	}
-	previousProviderName := m.providerProfile.Name
+	previousProviderName := m.providerName
 	previousModel := m.modelName
 	target = m.profileWithCredential(target)
 	target.Model = strings.TrimSpace(modelID)

@@ -3766,10 +3766,15 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	switch picker.kind {
 	case pickerModel:
 		text := ""
-		if owner := strings.TrimSpace(item.OwnerProvider); owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) {
+		owner := strings.TrimSpace(item.OwnerProvider)
+		_, ownerIsSavedProvider := m.savedProviderByName(owner)
+		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
 			// A model from another saved provider: switch provider + model together.
 			m, text, cmd = m.switchProviderModel(owner, item.Value)
 		} else {
+			// OwnerProvider is blank, matches the active provider, or (registry-fallback
+			// / stale-history rows) doesn't resolve to any saved provider: apply against
+			// the active provider instead of attempting an unresolvable provider switch.
 			m, text = m.handleModelCommand(item.Value)
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})

@@ -211,8 +211,12 @@ func (m model) newModelPicker() *commandPicker {
 	}
 	if len(catalog) == 0 {
 		// No saved providers resolved any models: fall back to the full registry.
+		// Only skip the active model when the entry's own provider also matches the
+		// active provider — a different provider offering the same model id is a
+		// distinct, independently selectable row (same provider-aware de-dup this
+		// PR applies everywhere else), not a duplicate of the pinned "Recent" row.
 		for _, entry := range registry.List(modelregistry.ListOptions{}) {
-			if entry.ID == activeModel {
+			if entry.ID == activeModel && (activeProvider == "" || strings.EqualFold(string(entry.Provider), activeProvider)) {
 				continue
 			}
 			catalog = append(catalog, registryModelPickerItem(entry, "Catalog"))
@@ -445,16 +449,19 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 	// model IDs by Value alone so a model favorited once doesn't surface twice
 	// just because it's in multiple provider catalogs.
 	favoriteSeen := map[string]bool{}
-	all := append(append([]pickerItem{}, recent...), catalog...)
-	for _, item := range all {
-		if item.Value == "" || !m.favoriteModels[item.Value] || favoriteSeen[item.Value] {
-			continue
+	addFavorites := func(items []pickerItem) {
+		for _, item := range items {
+			if item.Value == "" || !m.favoriteModels[item.Value] || favoriteSeen[item.Value] {
+				continue
+			}
+			item.Group = "Favorites"
+			item.Favorite = true
+			result = append(result, item)
+			favoriteSeen[item.Value] = true
 		}
-		item.Group = "Favorites"
-		item.Favorite = true
-		result = append(result, item)
-		favoriteSeen[item.Value] = true
 	}
+	addFavorites(recent)
+	addFavorites(catalog)
 	// Recent and Catalog use the provider-aware de-dup key so the same model ID
 	// offered by different providers shows as distinct, independently selectable
 	// rows. They still skip any model ID already surfaced under Favorites, so a
@@ -495,26 +502,10 @@ func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerIte
 // history, de-duplicated by provider+model pair and capped to
 // config.MaxRecentModels.
 func (m model) recentModelPairsForPicker() []config.RecentModelEntry {
-	pairs := make([]config.RecentModelEntry, 0, config.MaxRecentModels)
-	seen := map[string]bool{}
-	add := func(provider, modelID string) {
-		modelID = strings.TrimSpace(modelID)
-		if modelID == "" || len(pairs) >= config.MaxRecentModels {
-			return
-		}
-		provider = strings.TrimSpace(provider)
-		key := strings.ToLower(provider) + "\x00" + modelID
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		pairs = append(pairs, config.RecentModelEntry{Provider: provider, Model: modelID})
-	}
-	add(m.providerName, m.modelName)
-	for _, entry := range m.recentModels {
-		add(entry.Provider, entry.Model)
-	}
-	return pairs
+	pairs := make([]config.RecentModelEntry, 0, len(m.recentModels)+1)
+	pairs = append(pairs, config.RecentModelEntry{Provider: m.providerName, Model: m.modelName})
+	pairs = append(pairs, m.recentModels...)
+	return config.NormalizeRecentModels(pairs)
 }
 
 // modelPickerRecentItem resolves one "Recent" row for a provider+model pair,
@@ -889,34 +880,19 @@ func (m model) persistFavoriteModels() error {
 	return err
 }
 
-// recordRecentModel prepends provider+model to the in-memory recent-selection
-// history, de-duplicates by provider+model pair (moving a re-selected pair
-// back to the front rather than leaving a stale older copy), caps the result,
-// and persists it. Called after every successful /model switch (typed command
-// or picker), so the "Recent" section reflects real switching history even
-// across sessions. Returns the receiver unchanged when modelID is blank.
+// recordRecentModels prepends the given provider+model pairs (in order, so the
+// last pair ends up frontmost) to the in-memory recent-selection history,
+// de-duplicates by provider+model pair (moving a re-selected pair back to the
+// front rather than leaving a stale older copy), caps the result, and persists
+// it in a single normalize+write regardless of how many pairs are given. Model
+// switches record both the outgoing and incoming pair for one logical switch —
+// otherwise the model a session started on would silently drop out of "Recent"
+// the moment you switch away from it once — and batching avoids two
+// synchronous read-modify-write disk operations for a single user action.
 // Persistence is skipped when there is no user config path, but the in-memory
 // history is still updated so the picker reflects the selection for the rest
-// of the session — note that such in-memory-only history will not survive a
-// restart, which is why a missing config path is logged separately rather than
-// silently diverging from the persisted list.
-func (m model) recordRecentModel(provider, modelID string) model {
-	return m.recordRecentModels(config.RecentModelEntry{Provider: provider, Model: modelID})
-}
-
-// recordRecentModels is the batched form of recordRecentModel: it behaves as
-// if recordRecentModel were called once per pair in order (earlier pairs end
-// up further back in history, the last pair ends up frontmost — same result
-// as calling recordRecentModel that many times in sequence), but normalizes
-// and persists exactly once regardless of how many pairs are given. Model
-// switches need to record both the outgoing and incoming pair for one logical
-// switch (see the package comment above recordRecentModel's call sites for
-// why the outgoing pair matters too); doing that with two separate
-// recordRecentModel calls meant two synchronous read-modify-write disk
-// operations for a single user action, where a failure on the first write
-// would append a spurious error line before the second write silently
-// succeeded. Returns the receiver unchanged (no re-normalization, no write)
-// when every pair has a blank model id.
+// of the session. Returns the receiver unchanged (no re-normalization, no
+// write) when every pair has a blank model id.
 func (m model) recordRecentModels(pairs ...config.RecentModelEntry) model {
 	entries := append([]config.RecentModelEntry{}, m.recentModels...)
 	changed := false
