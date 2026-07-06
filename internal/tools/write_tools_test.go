@@ -142,6 +142,10 @@ func TestWriteFileToolRecordsCreatedFileButNotOverwrite(t *testing.T) {
 		t.Fatalf("expected create ok, got %s: %s", created.Status, created.Output)
 	}
 	absPath := filepath.Join(root, "scratch.txt")
+	absPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", absPath, err)
+	}
 	if got := tracker.CreatedFiles(); len(got) != 1 || got[0] != absPath {
 		t.Fatalf("CreatedFiles() = %v, want [%s]", got, absPath)
 	}
