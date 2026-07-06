@@ -33,18 +33,28 @@ func IsDefaultMCPServer(name string) bool {
 	return ok
 }
 
-// IsUnconfiguredDefault reports whether server is exactly the built-in default
-// for name — i.e. the user never wrote anything for this server into their
-// config, so it is running with whatever Zero ships (e.g. keyless Firecrawl,
-// no credentials). mergeMCPServer only overwrites fields the user actually set,
-// so an untouched default survives merge byte-identical to DefaultMCPServers();
-// even a disabled/enabled toggle (e.g. `zero mcp enable firecrawl`) marks the
-// merged disabledSet field, which breaks the equality below, so an explicit
-// toggle counts as "configured" even though the resolved value is unchanged.
+// IsUnconfiguredDefault reports whether server is one of Zero's built-in
+// defaults that the user never wrote an entry for in their config — i.e. it is
+// running with whatever Zero ships (e.g. keyless Firecrawl, no credentials).
+//
+// Both conditions below must hold:
+//   - !server.configured: the user's JSON never declared an object for this
+//     server key at all (set by MCPServerConfig.UnmarshalJSON only when it
+//     actually ran for this key). Any explicit action — including a
+//     disable/enable toggle like `zero mcp enable firecrawl` that leaves the
+//     resolved value unchanged — sets configured, so it always counts as
+//     user-configured, even though the value comparison below could not tell
+//     the difference on its own.
+//   - reflect.DeepEqual(def, server): the value still matches the default.
+//     This is the fallback for callers that construct MCPServerConfig
+//     directly rather than through the JSON/merge pipeline (server.configured
+//     is then always false) — without it, any hand-built config with
+//     different field values would be misreported as unconfigured.
+//
 // Callers use this to tell "server we turned on for the user" apart from
 // "server the user configured themselves," e.g. to avoid warning loudly when
 // an out-of-the-box default that was never given credentials fails to connect.
 func IsUnconfiguredDefault(name string, server MCPServerConfig) bool {
 	def, ok := DefaultMCPServers()[strings.TrimSpace(name)]
-	return ok && reflect.DeepEqual(def, server)
+	return ok && !server.configured && reflect.DeepEqual(def, server)
 }

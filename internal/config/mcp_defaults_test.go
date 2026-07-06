@@ -86,6 +86,32 @@ func TestResolveMCPExplicitReenableIsNotUnconfiguredDefault(t *testing.T) {
 	}
 }
 
+func TestResolveMCPExplicitRedeclareOfDefaultValuesIsNotUnconfiguredDefault(t *testing.T) {
+	// A user who copies firecrawl's exact default type/url into their config
+	// (e.g. from an example file, planning to add credentials later) produces a
+	// resolved value byte-identical to DefaultMCPServers()["firecrawl"] — the
+	// same trap TestResolveMCPExplicitReenableIsNotUnconfiguredDefault covers for
+	// the disabled toggle. IsUnconfiguredDefault must still treat this as
+	// user-configured because the user's JSON declared an entry for it, even
+	// though a plain resolved-value comparison could not tell the difference.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"type":"http","url":"https://mcp.firecrawl.dev/v2/mcp"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	firecrawl := cfg.Servers["firecrawl"]
+	want := DefaultMCPServers()["firecrawl"]
+	if firecrawl.Type != want.Type || firecrawl.URL != want.URL || firecrawl.Disabled != want.Disabled {
+		t.Fatalf("expected the resolved value to match the default's fields exactly: %#v", firecrawl)
+	}
+	if IsUnconfiguredDefault("firecrawl", firecrawl) {
+		t.Fatal("redeclaring the default's exact values is still an explicit user configuration, not an untouched default")
+	}
+}
+
 func TestResolveMCPUserCanOverrideDefaultURLKeepingOtherFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	// Point firecrawl at a self-hosted instance; the default's Type must survive.
