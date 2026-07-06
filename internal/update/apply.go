@@ -212,7 +212,7 @@ func verifyArchiveChecksum(checksumPath string, expectedArchiveName string) erro
 		return fmt.Errorf("verify release checksum: %w", err)
 	}
 	if verified.ArchiveName != expectedArchiveName {
-		return fmt.Errorf("checksum file references %s, expected %s", verified.ArchiveName, expectedArchiveName)
+		return fmt.Errorf("checksum file %s references %q, expected %q", filepath.Base(checksumPath), verified.ArchiveName, expectedArchiveName)
 	}
 	return nil
 }
