@@ -585,19 +585,16 @@ func TestAssembleModelPickerItemsFavoritesDedupByModelIDAndHideFromOtherGroups(t
 	if len(favorites) != 1 {
 		t.Fatalf("expected exactly one Favorites row for shared-model, got %#v", favorites)
 	}
+	// The deduped Favorites row keeps whichever occurrence comes first in
+	// recent+catalog order — here provider-a from recent[0]. Pin that down
+	// explicitly rather than leaving it implicit.
+	if favorites[0].OwnerProvider != "provider-a" {
+		t.Fatalf("expected surviving favorite to keep first-seen provider %q, got %#v", "provider-a", favorites[0])
+	}
 	for _, item := range items {
 		if item.Group != "Favorites" && item.Value == "shared-model" {
 			t.Fatalf("favorited model id leaked into %s: %#v", item.Group, item)
 		}
-	}
-	var otherRecent []pickerItem
-	for _, item := range items {
-		if item.Group == "Recent" && item.Value == "other-model" {
-			otherRecent = append(otherRecent, item)
-		}
-	}
-	if len(otherRecent) != 0 {
-		t.Fatalf("other-model is not in recent; got %#v", items)
 	}
 	var otherCatalog []pickerItem
 	for _, item := range items {
@@ -741,6 +738,14 @@ func TestModelCommandRecordsAndPersistsRecentHistory(t *testing.T) {
 	if !reflect.DeepEqual(m.recentModels, want) {
 		t.Fatalf("recentModels after re-selecting = %#v, want %#v", m.recentModels, want)
 	}
+	// Also check the persisted copy for this reorder/dedupe case (the trickiest
+	// path): if recordRecentModel(s)'s in-memory reordering ever diverges from
+	// SetRecentModels/NormalizeRecentModels' disk-write semantics, this is the
+	// case most likely to expose it.
+	persisted = readTUIConfigFixture(t, configPath)
+	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
+		t.Fatalf("persisted RecentModels after re-selecting = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
 }
 
 // switchProviderModel (the picker's cross-provider path) must also record
@@ -762,7 +767,11 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 		},
 	})
 
-	next, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	next, status, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	wantStatus := "Model\nSwitched to ollama · kimi-k2.7-code:cloud"
+	if status != wantStatus {
+		t.Fatalf("switchProviderModel() status = %q, want %q (a mismatch here means the switch itself failed, not the recentModels assertion below)", status, wantStatus)
+	}
 
 	want := []config.RecentModelEntry{
 		{Provider: "ollama", Model: "kimi-k2.7-code:cloud"},

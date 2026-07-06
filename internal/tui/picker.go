@@ -901,14 +901,36 @@ func (m model) persistFavoriteModels() error {
 // restart, which is why a missing config path is logged separately rather than
 // silently diverging from the persisted list.
 func (m model) recordRecentModel(provider, modelID string) model {
-	provider = strings.TrimSpace(provider)
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
+	return m.recordRecentModels(config.RecentModelEntry{Provider: provider, Model: modelID})
+}
+
+// recordRecentModels is the batched form of recordRecentModel: it behaves as
+// if recordRecentModel were called once per pair in order (earlier pairs end
+// up further back in history, the last pair ends up frontmost — same result
+// as calling recordRecentModel that many times in sequence), but normalizes
+// and persists exactly once regardless of how many pairs are given. Model
+// switches need to record both the outgoing and incoming pair for one logical
+// switch (see the package comment above recordRecentModel's call sites for
+// why the outgoing pair matters too); doing that with two separate
+// recordRecentModel calls meant two synchronous read-modify-write disk
+// operations for a single user action, where a failure on the first write
+// would append a spurious error line before the second write silently
+// succeeded. Returns the receiver unchanged (no re-normalization, no write)
+// when every pair has a blank model id.
+func (m model) recordRecentModels(pairs ...config.RecentModelEntry) model {
+	entries := append([]config.RecentModelEntry{}, m.recentModels...)
+	changed := false
+	for _, pair := range pairs {
+		modelID := strings.TrimSpace(pair.Model)
+		if modelID == "" {
+			continue
+		}
+		changed = true
+		entries = append([]config.RecentModelEntry{{Provider: strings.TrimSpace(pair.Provider), Model: modelID}}, entries...)
+	}
+	if !changed {
 		return m
 	}
-	entries := make([]config.RecentModelEntry, 0, len(m.recentModels)+1)
-	entries = append(entries, config.RecentModelEntry{Provider: provider, Model: modelID})
-	entries = append(entries, m.recentModels...)
 	m.recentModels = normalizeRecentModelEntries(entries)
 	if path := strings.TrimSpace(m.userConfigPath); path != "" {
 		if _, err := config.SetRecentModels(path, m.recentModels); err != nil {

@@ -450,10 +450,13 @@ func (m model) handleModelCommand(args string) (model, string) {
 	// Record the outgoing pair too, not just the destination: otherwise the
 	// model a session started on (never itself the target of a recordRecentModel
 	// call) would silently drop out of "Recent" the moment you switch away from
-	// it once. Recording old-then-new leaves new at the front (recordRecentModel
-	// prepends), with old right behind it.
-	m = m.recordRecentModel(previousProviderName, previousModel)
-	m = m.recordRecentModel(nextProfile.Name, target.modelID)
+	// it once. Recording old-then-new leaves new at the front, with old right
+	// behind it. recordRecentModels batches both into a single normalize+persist
+	// instead of two separate disk writes for this one switch.
+	m = m.recordRecentModels(
+		config.RecentModelEntry{Provider: previousProviderName, Model: previousModel},
+		config.RecentModelEntry{Provider: nextProfile.Name, Model: target.modelID},
+	)
 	resetEffort := false
 	if m.reasoningEffort != "" && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
 		// Drop an unsupported carry-over preference and fall back to the
@@ -536,8 +539,12 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	// Record the outgoing pair too — see the matching comment in
 	// handleModelCommand for why (keeps the session's starting model from
 	// silently dropping out of "Recent" on the first switch away from it).
-	m = m.recordRecentModel(previousProviderName, previousModel)
-	m = m.recordRecentModel(target.Name, target.Model)
+	// recordRecentModels batches both into a single normalize+persist instead
+	// of two separate disk writes for this one switch.
+	m = m.recordRecentModels(
+		config.RecentModelEntry{Provider: previousProviderName, Model: previousModel},
+		config.RecentModelEntry{Provider: target.Name, Model: target.Model},
+	)
 	// Keep sub-agent child processes on the same provider we just switched to.
 	config.SetActiveProviderEnv(target.Name)
 	if strings.TrimSpace(m.userConfigPath) != "" {
