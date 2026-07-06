@@ -610,6 +610,38 @@ func TestAssembleModelPickerItemsFavoritesDedupByModelIDAndHideFromOtherGroups(t
 	}
 }
 
+// registryModelPickerItem must tag rows with OwnerProvider so
+// pickerItemDedupKey keys them by provider+model instead of falling back to
+// Value alone. This matters most for the plain-registry fallback path (no
+// saved providers resolved any models — newModelPicker lists the full
+// registry directly via registryModelPickerItem), where two registry entries
+// sharing a model id but offered by different providers would otherwise
+// collide and silently drop one row.
+func TestRegistryModelPickerItemSetsOwnerProvider(t *testing.T) {
+	entry := testModelEntry("shared-model", 128000, nil)
+	entry.Provider = modelregistry.ProviderAnthropic
+	item := registryModelPickerItem(entry, "Catalog")
+	if item.OwnerProvider != string(modelregistry.ProviderAnthropic) {
+		t.Fatalf("expected OwnerProvider %q, got %q", modelregistry.ProviderAnthropic, item.OwnerProvider)
+	}
+
+	// Two catalog rows for the same model id from different providers must
+	// survive assembleModelPickerItems as distinct rows, not collide on Value.
+	entryA := testModelEntry("shared-model", 128000, nil)
+	entryA.Provider = modelregistry.ProviderAnthropic
+	entryB := testModelEntry("shared-model", 128000, nil)
+	entryB.Provider = modelregistry.ProviderOpenAI
+	catalog := []pickerItem{
+		registryModelPickerItem(entryA, "Catalog"),
+		registryModelPickerItem(entryB, "Catalog"),
+	}
+	m := model{}
+	items := m.assembleModelPickerItems(nil, catalog)
+	if len(items) != 2 {
+		t.Fatalf("expected both provider rows to survive de-dup, got %#v", items)
+	}
+}
+
 // End-to-end: the picker's "Recent" section shows the active model plus prior
 // history, newest first, with the active entry deduped against a stale copy
 // already present in history.

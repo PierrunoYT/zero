@@ -150,7 +150,7 @@ func SetRecentModels(path string, entries []RecentModelEntry) (FileConfig, error
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	cfg.Preferences.RecentModels = normalizeRecentModels(entries)
+	cfg.Preferences.RecentModels = NormalizeRecentModels(entries)
 	if err := writeConfigFile(path, cfg); err != nil {
 		return FileConfig{}, err
 	}
@@ -217,11 +217,14 @@ func normalizeFavoriteModels(models []string) []string {
 	return favorites
 }
 
-// normalizeRecentModels trims, drops entries with no model id, de-duplicates
+// NormalizeRecentModels trims, drops entries with no model id, de-duplicates
 // by provider+model pair (keeping the first/newest occurrence), and caps the
 // result to MaxRecentModels. Order is preserved — the caller is responsible
-// for passing entries newest-first.
-func normalizeRecentModels(entries []RecentModelEntry) []RecentModelEntry {
+// for passing entries newest-first. Exported so callers outside this package
+// (e.g. the TUI, which keeps its own in-memory copy of recent history) apply
+// the exact same normalization rules as the persisted config, instead of
+// maintaining a second, independently-drifting copy of this logic.
+func NormalizeRecentModels(entries []RecentModelEntry) []RecentModelEntry {
 	seen := map[string]bool{}
 	recent := make([]RecentModelEntry, 0, len(entries))
 	for _, entry := range entries {

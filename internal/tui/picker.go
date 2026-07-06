@@ -552,6 +552,13 @@ func registryModelPickerItem(entry modelregistry.ModelEntry, group string) picke
 		Group: group,
 		Label: firstProviderDisplayValue(entry.DisplayName, entry.ID),
 		Value: entry.ID,
+		// OwnerProvider defaults to the registry entry's canonical provider so
+		// cross-group de-dup (pickerItemDedupKey) can distinguish the same model
+		// id offered by different providers even in the plain-registry fallback
+		// path (no saved providers resolved any models). Callers that resolve a
+		// specific provider profile (e.g. modelPickerRecentItem) overwrite this
+		// with the profile name right after calling this constructor.
+		OwnerProvider: string(entry.Provider),
 	}
 	item.Meta = registryModelPickerMeta(entry)
 	if descriptor, ok := providercatalog.Get(string(entry.Provider)); ok {
@@ -913,29 +920,12 @@ func (m model) recordRecentModel(provider, modelID string) model {
 
 // normalizeRecentModelEntries trims, drops entries with no model id,
 // de-duplicates by provider+model pair (keeping the first/newest occurrence),
-// and caps the result to config.MaxRecentModels. Mirrors the config package's
-// own normalization so options loaded outside of config.Resolve (e.g. tests
-// constructing Options directly) get the same guarantees.
+// and caps the result to config.MaxRecentModels. Delegates to
+// config.NormalizeRecentModels so options loaded outside of config.Resolve
+// (e.g. tests constructing Options directly) can never drift from the
+// persisted-config normalization rules.
 func normalizeRecentModelEntries(entries []config.RecentModelEntry) []config.RecentModelEntry {
-	seen := map[string]bool{}
-	out := make([]config.RecentModelEntry, 0, len(entries))
-	for _, entry := range entries {
-		provider := strings.TrimSpace(entry.Provider)
-		modelID := strings.TrimSpace(entry.Model)
-		if modelID == "" {
-			continue
-		}
-		key := strings.ToLower(provider) + "\x00" + modelID
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, config.RecentModelEntry{Provider: provider, Model: modelID})
-		if len(out) >= config.MaxRecentModels {
-			break
-		}
-	}
-	return out
+	return config.NormalizeRecentModels(entries)
 }
 
 func favoriteModelSet(models []string) map[string]bool {

@@ -224,7 +224,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
 	if src.Preferences.RecentModels != nil {
-		dst.Preferences.RecentModels = normalizeRecentModels(src.Preferences.RecentModels)
+		dst.Preferences.RecentModels = NormalizeRecentModels(src.Preferences.RecentModels)
 	}
 	if src.Preferences.Recaps != nil {
 		dst.Preferences.Recaps = src.Preferences.Recaps
