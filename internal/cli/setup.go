@@ -520,7 +520,14 @@ func setupMissingCredentialEnv(profile config.ProviderProfile) (string, bool) {
 			// deliberately left auth unconfigured (e.g. a local, no-auth
 			// server), so treat it as usable rather than missing.
 			envVar := strings.TrimSpace(profile.APIKeyEnv)
-			if envVar == "" {
+			// Self-heal profiles saved by the pre-fix wizard, which stamped this
+			// same catalog default onto every custom profile regardless of
+			// whether the endpoint actually needed it (issue #555): a value
+			// indistinguishable from that stale default is treated the same as
+			// unset, so already-broken saved profiles start working again
+			// without a config rewrite. A deliberately different env var name
+			// (e.g. via `--api-key-env`) still means auth is required.
+			if envVar == "" || envVar == setupProviderEnvVar(descriptor) {
 				return "", false
 			}
 			return envVar, true
