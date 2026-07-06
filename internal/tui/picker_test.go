@@ -663,10 +663,10 @@ func TestModelCommandRecordsAndPersistsRecentHistory(t *testing.T) {
 func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	m := newModel(context.Background(), Options{
-		UserConfigPath: configPath,
-		ProviderName:   "openai",
-		ModelName:      "gpt-5.1",
-		Provider:       &fakeProvider{},
+		UserConfigPath:  configPath,
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
 		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
 		SavedProviders: []config.ProviderProfile{
 			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
