@@ -165,6 +165,50 @@ func TestWriteFileToolRecordsCreatedFileButNotOverwrite(t *testing.T) {
 	}
 }
 
+func TestApplyPatchRecordsCreatedFileButNotExistingEdits(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	registry.Register(NewApplyPatchTool(root))
+	tracker := NewFileTracker()
+	patch := strings.Join([]string{
+		"diff --git a/scratch.txt b/scratch.txt",
+		"new file mode 100644",
+		"index 0000000..e965047",
+		"--- /dev/null",
+		"+++ b/scratch.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"diff --git a/existing.txt b/existing.txt",
+		"--- a/existing.txt",
+		"+++ b/existing.txt",
+		"@@ -1 +1 @@",
+		"-old",
+		"+new",
+		"",
+	}, "\n")
+
+	result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+		"patch": patch,
+	}, RunOptions{PermissionGranted: true, FileTracker: tracker})
+	if result.Status != StatusOK {
+		if gitApplyUnavailable(result.Output) {
+			t.Skipf("git binary unavailable: %s", result.Output)
+		}
+		t.Fatalf("expected apply_patch ok, got %s: %s", result.Status, result.Output)
+	}
+	absPath := filepath.Join(root, "scratch.txt")
+	absPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", absPath, err)
+	}
+	if got := tracker.CreatedFiles(); len(got) != 1 || got[0] != absPath {
+		t.Fatalf("CreatedFiles() = %v, want [%s]", got, absPath)
+	}
+}
+
 func TestWriteFileSummaryReportsLineCount(t *testing.T) {
 	root := t.TempDir()
 	tool := NewWriteFileTool(root)
