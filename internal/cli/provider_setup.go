@@ -485,6 +485,10 @@ func validateProviderRuntimeReady(profile config.ProviderProfile) error {
 	return nil
 }
 
+func providerProfileHasCredential(profile config.ProviderProfile) bool {
+	return profile.HasConfiguredCredential()
+}
+
 func providerKindForDescriptor(descriptor providercatalog.Descriptor) config.ProviderKind {
 	switch descriptor.Transport {
 	case providercatalog.TransportOpenAI:
