@@ -19,6 +19,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
+	"github.com/Gitlawb/zero/internal/errhint"
 	"github.com/Gitlawb/zero/internal/lsp"
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -28,6 +29,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -36,7 +38,7 @@ import (
 )
 
 const tuiToolOutputLimit = 240
-const defaultResponseStyle = "balanced"
+const defaultResponseStyle = "concise"
 const chatWheelScrollLines = 5
 const ctrlCExitConfirmDuration = 3 * time.Second
 const ctrlCExitConfirmText = "Press Ctrl+C again to exit"
@@ -60,13 +62,16 @@ const dragEdgeScrollStep = 1
 type model struct {
 	ctx                         context.Context
 	cwd                         string
+	appVersion                  string
 	userCommands                []usercommands.Command // file-sourced /commands (.zero/commands)
+	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath              string
 	doctorUserConfigPath        string
 	projectConfigPath           string
 	gitBranch                   string
 	providerName                string
 	modelName                   string
+	modelCatalog                modelregistry.Registry
 	providerProfile             config.ProviderProfile
 	savedProviders              []config.ProviderProfile
 	provider                    zeroruntime.Provider
@@ -75,24 +80,29 @@ type model struct {
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	registry                    *tools.Registry
-	sessionStore                *sessions.Store
-	sandboxStore                *sandbox.GrantStore
-	mcpConfig                   config.MCPConfig
-	mcpPermissionStore          *internalmcp.PermissionStore
-	mcpTokenStore               *internalmcp.TokenStore
-	mcpCommand                  func(context.Context, []string) MCPCommandResult
-	sandboxSetupCommand         func(context.Context) SandboxSetupCommandResult
-	mcpViewStateCache           MCPViewState
-	mcpViewStateReady           bool
-	mcpCommandSeq               int
-	mcpCommandCancel            context.CancelFunc
-	sandboxSetupSeq             int
-	sandboxSetupInFlight        bool
-	doctorCommandSeq            int
-	doctorInFlight              bool
-	doctorFrame                 int
-	activeSession               sessions.Metadata
-	sessionEvents               []sessions.Event
+	// lspManager is created once per session and reused across prompts so gopls (and
+	// other language servers) stay warm — a fresh manager per run would cold-start
+	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
+	// fall back to a per-run manager. Torn down in quit().
+	lspManager           *lsp.Manager
+	sessionStore         *sessions.Store
+	sandboxStore         *sandbox.GrantStore
+	mcpConfig            config.MCPConfig
+	mcpPermissionStore   *internalmcp.PermissionStore
+	mcpTokenStore        *internalmcp.TokenStore
+	mcpCommand           func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
+	mcpViewStateCache    MCPViewState
+	mcpViewStateReady    bool
+	mcpCommandSeq        int
+	mcpCommandCancel     context.CancelFunc
+	sandboxSetupSeq      int
+	sandboxSetupInFlight bool
+	doctorCommandSeq     int
+	doctorInFlight       bool
+	doctorFrame          int
+	activeSession        sessions.Metadata
+	sessionEvents        []sessions.Event
 	// titledSessions records session ids for which a model-generated title has
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
@@ -100,35 +110,43 @@ type model struct {
 	titledSessions map[string]bool
 	// retitle* drive the sequential /retitle backfill: queued session ids still
 	// awaiting a title, whether a backfill is running, and its progress counters.
-	retitleQueue          []string
-	retitleActive         bool
-	retitleTotal          int
-	retitleDone           int
-	retitleOK             int
-	usageTracker          *usage.Tracker
-	sessionCompactor      SessionCompactor
-	prService             *PrService
-	prState               PrState
-	prWatcherStop         func()
-	runtimeMessageSink    func(tea.Msg)
-	agentOptions          agent.Options
-	notifier              *notify.Notifier
-	permissionMode        agent.PermissionMode
-	selfCorrectTests      bool
-	reasoningEffort       modelregistry.ReasoningEffort
-	responseStyle         string
-	themeMode             themeMode // palette preference: auto (default), dark, light
-	hasDarkBg             bool      // last terminal background-detection result (auto mode)
-	userAgent             string
-	compactRequests       int
-	compactInFlight       bool
-	compactFrame          int
-	lastCompactResult     *CompactResult
-	lastCompactError      string
-	unpricedRequests      int
-	unpricedTokens        int
-	lastUsage             usage.Normalized
-	lastUsageSeen         bool
+	retitleQueue       []string
+	retitleActive      bool
+	retitleTotal       int
+	retitleDone        int
+	retitleOK          int
+	usageTracker       *usage.Tracker
+	sessionCompactor   SessionCompactor
+	prService          *PrService
+	prState            PrState
+	prWatcherStop      func()
+	runtimeMessageSink func(tea.Msg)
+	agentOptions       agent.Options
+	notifier           *notify.Notifier
+	permissionMode     agent.PermissionMode
+	selfCorrectTests   bool
+	reasoningEffort    modelregistry.ReasoningEffort
+	responseStyle      string
+	keyBindings        keyBindings
+	themeMode          themeMode // palette preference: auto (default), dark, light
+	hasDarkBg          bool      // last terminal background-detection result (auto mode)
+	userAgent          string
+	compactRequests    int
+	compactInFlight    bool
+	compactFrame       int
+	lastCompactResult  *CompactResult
+	lastCompactError   string
+	unpricedRequests   int
+	unpricedTokens     int
+	lastUsage          usage.Normalized
+	lastUsageSeen      bool
+	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
+	// /context can show a rolling average turn latency (the "is it slow?" signal).
+	// Reset by /new.
+	turnLatencySum        time.Duration
+	turnLatencyCount      int
+	turnTTFTSum           time.Duration
+	turnTTFTCount         int
 	transcript            []transcriptRow
 	transcriptDetailed    bool
 	helpOverlay           bool // the `?` keyboard-shortcut overlay is open
@@ -139,6 +157,8 @@ type model struct {
 	composerCursorVisible bool
 	composerPastePreviews []composerPastePreview
 	composerSelection     composerSelectionState
+	dictation             dictationController
+	sttKeyPrompt          *sttKeyPromptState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -173,10 +193,22 @@ type model struct {
 	// like a frozen terminal (for ANY provider, not just slow ones). Zero = idle.
 	turnStartedAt time.Time
 	queuedMessage string
-	exiting       bool
-	runCancel     context.CancelFunc
-	runID         int
-	activeRunID   int
+	// loops holds the session's active /loop definitions (see loop.go). activeLoopID
+	// tags the in-flight run when it is a loop iteration (empty = a user turn), so the
+	// completion seam knows whether to advance a loop. loopSeq invalidates a stale
+	// pending poll tick when loops are stopped; loopTicking guards against scheduling
+	// a second poll ticker. loopLeavePrompt arms a one-shot confirm before /clear or
+	// /quit while loops are active (see handleSubmit).
+	loops           []*loopState
+	activeLoopID    string
+	loopSeq         int
+	loopCounter     int
+	loopTicking     bool
+	loopLeavePrompt commandKind
+	exiting         bool
+	runCancel       context.CancelFunc
+	runID           int
+	activeRunID     int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -252,13 +284,30 @@ type model struct {
 	headerPrinted bool
 
 	// Composer input history (shell-style ↑/↓ recall of submitted inputs).
+	// lastPrompt is the verbatim text of the most recent submitted prompt, so
+	// /retry can resend it and /edit can recall it into the composer.
+	lastPrompt string
+	// lastImages/lastImageLabels/lastDocuments remember the attachments consumed
+	// by the most recent submitted prompt. launchPrompt clears the pending queues
+	// once a turn is sent, so /retry re-stages these to reproduce the exact same
+	// request — otherwise a vision/PDF-backed prompt would silently retry as
+	// text-only and answer a different task. They share the underlying image bytes
+	// with the sent turn (never mutated in place), so no deep copy is needed.
+	lastImages      []zeroruntime.ImageBlock
+	lastImageLabels []string
+	lastDocuments   []pendingDocument
 	// historyIdx == len(inputHistory) means "not navigating"; historyDraft
 	// preserves whatever was typed before recall started.
 	inputHistory []string
 	historyIdx   int
 	historyDraft string
 
-	streamingText              string // live assistant text for the current segment
+	// streamingText is the live assistant text for the current segment, accumulated
+	// as []byte so each delta is an O(1) amortized append instead of the O(n²) that
+	// string += delta incurs across a long generation. Read via streamingTextString().
+	// A []byte (not strings.Builder) because the model is copied by value on every
+	// Update, which would trip strings.Builder's copy check.
+	streamingText              []byte
 	streamingReasoning         string // live provider reasoning for the current segment
 	streamingReasoningExpanded bool
 	// turnStreamedRunes accumulates every reasoning+answer rune streamed in the
@@ -351,11 +400,16 @@ type model struct {
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort with no argument). It captures ↑/↓/Enter/Esc and applies
 	// the chosen value through the existing command handlers.
-	picker                       *commandPicker
-	providerWizard               *providerWizardState
-	mcpManager                   *mcpManagerState
-	mcpAddWizard                 *mcpAddWizardState
-	favoriteModels               map[string]bool
+	picker         *commandPicker
+	providerWizard *providerWizardState
+	mcpManager     *mcpManagerState
+	mcpAddWizard   *mcpAddWizardState
+	favoriteModels map[string]bool
+	// recentModels is the automatic history of provider+model switches, newest
+	// first, capped to config.MaxRecentModels. Unlike favoriteModels (manual
+	// pins), this is maintained by recordRecentModel on every successful
+	// switch and persisted via config.SetRecentModels.
+	recentModels                 []config.RecentModelEntry
 	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
 	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
 	modelPickerLoading           bool
@@ -451,6 +505,9 @@ type agentResponseMsg struct {
 	// Turn metadata for settled rows that do not otherwise carry it.
 	turnTools   int
 	turnElapsed time.Duration
+	// ttft is time-to-first-token for the turn (0 when nothing streamed — a
+	// tool-only or errored turn). Set only on the success path.
+	ttft time.Duration
 }
 
 type agentRowMsg struct {
@@ -650,9 +707,13 @@ func newModel(ctx context.Context, options Options) model {
 		sessionStore = sessions.NewStore(sessions.StoreOptions{})
 	}
 	sandboxStore := options.SandboxStore
+	modelCatalog, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		panic(err)
+	}
 	usageTracker := options.UsageTracker
 	if usageTracker == nil {
-		usageTracker = usage.NewTracker(usage.TrackerOptions{})
+		usageTracker = usage.NewTracker(usage.TrackerOptions{Registry: &modelCatalog})
 	}
 	prService := options.PrService
 	if prService == nil {
@@ -691,11 +752,15 @@ func newModel(ctx context.Context, options Options) model {
 	notify.MaybeAddWebhookSink(notifier, os.Getenv, nil)
 	notifier.SetFocused(true)
 
+	resolvedKeyBindings, keyBindingWarnings := sanitizeKeyBindings(resolveKeyBindings(options.KeyBindings))
+
 	m := model{
 		ctx:                         ctx,
 		cwd:                         cwd,
+		appVersion:                  strings.TrimSpace(options.Version),
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
+		loadSkills:                  options.LoadSkills,
 		composerCursorVisible:       true,
 		userConfigPath:              options.UserConfigPath,
 		doctorUserConfigPath:        doctorUserConfigPath,
@@ -704,8 +769,10 @@ func newModel(ctx context.Context, options Options) model {
 		gitBranch:                   gitBranch(cwd),
 		providerName:                options.ProviderName,
 		modelName:                   options.ModelName,
+		modelCatalog:                modelCatalog,
 		providerProfile:             options.ProviderProfile,
 		favoriteModels:              favoriteModelSet(options.FavoriteModels),
+		recentModels:                normalizeRecentModelEntries(options.RecentModels),
 		recapsEnabled:               options.RecapsEnabled,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
@@ -726,6 +793,7 @@ func newModel(ctx context.Context, options Options) model {
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
+		keyBindings:                 resolvedKeyBindings,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
 		userAgent:                   options.UserAgent,
@@ -743,6 +811,7 @@ func newModel(ctx context.Context, options Options) model {
 		swarmSessionMap:             map[string]string{},
 		setup:                       newSetupState(options.Setup),
 		setupSave:                   options.Setup.Save,
+		dictation:                   newDictationController(options),
 	}
 	// Apply an explicit theme immediately; auto stays on the dark default until
 	// Init's terminal background probe resolves it (see Init / BackgroundColorMsg).
@@ -755,7 +824,15 @@ func newModel(ctx context.Context, options Options) model {
 	// Streaming text always renders statically at base ink (the disabled path in
 	// styleStreamingLine), so no accent glow and no per-line fade ticks.
 	m.fadeDisabled = true
+	// One session-long LSP manager (cheap to build — servers start lazily on the
+	// first Check), reused across prompts so gopls stays warm between turns.
+	if cwd != "" {
+		m.lspManager = lsp.NewManager(cwd)
+	}
 	m.refreshMCPViewState()
+	for _, warning := range keyBindingWarnings {
+		m = m.appendSystemNotice(warning)
+	}
 	return m
 }
 
@@ -878,13 +955,31 @@ func (m *model) stopPRWatcher() {
 // by every shortcut that should defer to whichever modal is focused.
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
-		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil
+		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
+		m.sttKeyPrompt == nil
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
 	m.stopPRWatcher()
 	m.stopAllBackgroundTerminalSessions()
+	m.shutdownLSPManager()
 	return m, tea.Quit
+}
+
+// shutdownLSPManager gracefully stops the session-long language servers on exit.
+// Best-effort with a short deadline so a slow server can't hang the quit; the
+// servers are our child processes and would be reaped on exit regardless.
+func (m model) shutdownLSPManager() {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if m.lspManager != nil {
+		_ = m.lspManager.Shutdown(shutdownCtx)
+	}
+	// The warm sherpa-onnx streaming server is a session-long child process too;
+	// tear it down alongside the language servers (§6a).
+	if m.dictation.shutdownServer != nil {
+		_ = m.dictation.shutdownServer(shutdownCtx)
+	}
 }
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
@@ -1023,6 +1118,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
+	case providerManagerCredsMsg:
+		return m.applyProviderManagerCreds(msg)
+	case providerManagerCleanupMsg:
+		return m.applyProviderManagerCleanup(msg)
 	case clipboardReadMsg:
 		// Result of a right-click paste. Insert on success; surface a brief
 		// status if the clipboard couldn't be read (e.g. no clipboard utility on
@@ -1049,10 +1148,46 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
+		// A paste into the cloud-STT key prompt fills the key (the common way to
+		// enter an API key), not the composer.
+		if m.sttKeyPrompt != nil {
+			m.sttKeyPrompt.input += strings.TrimSpace(msg.Content)
+			return m, nil
+		}
 		return m.routePaste(msg.Content)
+	case dictationStartedMsg:
+		return m.handleDictationStarted(msg)
+	case dictationTranscribedMsg:
+		return m.handleDictationTranscribed(msg)
+	case sttPartialMsg:
+		return m.handleDictationPartial(msg), nil
+	case sttDownloadProgressMsg:
+		return m.handleDictationDownloadProgress(msg), nil
+	case dictationDownloadedMsg:
+		return m.handleDictationDownloaded(msg)
+	case sttModelsFetchedMsg:
+		return m.handleSTTModelsFetched(msg), nil
+	case recTickMsg:
+		return m.handleRecTick()
+	case sttLevelMsg:
+		return m.handleDictationLevel(msg), nil
+	case tea.KeyboardEnhancementsMsg:
+		return m.handleKeyboardEnhancements(msg), nil
+	case tea.KeyReleaseMsg:
+		// Voice mode's hold-to-record ends on Space release; every other release
+		// event is ignored (dispatch elsewhere is press-based).
+		if m.dictation.voiceModeEnabled && keyIs(msg, tea.KeySpace) {
+			return m.handleVoiceSpaceRelease()
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
+		}
+		// The cloud-STT API-key prompt is modal: it owns every keystroke (masked
+		// input) until Enter saves or Esc cancels.
+		if m.sttKeyPrompt != nil {
+			return m.handleSTTKeyPromptKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
 		m.composerSelection = composerSelectionState{}
@@ -1078,7 +1213,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case keyCtrl(msg, 'c'):
 			return m.handleCtrlC()
-		case keyCtrl(msg, 'o'):
+		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
 			return m.toggleDetailedTranscript(), nil
 		case m.fileView.active && m.noBlockingModal() && m.composerValue() == "" && (keyText(msg) == "d" || keyText(msg) == "f"):
 			// Mode toggle for the file drill-in, only while the composer is empty
@@ -1088,14 +1223,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.setFileViewMode(fileViewFull), nil
 			}
 			return m.setFileViewMode(fileViewDiff), nil
-		case keyCtrl(msg, 'e'):
+		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && canFireComposerGatedToggle(m.keyBindings.toggleMouse, defaultToggleMouseChord, m.composerValue() == ""):
 			// Release/recapture the mouse so the user can drag-select and copy text
-			// natively (mouse capture otherwise intercepts terminal selection).
+			// natively (mouse capture otherwise intercepts terminal selection). The
+			// composer-empty requirement only applies when the binding resolves to
+			// the conflicting default Ctrl+E chord (unset, or explicitly configured
+			// to the same chord), which readline navigation (move-to-end-of-line)
+			// also claims while typing; a binding that resolves to a genuinely
+			// different chord still fires mid-type.
 			m.mouseReleased = !m.mouseReleased
 			if m.mouseReleased {
-				return m.appendSystemNotice("Mouse released — drag to select and copy text. Press Ctrl+E again to re-enable mouse interaction (clicks, right-click paste)."), nil
+				mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
+				return m.appendSystemNotice(fmt.Sprintf("Mouse released — drag to select and copy text. Press %s again to re-enable mouse interaction (clicks, right-click paste).", mouseKey)), nil
 			}
 			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
+		case m.dictation.voiceModeEnabled && !m.transcriptDetailed && keyIs(msg, tea.KeySpace) && !keyHasMod(msg, tea.ModCtrl) && !keyAlt(msg) && m.noBlockingModal():
+			// Voice mode (/voice) repurposes Space into the record gesture — the only
+			// dictation trigger — so it must not also type a space. Turn voice mode
+			// off (/voice) to type normally.
+			return m.handleVoiceSpacePress(msg)
 		case keyIs(msg, tea.KeyEsc):
 			// Esc is heavily overloaded below (subchat exit, MCP cancel, ask-user,
 			// permission deny, wizard/picker/suggestions dismiss, ...) before ever
@@ -1106,6 +1252,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// armed for some later, unrelated Esc to silently act on.
 			wasConfirmingCancel := m.pending && m.cancelConfirmActive
 			m = m.disarmCancelConfirmation()
+			// An active dictation recording cancels on Esc (releases the mic, drops
+			// the audio) — but only if this Esc isn't a confirming run-cancel
+			// press. Without this guard, a user mid-recording who double-Esc's
+			// to kill the run finds the first Esc swallowed by dictation and
+			// the run still going. The pending run cancel happens further
+			// down at the bottom of the Esc branch.
+			if m.dictation.active() && !wasConfirmingCancel {
+				return m.cancelDictation()
+			}
 			// Subchat view exits on Esc (returns to main chat).
 			if m.subchat.active {
 				m.chatScrollOffset = m.subchat.exit()
@@ -1148,8 +1303,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.resolvePermission(permissionDecisionDeny)
 			}
 			if m.providerWizard != nil {
-				m.providerWizard = nil
-				return m, nil
+				// Delegate so multi-level surfaces (provider manager list → edit →
+				// field, manage-key step) can walk BACK one level; the wizard's own
+				// handler closes the overlay for the single-level steps.
+				return m.handleProviderWizardKey(msg)
 			}
 			if m.mcpAddWizard != nil {
 				m.mcpAddWizard = nil
@@ -1236,7 +1393,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.picker != nil {
 				return m.choosePicker()
 			}
-			if keyAlt(msg) {
+			if keyAlt(msg) || keyShift(msg) {
 				if next, ok := m.applyComposerKey(msg); ok {
 					return next, nil
 				}
@@ -1268,7 +1425,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
-		case keyCtrl(msg, 't'):
+		case m.keyMatch(m.keyBindings.cycleReasoning, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 't') }):
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -1281,20 +1438,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
-		case keyCtrl(msg, 'p'):
+		case m.keyMatch(m.keyBindings.togglePlan, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'p') }):
 			// Ctrl+P toggles the plan panel expansion (collapse/expand step list).
 			if m.noBlockingModal() && !m.plan.isEmpty() {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
 			}
-		case keyCtrl(msg, 'b'):
-			// Ctrl+B collapses / restores the right context sidebar. Only acts when
+		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && canFireComposerGatedToggle(m.keyBindings.toggleSidebar, defaultToggleSidebarChord, m.composerValue() == ""):
+			// Ctrl+B collapses / restores the right context sidebar. The composer-empty
+			// requirement only applies when the binding resolves to the conflicting
+			// default Ctrl+B chord (unset, or explicitly configured to the same
+			// chord), which readline navigation (move-to-beginning-of-line) also
+			// claims while typing; a binding that resolves to a genuinely different
+			// chord still fires mid-type. Only acts when
 			// the sidebar would otherwise be on screen (managed mode, wide enough,
 			// real conversation) so it's a no-op — not a confusing notice — on the
 			// home screen or a narrow terminal. Hiding reflows the chat to full
 			// width, so mirror the width-change bookkeeping (re-wrap the streaming
 			// fade, resize the composer) the WindowSizeMsg path does.
-			if m.noBlockingModal() && m.sidebarAvailable() {
+			if !m.transcriptDetailed && m.noBlockingModal() && m.sidebarToggleAllowed() {
 				// Just show/hide — no transcript notice. The reflow IS the feedback,
 				// and emitting a line every toggle piled up noise in the chat.
 				m.sidebarHidden = !m.sidebarHidden
@@ -1361,24 +1523,87 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case keyIs(msg, tea.KeyPgUp):
-			if m.transcriptDetailed {
-				return m, nil
-			}
-			// A stationary mouse over a bodyY-keyed transcript hover target would
-			// otherwise stay lit at the scrolled-away bodyY until the next real
-			// motion event (see clearHover) — same reasoning as the wheel-scroll
-			// cases in mouse.go.
 			m = m.clearHover()
 			return m.scrollChat(m.chatPageScrollLines()), nil
 		case keyIs(msg, tea.KeyPgDown):
+			m = m.clearHover()
+			return m.scrollChat(-m.chatPageScrollLines()), nil
+		case keyShift(msg) && keyIs(msg, tea.KeyUp):
+			// Shift+Up scrolls the transcript up one line. Must be checked before
+			// plain KeyUp so shifted arrows aren't consumed by the composer-path.
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(-1), nil
+			}
+			if m.pendingAskUser != nil {
+				return m.moveAskUserCursor(-1), nil
+			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
+			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
+			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
+				m.pickerMoved(-1)
+				return m, nil
+			}
+			if m.suggestionsActive() {
+				break
+			}
+			if m.composerValue() != "" {
+				break // let the input handle multiline navigation
+			}
 			m = m.clearHover()
-			return m.scrollChat(-m.chatPageScrollLines()), nil
-		case keyIs(msg, tea.KeyDown):
+			return m.scrollChat(1), nil
+		case keyShift(msg) && keyIs(msg, tea.KeyDown):
+			// Shift+Down scrolls the transcript down one line. Must be checked
+			// before plain KeyDown so shifted arrows aren't consumed.
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(1), nil
+			}
+			if m.pendingAskUser != nil {
+				return m.moveAskUserCursor(1), nil
+			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
+			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
+			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
+				m.pickerMoved(1)
+				return m, nil
+			}
+			if m.suggestionsActive() {
+				break
+			}
+			if m.composerValue() != "" {
+				break // let the input handle multiline navigation
+			}
+			m = m.clearHover()
+			return m.scrollChat(-1), nil
+		case keyIs(msg, tea.KeyDown):
+			if m.transcriptDetailed {
+				m = m.clearHover()
+				return m.scrollChat(-1), nil
 			}
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(1), nil
@@ -1420,7 +1645,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.transcriptDetailed {
-				return m, nil
+				m = m.clearHover()
+				return m.scrollChat(1), nil
 			}
 			if m.pendingPermission != nil {
 				return m.movePermissionCursor(-1), nil
@@ -1454,6 +1680,48 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.historyRecallActive() {
 				return m.recallHistory(-1), nil
 			}
+		case keyCtrl(msg, 'u'):
+			// Ctrl+U scrolls up half a page, or moves the cursor up in
+			// permission/ask-user prompts. Falls through to the active modal
+			// (wizard, etc.) when none of the above are in focus.
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(-1), nil
+			}
+			if m.pendingAskUser != nil {
+				return m.moveAskUserCursor(-1), nil
+			}
+			if m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.pendingSpecReview != nil {
+				break
+			}
+			if m.composerValue() != "" {
+				break // let the input handle its own Ctrl+U (delete-to-bol)
+			}
+			m = m.clearHover()
+			return m.scrollChat(m.chatPageScrollLines()), nil
+		case keyCtrl(msg, 'd'):
+			// Ctrl+D scrolls down half a page, or moves the cursor down in
+			// permission/ask-user prompts. Falls through to the active modal
+			// when none of the above are in focus.
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(1), nil
+			}
+			if m.pendingAskUser != nil {
+				return m.moveAskUserCursor(1), nil
+			}
+			if m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.pendingSpecReview != nil {
+				break
+			}
+			if m.composerValue() != "" {
+				break // let the input handle its own Ctrl+D (delete-next-char)
+			}
+			m = m.clearHover()
+			return m.scrollChat(-m.chatPageScrollLines()), nil
 		}
 		if m.transcriptDetailed {
 			return m, nil
@@ -1557,7 +1825,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Streaming text means any in-progress tool call has finished — clear the
 		// live "writing" block so it doesn't linger over new prose.
 		m.clearStreamingToolCall()
-		m.streamingText += msg.delta
+		m.streamingText = append(m.streamingText, msg.delta...)
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
 		// recordStreamingDelta appends a time.Time to lineAges for every
 		// newline in the delta and bumps lastStreamActivity. It also
@@ -1669,17 +1937,38 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// when the loop is already running or there is nothing to animate.
 		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
+		// The agent goroutine that raised this request is BLOCKED waiting on the
+		// decision callback, so every branch below must resolve it exactly once —
+		// or store it in pendingPermission, which resolves it on the user's reply.
+		// Dropping a request without resolving parks the run forever (the reported
+		// "stuck for 33 minutes" deadlock): the agent waits on a decision channel
+		// nothing will ever signal, with no visible prompt and no network activity.
 		if msg.runID != m.activeRunID {
+			// A superseded/stale run: unblock its parked goroutine now rather than
+			// relying on that run's context cancel to fire first.
+			if msg.decide != nil {
+				msg.decide(agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "run superseded"})
+			}
+			return m, nil
+		}
+		if msg.request.Action != agent.PermissionActionPrompt {
+			// Not a user-facing prompt (e.g. a sandbox-allowed command that still
+			// blocked because it requested additional permissions). The UI has
+			// nothing to ask, so resolve immediately and FAIL CLOSED — never
+			// silently grant access that was never surfaced to the user. (The agent
+			// now marks such elevation requests as prompts, so in practice this is a
+			// defensive backstop; matches the ACP handler's fail-closed contract.)
+			if msg.decide != nil {
+				msg.decide(autoResolvedPermissionDecision(msg.request.Action))
+			}
 			return m, nil
 		}
 		promptRow := permissionTranscriptRow(permissionEventFromRequest(msg.request))
 		promptRow.runID = msg.runID
 		m.transcript = appendTranscriptRow(m.transcript, promptRow)
-		if msg.request.Action == agent.PermissionActionPrompt {
-			m.pendingPermission = &pendingPermissionPrompt{
-				request: msg.request,
-				decide:  msg.decide,
-			}
+		m.pendingPermission = &pendingPermissionPrompt{
+			request: msg.request,
+			decide:  msg.decide,
 		}
 		return m, nil
 	case askUserRequestMsg:
@@ -1706,6 +1995,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clearComposer()
 		m.clearSuggestions()
 		return m, nil
+	case loopTickMsg:
+		// Idle poll for due loops. A stale tick (loops changed) or an empty loop set
+		// ends the ticker; otherwise fire the earliest due loop if idle and reschedule.
+		if msg.seq != m.loopSeq || len(m.loops) == 0 {
+			m.loopTicking = false
+			return m, nil
+		}
+		var fireCmd tea.Cmd
+		m, fireCmd = m.fireDueLoopIfIdle()
+		return m, tea.Batch(fireCmd, m.scheduleLoopTick())
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
 			// A run cancelled while in flight still finishes in its goroutine and
@@ -1819,22 +2118,35 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
-			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 			}
 			// The error row terminates the turn, so it carries the done-line
-			// metadata a final assistant row would have carried.
+			// metadata a final assistant row would have carried. A recognized
+			// provider failure (auth/rate-limit/connectivity/…) also carries a
+			// one-line next step so the user isn't left staring at a raw blob.
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
 				kind:        rowError,
 				text:        msg.err.Error(),
+				hint:        errhint.TUIHint(msg.err),
 				final:       true,
 				turnTools:   msg.turnTools,
 				turnElapsed: msg.turnElapsed,
 			})
 		}
-		m.streamingText = ""
+		m.streamingText = nil
 		m.streamingReasoning = ""
 		m.streamingReasoningExpanded = false
+		// Roll the completed run's wall-time into the session's rolling average so
+		// /context can surface typical turn latency, not just token counts.
+		if msg.turnElapsed > 0 {
+			m.turnLatencySum += msg.turnElapsed
+			m.turnLatencyCount++
+		}
+		if msg.ttft > 0 {
+			m.turnTTFTSum += msg.ttft
+			m.turnTTFTCount++
+		}
 		if msg.specReview != nil {
 			m = m.activateSpecReview(*msg.specReview)
 		}
@@ -1862,8 +2174,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// complete once the turn settles.
 		var sweepCmd tea.Cmd
 		m, sweepCmd = m.maybeGitSweep()
+		// If this run was a loop iteration, advance that loop (schedule its next wake
+		// or stop it). Done before launchQueuedMessageIfReady so a user's queued prompt
+		// still wins the immediate re-launch; the loop fires on the next idle tick.
+		var loopTickCmd tea.Cmd
+		if loopID := m.activeLoopID; loopID != "" {
+			m.activeLoopID = ""
+			loopFinalAnswer := ""
+			for _, row := range msg.rows {
+				if row.kind == rowAssistant && row.final {
+					loopFinalAnswer = row.text
+				}
+			}
+			m = m.advanceLoop(loopID, loopFinalAnswer, msg.err)
+			// advanceLoop -> removeLoop may have stopped the ticker; restart it if
+			// other loops remain.
+			m, loopTickCmd = m.ensureLoopTick()
+		}
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd)
+		return next, tea.Batch(titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapGeneratedMsg:
@@ -1997,14 +2326,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streamingReasoning = ""
 				m.streamingReasoningExpanded = false
 			}
-			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 				// This interim narration is the agent explaining what it's about to
 				// do — attribute it to the active plan step so the step-detail card
 				// can replay the agent's own account of the work.
 				m = m.captureStepNarration(text)
 			}
-			m.streamingText = ""
+			m.streamingText = nil
 			// The tool call has finalized into its card — drop the live "writing"
 			// preview so it doesn't linger or duplicate beneath the card.
 			m.clearStreamingToolCall()
@@ -2097,12 +2426,13 @@ func (m model) View() tea.View {
 	var content string
 	if m.setup.visible {
 		content = m.setupView(chatWidth(m.width))
-	} else if m.helpOverlay {
-		content = m.renderKeybindingHelpOverlay(chatWidth(m.width), m.height)
-	} else if m.transcriptDetailed {
-		content = m.detailedTranscriptView()
-	} else {
+	} else if m.helpOverlay || !m.transcriptDetailed {
+		// When helpOverlay is active the help panel is composited into the normal
+		// transcript view as a true overlay (scrim + vertical centering), matching
+		// how the suggestion picker / provider wizard / pickers are drawn.
 		content = m.transcriptView()
+	} else {
+		content = m.detailedTranscriptView()
 	}
 
 	view := tea.NewView(content)
@@ -2119,15 +2449,28 @@ func (m model) View() tea.View {
 		view.BackgroundColor = zeroTheme.bgPanel
 	}
 	view.ReportFocus = m.notifier != nil
+	// Voice mode's Space-hold gesture needs key-release events (Kitty protocol).
+	// Request them only while voice mode is on — the renderer re-sends the request
+	// only when the value changes, so gating this costs nothing (§10).
+	view.KeyboardEnhancements.ReportEventTypes = m.dictation.voiceModeEnabled
 	if m.wantsMouseCapture() {
-		// AllMotion (not CellMotion) is required for hover highlighting: it
-		// reports cursor movement even with no button pressed. CellMotion only
-		// reports motion while a button is held (drag) — see bubbletea's
-		// MouseMode docs. AllMotion has marginally worse terminal compatibility
-		// but is well supported by the terminals this app targets; the existing
-		// 15ms mouse-event throttle (mouseEventThrottleInterval) already bounds
-		// the redraw rate from the extra motion events.
-		view.MouseMode = tea.MouseModeAllMotion
+		if isRunningUnderPRoot() {
+			// Under PRoot the AllMotion (1003) sequence doesn't work
+			// reliably, breaking touch-gesture scrolling. Fall back to
+			// CellMotion which still delivers wheel events, clicks, and
+			// drag — the only thing lost is hover-highlighting.
+			view.MouseMode = tea.MouseModeCellMotion
+		} else {
+			// AllMotion (not CellMotion) is required for hover highlighting:
+			// it reports cursor movement even with no button pressed.
+			// CellMotion only reports motion while a button is held (drag) —
+			// see bubbletea's MouseMode docs. AllMotion has marginally worse
+			// terminal compatibility but is well supported by the terminals
+			// this app targets; the existing 15ms mouse-event throttle
+			// (mouseEventThrottleInterval) already bounds the redraw rate
+			// from the extra motion events.
+			view.MouseMode = tea.MouseModeAllMotion
+		}
 	}
 	return view
 }
@@ -2173,13 +2516,23 @@ func (m model) transcriptView() string {
 		return body + footer
 	}
 
+	helpOverlayContent := ""
+	if m.helpOverlay {
+		helpOverlayContent = m.renderKeybindingHelpOverlay(width)
+	}
+
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
 	mcpAddOverlay := m.mcpAddWizardOverlay(width)
 	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
+	sttKeyOverlay := m.sttKeyPromptOverlay(width)
 	viewportOverlay := ""
 	switch {
+	case sttKeyOverlay != "":
+		viewportOverlay = sttKeyOverlay
+	case helpOverlayContent != "":
+		viewportOverlay = helpOverlayContent
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
 	case mcpAddOverlay != "":
@@ -2195,7 +2548,7 @@ func (m model) transcriptView() string {
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		emptyOverlay = viewportOverlay
 	}
-	bodyItems := m.transcriptBodyItems(width, emptyOverlay)
+	bodyItems := m.transcriptBodyItems(width, emptyOverlay, false)
 
 	footer := m.footerView(width)
 
@@ -2235,7 +2588,7 @@ func (m model) twoColumnTranscriptView() string {
 	width := chatW
 
 	suggestionOverlay := m.suggestionOverlay(width)
-	bodyItems := m.transcriptBodyItems(width, "")
+	bodyItems := m.transcriptBodyItems(width, "", false)
 	footer := m.footerView(width)
 	overlayForViewport := suggestionOverlay
 	if m.transcriptEmpty() && !m.pending {
@@ -2331,6 +2684,10 @@ func (m model) composerIdleHint() string {
 		m.subchat.active || m.suggestionsActive() || m.transcriptDetailed {
 		return ""
 	}
+	sidebarKey := labelOr(m.keyBindings.toggleSidebar, "Ctrl+B")
+	detailKey := labelOr(m.keyBindings.toggleDetailed, "Ctrl+O")
+	mouseKey := labelOr(m.keyBindings.toggleMouse, "Ctrl+E")
+
 	var hint string
 	switch widthTier(m.width) {
 	case tierTiny:
@@ -2338,9 +2695,9 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+E copy"
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s copy", sidebarKey, mouseKey)
 	default:
-		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+O detail · Ctrl+E copy · Shift+Tab mode"
+		hint = fmt.Sprintf("? shortcuts · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -2661,7 +3018,15 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 		return transcriptViewport{}, false
 	}
 	width := m.chatColumnWidth()
-	items := m.transcriptBodyItems(width, "")
+	if m.transcriptDetailed {
+		items := m.transcriptBodyItems(width, "", true)
+		body := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+		header := detailedTranscriptHeader(width) + "\n" + zeroTheme.line.Render(strings.Repeat("-", width))
+		footer := m.detailedTranscriptFooter(width)
+		frame := m.scrollableTranscriptFrame(header, footer)
+		return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
+	}
+	items := m.transcriptBodyItems(width, "", false)
 	body := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
@@ -2723,7 +3088,7 @@ func (m model) liveReasoningBodyCap() int {
 }
 
 func (m model) interimBlock(width int) string {
-	text := strings.TrimRight(m.streamingText, "\n")
+	text := strings.TrimRight(m.streamingTextString(), "\n")
 	reasoning := strings.TrimRight(m.streamingReasoning, "\n")
 	blocks := []string{}
 	if strings.TrimSpace(reasoning) != "" {
@@ -2787,7 +3152,7 @@ func (m model) spinnerGlyph() string {
 // (reasoning, waiting on the model, or a tool in flight). Cheap and robust — no
 // transcript scan — so it can't misreport on a long, output-less step.
 func (m model) workingActivity() string {
-	if strings.TrimSpace(m.streamingText) != "" {
+	if strings.TrimSpace(m.streamingTextString()) != "" {
 		return "writing"
 	}
 	return "thinking"
@@ -3482,10 +3847,15 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	switch picker.kind {
 	case pickerModel:
 		text := ""
-		if owner := strings.TrimSpace(item.OwnerProvider); owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) {
+		owner := strings.TrimSpace(item.OwnerProvider)
+		_, ownerIsSavedProvider := m.savedProviderByName(owner)
+		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
 			// A model from another saved provider: switch provider + model together.
-			m, text, cmd = m.switchProviderModel(owner, item.Value)
+			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
 		} else {
+			// OwnerProvider is blank, matches the active provider, or (registry-fallback
+			// / stale-history rows) doesn't resolve to any saved provider: apply against
+			// the active provider instead of attempting an unresolvable provider switch.
 			m, text = m.handleModelCommand(item.Value)
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
@@ -3501,6 +3871,24 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
+	case pickerSkill:
+		// Fill the composer with "/name " so the user adds their request before
+		// submitting (a bare second Enter runs it without one); names the slash
+		// path cannot reach run immediately instead.
+		m, cmd = m.chooseSkillFromPicker(item)
+	case pickerSTTModel:
+		// Selecting the local engine with no model (and auto-download available)
+		// chains into the variant-download picker instead of finalizing.
+		if next, fetchCmd, opened := m.maybeOpenSTTDownloadPicker(item.Value); opened {
+			return next, fetchCmd
+		}
+		text := ""
+		m, text = m.handleSTTModelSelection(item.Value)
+		if text != "" { // empty when a key prompt opened instead of finalizing
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		}
+	case pickerSTTDownload:
+		return m.handleSTTDownloadSelection(item.Value)
 	case pickerTheme:
 		// The hovered palette is already live from the preview; handleThemeCommand
 		// records the choice (m.themeMode) and re-applies it, and reports the switch.
@@ -3552,6 +3940,13 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	command := parseCommand(input)
+	// A pending /clear or /quit leave-confirmation is armed for the immediately-next
+	// repeat of that same command only; any other submission — including one queued
+	// or deferred by the early returns below — disarms it. Runs before those returns
+	// so an interposed prompt can't be skipped over and leave the gate falsely armed.
+	if m.loopLeavePrompt != commandEmpty && command.kind != m.loopLeavePrompt {
+		m.loopLeavePrompt = commandEmpty
+	}
 	// While exiting (Ctrl+C waiting on the cancelled run's checkpoint flush) a
 	// new run must not start: the deferred tea.Quit would abort it mid-flight
 	// and orphan its checkpoint blobs — the exact loss flushRunIDs prevents.
@@ -3585,12 +3980,48 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: helpText()})
 		return m, nil
 	case commandClear:
+		// A foreground loop keeps firing after /clear (it wipes the screen, not the
+		// session), so warn once before clearing the context it will run into.
+		if m.loopActive() && m.loopLeavePrompt != commandClear {
+			m.loopLeavePrompt = commandClear
+			m = m.appendLoopSystem(m.loopFooterSummary() + " still running — /clear keeps them firing behind a cleared screen. Run /clear again to confirm, or /loop stop all first.")
+			return m, nil
+		}
+		m.loopLeavePrompt = commandEmpty
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
+		// Clearing wipes the visible transcript only — the session's context is
+		// intact, so the next prompt still replays the full history. Say so, and
+		// point to /new, so "cleared screen" isn't mistaken for "fresh context."
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Transcript cleared. The agent still has the full session context — use /new to start a fresh session."})
 		// Scrollback above can't be un-printed; a faint divider marks where the
 		// cleared surface ended and the frontier restarts for the fresh transcript.
 		m.resetFlushFrontier("· cleared ·")
+		// /clear wipes the transcript but not the session, so loops keep running;
+		// say so rather than let them silently fire into a "cleared" screen.
+		if m.loopActive() {
+			m = m.appendLoopSystem(m.loopFooterSummary() + " still running — /loop stop all to end them.")
+		}
 		return m, nil
+	case commandNew:
+		// A fresh session mid-run would strand the in-flight turn's events; make the
+		// user cancel first. Idle, /new saves the current session (already on disk)
+		// and clears the conversation in place.
+		if m.pending || m.compactInFlight {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A run is in progress. Press Esc to cancel it first, then /new."})
+			return m, nil
+		}
+		return m.startNewSession(), nil
+	case commandLoop:
+		return m.handleLoopCommand(command.text)
 	case commandExit:
+		// Closing the session stops its foreground loops mid-task; warn once so a
+		// token-spending loop isn't ended by reflex.
+		if m.loopActive() && m.loopLeavePrompt != commandExit {
+			m.loopLeavePrompt = commandExit
+			m = m.appendLoopSystem(m.loopFooterSummary() + " active — closing the session stops them. Run /exit again to confirm, or /loop stop all first.")
+			return m, nil
+		}
+		m.loopLeavePrompt = commandEmpty
 		// /exit gets the same protection as Ctrl+C: cancel any in-flight run and
 		// defer the quit until its checkpoint session events flush — quitting
 		// immediately would orphan the blobs and break /rewind.
@@ -3602,6 +4033,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.quit()
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
+		return m, nil
+	case commandSkills:
+		// With skills installed, /skills opens a searchable picker (like /model);
+		// the text card remains only as the no-skills install hint.
+		if picker := m.newSkillPicker(); picker != nil {
+			m.picker = picker
+			return m, nil
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.skillsText()})
 		return m, nil
 	case commandMCP:
 		if strings.TrimSpace(command.text) == "" {
@@ -3620,14 +4060,20 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandSandboxSetup:
 		return m.startSandboxSetupCommand(command.text)
 	case commandProvider:
-		if strings.TrimSpace(command.text) == "" {
+		arg := strings.ToLower(strings.TrimSpace(command.text))
+		if arg == "" || arg == "add" {
 			if m.pending {
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
 				return m, nil
 			}
-			m.providerWizard = m.newProviderWizard()
-			m.clearSuggestions()
-			return m, nil
+			// Bare /provider opens the list-first manager over the saved
+			// providers; /provider add jumps straight into the add wizard.
+			if arg == "add" {
+				m.providerWizard = m.newProviderWizard()
+				m.clearSuggestions()
+				return m, nil
+			}
+			return m.openProviderManager()
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
@@ -3646,6 +4092,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m, text = m.handleModelCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
+	case commandSTTModel:
+		if m.pending {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+			return m, nil
+		}
+		return m.openSTTModelPicker()
+	case commandVoice:
+		return m.toggleVoiceMode()
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
@@ -3798,6 +4252,11 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		if next, cmd, handled := m.handleUserCommand(command.text); handled {
 			return next, cmd
 		}
+		// Then an installed skill: "/<skill-name> [args]" runs the skill directly
+		// (deterministic invocation, vs waiting for the model to pull it in).
+		if next, cmd, handled := m.handleSkillCommand(command.text); handled {
+			return next, cmd
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendError,
 			text: "unknown command: " + command.text,
@@ -3822,6 +4281,62 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "$ " + cmdText})
 		return m, runBashEscape(m.cwd, cmdText)
+	case commandRetry:
+		// /retry launches a run, so it needs the same guards a normal prompt gets:
+		// never start one while exiting (would strand the shutdown flush) or during
+		// compaction (would race compactResultMsg's wholesale rewrite of
+		// transcript/sessionEvents and silently drop events).
+		if m.exiting {
+			return m, nil
+		}
+		if m.pending {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\ncannot retry while a run is in progress."})
+			return m, nil
+		}
+		if m.compactInFlight {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendSystem,
+				text: "Retry\nstatus: warning\nCompaction is running. Retry once it finishes.",
+			})
+			return m, nil
+		}
+		if strings.TrimSpace(m.lastPrompt) == "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Retry\nno previous prompt to resend."})
+			return m, nil
+		}
+		// Re-stage the attachments the last prompt carried so launchPrompt rebuilds
+		// an identical request (document preamble + images + vision re-check). Without
+		// this the queues are empty and /retry would resend a text-only prompt,
+		// silently dropping the image/PDF context and answering a different task.
+		m.pendingImages = m.lastImages
+		m.pendingImageLabels = m.lastImageLabels
+		m.pendingDocuments = m.lastDocuments
+		return m.launchPrompt(m.lastPrompt)
+	case commandEdit:
+		if strings.TrimSpace(m.lastPrompt) == "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Edit\nno previous prompt to recall."})
+			return m, nil
+		}
+		// Re-stage the remembered attachments alongside the recalled text so an
+		// edited resend carries the same image/PDF context — the reappearing chip
+		// row is the visible confirmation. Without this, editing a vision- or
+		// document-backed prompt would silently submit a text-only version and
+		// answer a different task (the same gap /retry guards against).
+		m.pendingImages = m.lastImages
+		m.pendingImageLabels = m.lastImageLabels
+		m.pendingDocuments = m.lastDocuments
+		m.input.SetValue(m.lastPrompt)
+		return m, nil
+	case commandCopy:
+		text := m.lastAssistantAnswer()
+		if strings.TrimSpace(text) == "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Copy\nno answer to copy yet."})
+			return m, nil
+		}
+		return m, copyTranscriptSelectionCmd(text)
+	case commandExport:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.handleExportCommand(command.text)})
+		return m, nil
 	case commandPrompt:
 		if intent, ok := detectMCPSetupIntent(command.text); ok {
 			return m.openMCPAddWizardFromIntent(intent), nil
@@ -3836,6 +4351,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 // composer. Queued prompts use this path too, so session and image behavior
 // stays identical to immediate submissions.
 func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
+	// Remember the verbatim prompt (before specialist/document expansion) so /retry
+	// and /edit can act on exactly what the user submitted. Snapshot the staged
+	// attachments too: launchPrompt clears the pending queues below, so /retry
+	// re-stages these to resend an identical vision/PDF-backed request rather than
+	// a degraded text-only one.
+	m.lastPrompt = prompt
+	m.lastImages = m.pendingImages
+	m.lastImageLabels = m.pendingImageLabels
+	m.lastDocuments = m.pendingDocuments
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
 	if m.provider == nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -4004,6 +4528,21 @@ func (m *model) cancelRun() {
 		m.runCancel()
 	}
 	m.clearStreamingToolCall() // a cancelled file-write must not linger into the next run
+	// A cancelled loop iteration bypasses the agentResponseMsg completion seam (its
+	// late message is drained through flushRunIDs, not advanceLoop), so clear the
+	// loop tag here and re-arm the interrupted loop for its next cadence. Otherwise
+	// the loop is left "running" forever (nextRunAt stays zero) and the NEXT
+	// unrelated turn would be misattributed as this loop's completion.
+	if m.activeLoopID != "" {
+		if l := m.findLoop(m.activeLoopID); l != nil {
+			if l.mode == loopModeSelfPaced {
+				l.nextRunAt = m.now().Add(clampSelfPaceDelay(adaptiveSelfPaceDelay(l.iteration)))
+			} else {
+				l.nextRunAt = m.now().Add(l.interval)
+			}
+		}
+		m.activeLoopID = ""
+	}
 	// Remember the in-flight run — and the session it was recording into — so
 	// its final agentResponseMsg is still drained for session-event persistence
 	// after activeRunID is cleared. Otherwise the checkpoint blobs it captured
@@ -4023,7 +4562,7 @@ func (m *model) cancelRun() {
 		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoning); ok {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
-		if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+		if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 		}
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: "Run cancelled."})
@@ -4044,7 +4583,7 @@ func (m *model) cancelRun() {
 	m.pendingAskUser = nil
 	// The interim block renders streamingText live; a cancelled run's partial
 	// answer must not leak into (and concatenate with) the next turn's stream.
-	m.streamingText = ""
+	m.streamingText = nil
 	m.streamingReasoning = ""
 	m.streamingReasoningExpanded = false
 	// Hard-stop the fade and drop the per-line age map. The next turn's
@@ -4074,6 +4613,9 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		started := m.now()
+		// firstTokenAt is stamped when the first token (reasoning or text) streams,
+		// so the turn can report time-to-first-token alongside total wall time.
+		var firstTokenAt time.Time
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
@@ -4118,18 +4660,28 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// matching exec; the per-turn lsp.Manager is torn down when this run
 		// returns; auto-fix vs report-only follows the active permission mode.
 		if !runOptions.specDraft && options.Cwd != "" {
-			lspManager := lsp.NewManager(options.Cwd)
-			defer func() {
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = lspManager.Shutdown(shutdownCtx)
-			}()
+			// Prefer the session-long manager (kept warm across prompts). Only when it
+			// is absent — e.g. cwd was unknown at construction, or a test built the
+			// model directly — fall back to a per-run manager that is shut down here.
+			lspManager := m.lspManager
+			if lspManager == nil {
+				lspManager = lsp.NewManager(options.Cwd)
+				defer func() {
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = lspManager.Shutdown(shutdownCtx)
+				}()
+			}
 			options.SelfCorrect = agent.NewSelfCorrector(options.Cwd, agent.NewLSPDiagnosticsChecker(lspManager), agent.NewProjectVerifier(options.Cwd), agent.SelfCorrectConfig{
 				Enabled:      true,
 				IncludeTests: m.selfCorrectTests,
 				IncludeLSP:   true,
 				Autonomy:     selfCorrectAutonomyForMode(options.PermissionMode),
 			})
+			// Background post-edit diagnostics: the loop checks files changed by
+			// edit_file/write_file off the tool-call path and nudges the model with
+			// any errors before its next request. Shares the run's lazy manager.
+			options.FileDiagnostics = agent.NewFileDiagnostics(lspManager, options.Cwd)
 		}
 
 		// Some providers synthesize tool-call ids that repeat within a run (e.g.
@@ -4166,6 +4718,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
+			if firstTokenAt.IsZero() {
+				firstTokenAt = m.now()
+			}
 			if strings.TrimSpace(reasoningText) != "" {
 				flushReasoning(m.now())
 			}
@@ -4261,6 +4816,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			now := m.now()
+			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
+				firstTokenAt = now
+			}
 			if strings.TrimSpace(reasoningText) == "" && strings.TrimSpace(delta) != "" {
 				reasoningStarted = now
 			}
@@ -4497,6 +5055,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		flushReasoning(m.now())
 		elapsed := m.now().Sub(started)
+		ttft := time.Duration(0)
+		if !firstTokenAt.IsZero() {
+			ttft = firstTokenAt.Sub(started)
+		}
 		rows = append(rows, transcriptRow{
 			kind:        rowAssistant,
 			text:        result.FinalAnswer,
@@ -4514,7 +5076,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
 	}
 }
 
@@ -4523,6 +5085,21 @@ func (m model) sendPermissionRequest(runID int, request agent.PermissionRequest,
 		return
 	}
 	m.runtimeMessageSink(permissionRequestMsg{runID: runID, request: request, decide: decide})
+}
+
+// autoResolvedPermissionDecision resolves a permission request the TUI cannot
+// turn into a user prompt (Action != prompt). The agent is blocked awaiting a
+// decision, so one must ALWAYS be produced. Only an explicit Cancel is honored
+// as such; every other non-prompt action — including allow — is DENIED, so the
+// UI never silently grants access it did not surface for approval.
+func autoResolvedPermissionDecision(action agent.PermissionAction) agent.PermissionDecision {
+	if action == agent.PermissionActionCancel {
+		return agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "run cancelled"}
+	}
+	return agent.PermissionDecision{
+		Action: agent.PermissionDecisionDeny,
+		Reason: "permission request could not be surfaced for approval",
+	}
 }
 
 func (m model) sendAskUserRequest(runID int, request agent.AskUserRequest, answer func([]string)) {
@@ -4554,6 +5131,13 @@ func (m model) sendAgentText(runID int, delta string) {
 		return
 	}
 	m.runtimeMessageSink(agentTextMsg{runID: runID, delta: delta})
+}
+
+// streamingTextString returns the accumulated live assistant text. streamingText
+// is stored as []byte for O(1) amortized appends; the conversion here is bounded
+// by the segment length, the same cost the renderer already pays.
+func (m model) streamingTextString() string {
+	return string(m.streamingText)
 }
 
 func (m model) sendToolCallStreamStart(runID int, id, name string) {

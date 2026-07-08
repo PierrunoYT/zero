@@ -43,9 +43,21 @@ var interactivePrograms = map[string]interactiveProgram{
 	"emacs": {reason: "emacs opens an interactive session", suggestion: "Use `emacs --batch` for scripting, or the edit_file/write_file tools."},
 	"pico":  {reason: "pico is a full-screen editor that waits for keystrokes", suggestion: "Use the edit_file/write_file tools or `sed -i`."},
 	// Pagers.
-	"less": {reason: "less is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.", windowsSuggestion: "Use `type <file>` to print file contents non-interactively, or the read_file tool."},
-	"more": {reason: "more is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.", windowsSuggestion: "Use `type <file>` to print file contents non-interactively, or the read_file tool."},
-	"most": {reason: "most is a pager that waits for navigation keys", suggestion: "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.", windowsSuggestion: "Use `type <file>` to print file contents non-interactively, or the read_file tool."},
+	"less": {
+		reason:            "less is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
+	"more": {
+		reason:            "more is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
+	"most": {
+		reason:            "most is a pager that waits for navigation keys",
+		suggestion:        "Use `cat`, `head`, or `tail -n N` to print file contents non-interactively.",
+		windowsSuggestion: "Use `type` to print file contents non-interactively, or the read_file tool with offset/limit for a partial view.",
+	},
 	// Process/system monitors.
 	"top":   {reason: "top runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot.", windowsSuggestion: "Use `tasklist` for a one-shot process snapshot."},
 	"htop":  {reason: "htop runs a live full-screen dashboard until you quit it", suggestion: "Use `ps aux` (optionally `| head`) for a one-shot snapshot.", windowsSuggestion: "Use `tasklist` for a one-shot process snapshot."},

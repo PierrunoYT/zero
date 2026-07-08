@@ -419,12 +419,23 @@ func (m model) providerText() string {
 	}
 
 	snapshot := zerocommands.ProviderSnapshotFromProfile(m.providerProfile, true)
+	// A keyless profile backed by a stored OAuth login (e.g. ChatGPT) is fully
+	// authenticated — without this, /provider status showed a WORKING provider
+	// as "api key: not set" with a warning, unlike `zero providers list` which
+	// already fills OAuthLogin.
+	if !snapshot.APIKeySet {
+		snapshot.OAuthLogin = oauthLoginAvailable(m.providerProfile)
+	}
+	credentialState := apiKeyState(snapshot.APIKeySet)
+	if !snapshot.APIKeySet && snapshot.OAuthLogin {
+		credentialState = "oauth login"
+	}
 	profileLines = append(profileLines,
 		"active: "+boolText(snapshot.Active),
 		"kind: "+displayValue(snapshot.ProviderKind, "unknown"),
 		"api model: "+displayValue(snapshot.APIModel, "unknown"),
 		"base url: "+displayValue(snapshot.BaseURL, "default"),
-		"api key: "+apiKeyState(snapshot.APIKeySet),
+		"api key: "+credentialState,
 	)
 	if snapshot.Message != "" {
 		profileLines = append(profileLines, "provider status: "+snapshot.Status+" - "+snapshot.Message)
@@ -432,7 +443,7 @@ func (m model) providerText() string {
 
 	status := commandStatusOK
 	actionLines := providerNextActionLines(m.providerProfile, snapshot, m.providerName)
-	if providerCredentialRequired(m.providerProfile, snapshot.ProviderKind) && !providerProfileHasCredential(m.providerProfile) {
+	if providerCredentialRequired(m.providerProfile, snapshot.ProviderKind) && !providerProfileHasCredential(m.providerProfile) && !snapshot.OAuthLogin {
 		status = commandStatusWarning
 	}
 	return renderCommandOutput(commandOutput{
@@ -472,6 +483,14 @@ func providerProfileHasCredential(profile config.ProviderProfile) bool {
 
 func providerCredentialRequired(profile config.ProviderProfile, providerKind string) bool {
 	if descriptor, ok := providerCatalogDescriptor(profile); ok {
+		// A custom endpoint's RequiresAuth is just the wizard's template
+		// default, not a fact about this profile's actual endpoint (issue
+		// #555 follow-up) — only an explicit, non-default APIKeyEnv means
+		// this saved profile itself expects a credential.
+		if descriptor.Custom {
+			envVar := strings.TrimSpace(profile.APIKeyEnv)
+			return envVar != "" && envVar != firstProviderDisplayValue(descriptor.AuthEnvVars...)
+		}
 		return descriptor.RequiresAuth
 	}
 	switch config.ProviderKind(strings.TrimSpace(providerKind)) {
@@ -559,6 +578,21 @@ func (m model) modelText(args string) string {
 	})
 }
 
+// avgTurnLatencyText reports the session's rolling average turn wall-time for
+// /context — the "is it slow?" signal a user otherwise can only feel. "n/a" until
+// a turn has completed.
+func (m model) avgTurnLatencyText() string {
+	if m.turnLatencyCount == 0 {
+		return "n/a"
+	}
+	avgSeconds := m.turnLatencySum.Seconds() / float64(m.turnLatencyCount)
+	if m.turnTTFTCount > 0 {
+		ttftSeconds := m.turnTTFTSum.Seconds() / float64(m.turnTTFTCount)
+		return fmt.Sprintf("%.1fs avg (%.1fs to first token, %d turns)", avgSeconds, ttftSeconds, m.turnLatencyCount)
+	}
+	return fmt.Sprintf("%.1fs avg (%d turns)", avgSeconds, m.turnLatencyCount)
+}
+
 func (m model) contextText() string {
 	toolCount := len(m.registeredTools())
 	return renderCommandCardTranscript(commandCard{
@@ -578,6 +612,8 @@ func (m model) contextText() string {
 					{Key: "effort", Value: m.effortDisplay()},
 					{Key: "style", Value: displayValue(m.responseStyle, defaultResponseStyle)},
 					{Key: "usage", Value: m.usageSummaryText()},
+					{Key: "cache", Value: m.cacheEfficiencyText()},
+					{Key: "latency", Value: m.avgTurnLatencyText()},
 					{Key: "max turns", Value: fmt.Sprint(m.agentOptions.MaxTurns)},
 				},
 			},
@@ -679,5 +715,21 @@ func (m model) debugText() string {
 				"pending permission: " + boolText(m.pendingPermission != nil),
 			},
 		}},
+	})
+}
+
+// skillsText is the /skills fallback when NO skills are installed — an install
+// hint. With skills present /skills opens the searchable skill picker instead
+// (see newSkillPicker), matching how /model works.
+func (m model) skillsText() string {
+	return renderCommandOutput(commandOutput{
+		Title:  "Skills",
+		Status: commandStatusInfo,
+		Sections: []commandSection{{
+			Lines: []string{"No skills installed."},
+		}},
+		Hints: []string{
+			"install one: create <skills-dir>/<name>/SKILL.md (see `zero skills`)",
+		},
 	})
 }

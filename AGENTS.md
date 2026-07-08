@@ -26,7 +26,7 @@ Accepted file names, in priority order at each level:
 | `./ZERO.md` | Brand-specific alias. Same format, lower priority. |
 | `./.zero/AGENTS.md` | Project-local, hidden, gitignored. Personal notes that stay out of git. |
 
-Matching is **case-insensitive** on the basename, so `AGENTS.md`, `Agents.md`, and `agents.md` resolve to the same file on Windows and macOS. The git-tracked filename in this repo is `AGENTS.MD` (uppercase `MD`) — keep that on case-sensitive filesystems (Linux, the WSL filesystem, or a CI runner) to match what the loader looks for.
+Matching is **case-insensitive** on the basename, so `AGENTS.md`, `Agents.md`, and `agents.md` resolve to the same file on Windows and macOS. The git-tracked filename in this repo is `AGENTS.md` — keep that on case-sensitive filesystems (Linux, the WSL filesystem, or a CI runner) to match what the loader looks for.
 
 Both files use the same format. YAML frontmatter is optional; the markdown body is loaded as instructions for the agent. Zero reads the file once at session start, so changes take effect on the next `zero` launch — not mid-session.
 
@@ -46,6 +46,12 @@ Tips:
 - Don't put secrets, model IDs, or environment-specific paths in `AGENTS.md`. Use `config.json` for those.
 - In a monorepo, drop a narrower `AGENTS.md` in each sub-tree (e.g. `services/api/AGENTS.md`). Zero picks those up automatically when you launch from inside the sub-tree.
 - A YAML frontmatter block (`---\n...\n---`) at the top is preserved verbatim in the injected prompt but is not parsed for `globs:` or `alwaysApply:` scoping today — keep the body self-contained.
+
+### Personal guidelines, across every project
+
+For preferences that follow *you*, not a specific repo (tone, tooling habits, workflow), drop a `ZERO.md` in your user config directory: `~/.config/zero/ZERO.md` on Linux/macOS, `%AppData%\Roaming\zero\ZERO.md` on Windows — the same directory as `config.json` and your personal specialists. Same format and 8 KiB cap as the project files above, and the same case-insensitive basename match.
+
+This file is injected as its own `## User guidelines` section, before the project's `AGENTS.md`/`ZERO.md`, and is labeled as personal preference in the prompt: project guidelines are the later, more specific instruction and take precedence over it when the two conflict.
 
 ## 2. Custom specialists
 
@@ -126,7 +132,7 @@ description: Run the project's benchmark suite and summarize the deltas.
 3. Report any regression > 5% with the function name and the previous value.
 ```
 
-Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. If two skills declare the same name, the one in the lexicographically-first directory wins — duplicates are dropped silently. Plugin-declared skills (section 6) are not yet merged into the loader, so a `skills:` entry inside a plugin's `plugin.json` is not visible to the `skill` tool today.
+Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. Within a single skills root, duplicate names are resolved by lexicographic directory order. During an agent run, Zero loads the default skills directory before plugin skill roots; earlier roots win name collisions silently. Plugin-declared skills (section 6) are merged into the active agent run at plugin activation time, so bundled skills appear in the available skills list and can be loaded with the `skill` tool.
 
 The `skill` core tool lets the agent load any discovered skill by name.
 
@@ -276,7 +282,7 @@ A plugin is enabled by being present in the plugins directory and disabled by re
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
 
-> **Roadmap.** An in-UI plugins manager (browse, install, enable / disable) is on the backlog. Today you use the `zero plugins` CLI subcommands above. Skills declared inside a plugin's `plugin.json` are not yet merged into the `skill` tool's discovery (see section 3).
+> **Roadmap.** An in-UI plugins manager (browse, install, enable / disable) is on the backlog. Today you use the `zero plugins` CLI subcommands above.
 
 ## 7. Configuration locations
 
@@ -307,6 +313,7 @@ A team that wants every contributor's Zero to behave the same way commits:
 Each contributor adds only:
 
 - `~/.config/zero/config.json` — their personal API keys, theme, default mode.
+- `~/.config/zero/ZERO.md` — personal preferences that follow them across every project (see section 1).
 - `~/.local/share/zero/skills/` — personal skills they keep across projects.
 
 That's it. Run `zero` from the repo root and the agent has the team's full instruction set, every contributor's personal setup, and nothing else.

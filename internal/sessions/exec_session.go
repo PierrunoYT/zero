@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"unicode/utf8"
 )
 
 type ExecMode string
@@ -160,10 +161,7 @@ func FormatExecPrompt(prompt string, prepared PreparedExec) string {
 	if prepared.Mode == ModeNew || len(prepared.ContextEvents) == 0 {
 		return prompt
 	}
-	events := prepared.ContextEvents
-	if len(events) > 20 {
-		events = events[len(events)-20:]
-	}
+	events := promptContextEvents(prepared.ContextEvents)
 
 	lines := []string{}
 	for _, event := range events {
@@ -187,6 +185,25 @@ func FormatExecPrompt(prompt string, prepared PreparedExec) string {
 	}, "\n")
 }
 
+func promptContextEvents(events []Event) []Event {
+	const maxPromptContextEvents = 80
+
+	filtered := make([]Event, 0, len(events))
+	for _, event := range events {
+		switch event.Type {
+		case EventMessage, EventCompaction, EventSessionFork, EventSessionChild, EventSpecialistStart, EventSpecialistStop, EventError:
+			filtered = append(filtered, event)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = append(filtered, events...)
+	}
+	if len(filtered) > maxPromptContextEvents {
+		filtered = filtered[len(filtered)-maxPromptContextEvents:]
+	}
+	return filtered
+}
+
 func forkTitle(title string) string {
 	if title == "" {
 		return ""
@@ -205,9 +222,22 @@ func summarizePayload(payload any) string {
 		text = string(data)
 	}
 	if len(text) > 500 {
-		return text[:500]
+		return truncateUTF8(text, 500)
 	}
 	return text
+}
+
+// truncateUTF8 returns the longest prefix of s that is at most n bytes,
+// backing off to the nearest rune boundary so a multi-byte character isn't
+// split — a split rune here would embed invalid UTF-8 into the exec prompt.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func extractText(value any) string {

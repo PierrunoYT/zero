@@ -24,6 +24,9 @@ const (
 	pickerEffort
 	pickerSession
 	pickerTheme
+	pickerSkill
+	pickerSTTModel
+	pickerSTTDownload
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
@@ -55,6 +58,9 @@ type commandPicker struct {
 	allItems []pickerItem
 	query    string
 	selected int
+	// loading marks a picker still fetching its rows (e.g. the STT model list from
+	// GitHub): the overlay shows a "fetching…" line instead of "no matching items".
+	loading bool
 }
 
 func (p *commandPicker) move(delta int) {
@@ -102,14 +108,81 @@ func (p *commandPicker) applyQuery() {
 		p.selected = clampInt(p.selected, 0, maxInt(0, len(p.items)-1))
 		return
 	}
-	filtered := make([]pickerItem, 0, len(source))
-	for _, item := range source {
-		if strings.Contains(strings.ToLower(strings.Join([]string{item.Group, item.Label, item.Value, item.Meta}, " ")), query) {
-			filtered = append(filtered, item)
+
+	// Rank matches (exact < prefix < contains < subsequence) instead of a flat
+	// substring filter, so the closest match to "sonnet 4.5" lands at the top
+	// rather than buried behind scrolling. Groups stay contiguous — a group is
+	// ordered by its best-matching item and never split into two header blocks —
+	// so the grouped model picker still renders one header per provider.
+	type entry struct {
+		item  pickerItem
+		score int
+		order int
+	}
+	groupFirst := map[string]int{}
+	groupBest := map[string]int{}
+	entries := make([]entry, 0, len(source))
+	for index, item := range source {
+		score, ok := scorePickerItem(item, query)
+		if !ok {
+			continue
 		}
+		if _, seen := groupFirst[item.Group]; !seen {
+			groupFirst[item.Group] = index
+		}
+		if best, seen := groupBest[item.Group]; !seen || score < best {
+			groupBest[item.Group] = score
+		}
+		entries = append(entries, entry{item: item, score: score, order: index})
+	}
+	sort.SliceStable(entries, func(a, b int) bool {
+		ga, gb := entries[a].item.Group, entries[b].item.Group
+		if ga != gb {
+			// Most-relevant group first; ties keep original group appearance order so
+			// a group is never scattered across the list.
+			if groupBest[ga] != groupBest[gb] {
+				return groupBest[ga] < groupBest[gb]
+			}
+			return groupFirst[ga] < groupFirst[gb]
+		}
+		// Within a group: best match first, then original order.
+		if entries[a].score != entries[b].score {
+			return entries[a].score < entries[b].score
+		}
+		return entries[a].order < entries[b].order
+	})
+	filtered := make([]pickerItem, 0, len(entries))
+	for _, e := range entries {
+		filtered = append(filtered, e.item)
 	}
 	p.items = filtered
 	p.selected = 0
+}
+
+// scorePickerItem ranks an item against a lowercased query; lower is better, and
+// ok is false when it doesn't match at all. Tiers mirror scoreFileSuggestion:
+// exact/prefix/contains on the label (what the user reads) beat matches deeper in
+// the joined haystack, and a fuzzy subsequence is the last-resort match.
+func scorePickerItem(item pickerItem, query string) (int, bool) {
+	label := strings.ToLower(item.Label)
+	hay := strings.ToLower(strings.Join([]string{item.Group, item.Label, item.Value, item.Meta}, " "))
+	switch {
+	case label == query:
+		return 0, true
+	case strings.HasPrefix(label, query):
+		return 20, true
+	case strings.Contains(label, query):
+		return 40, true
+	case strings.HasPrefix(hay, query):
+		return 60, true
+	case strings.Contains(hay, query):
+		return 80, true
+	default:
+		if gap, ok := fuzzySubsequenceGap(hay, query); ok {
+			return 120 + gap, true
+		}
+		return 0, false
+	}
 }
 
 // newModelPicker lists active (non-deprecated) models, preselecting the active
@@ -121,12 +194,11 @@ func (m model) newModelPicker() *commandPicker {
 		return nil
 	}
 	activeModel := strings.TrimSpace(m.modelName)
-	recent := []pickerItem{}
-	if activeModel != "" {
-		recent = append(recent, m.modelPickerRecentItem(registry, activeModel))
-	}
-
 	activeProvider := strings.TrimSpace(m.providerName)
+	recent := []pickerItem{}
+	for _, pair := range m.recentModelPairsForPicker() {
+		recent = append(recent, m.modelPickerRecentItem(registry, pair.Provider, pair.Model))
+	}
 	catalog := []pickerItem{}
 	// List every saved provider's models, grouped per provider (one contiguous
 	// section each), so /model shows all configured providers and you can switch
@@ -144,8 +216,12 @@ func (m model) newModelPicker() *commandPicker {
 	}
 	if len(catalog) == 0 {
 		// No saved providers resolved any models: fall back to the full registry.
+		// Only skip the active model when the entry's own provider also matches the
+		// active provider — a different provider offering the same model id is a
+		// distinct, independently selectable row (same provider-aware de-dup this
+		// PR applies everywhere else), not a duplicate of the pinned "Recent" row.
 		for _, entry := range registry.List(modelregistry.ListOptions{}) {
-			if entry.ID == activeModel {
+			if entry.ID == activeModel && (activeProvider == "" || strings.EqualFold(string(entry.Provider), activeProvider)) {
 				continue
 			}
 			catalog = append(catalog, registryModelPickerItem(entry, "Catalog"))
@@ -156,6 +232,35 @@ func (m model) newModelPicker() *commandPicker {
 		return nil
 	}
 	return &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
+}
+
+// newSkillPicker lists the installed skills for browse-and-run: type to filter,
+// arrow keys to select, Enter runs the chosen skill immediately. Selection is by
+// the skill's EXACT name (item.Value), so even skills the slash path cannot
+// reach — names shadowed by a builtin or user command, or names that don't fit
+// a slash token — are runnable here: picking from the Skills picker is
+// unambiguous. Returns nil when no skills are installed (the caller falls back
+// to the install-hint card).
+func (m model) newSkillPicker() *commandPicker {
+	installed := m.installedSkills()
+	items := make([]pickerItem, 0, len(installed))
+	for _, skill := range installed {
+		name := strings.TrimSpace(skill.Name)
+		if name == "" {
+			continue
+		}
+		label := name
+		if slash := skillSlashName(name); slash != "" {
+			// Show the slash form where one exists — it doubles as documentation
+			// of the direct "/name [args]" invocation.
+			label = "/" + slash
+		}
+		items = append(items, pickerItem{Label: label, Value: name, Meta: strings.TrimSpace(skill.Description)})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return &commandPicker{kind: pickerSkill, title: "pick a skill · ⏎ fills /name — add your request", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
 }
 
 // modelPickerProviders returns the providers to list in /model: all saved
@@ -291,7 +396,7 @@ func (m model) modelPickerDiscoveryCmds() tea.Cmd {
 // OAuth bearer for token-login providers (e.g. xAI).
 func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
 	authed := profile
-	if store, err := config.ProviderKeyStore(); err == nil {
+	if store, err := m.providerKeyStore(); err == nil {
 		authed = config.ApplyStoredAPIKey(authed, store)
 	}
 	key := strings.TrimSpace(authed.APIKey)
@@ -330,56 +435,112 @@ func (m *model) clearModelPickerLoadState() {
 	m.modelPickerLoadError = ""
 }
 
+// pickerItemDedupKey identifies a picker row for cross-group de-duplication.
+// Rows tagged with an owning provider are keyed by provider+model, not model
+// id alone — the same model id can be offered by multiple providers (e.g. a
+// model name available from both a direct provider and an OpenAI-compatible
+// gateway), and those are distinct, independently selectable rows.
+func pickerItemDedupKey(item pickerItem) string {
+	if owner := strings.TrimSpace(item.OwnerProvider); owner != "" {
+		return strings.ToLower(owner) + "\x00" + item.Value
+	}
+	return item.Value
+}
+
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
 	result := []pickerItem{}
+	// Favorites keep the pre-provider-aware semantics: one row per favorited
+	// model ID, regardless of how many providers offer it. Track seen favorite
+	// model IDs by Value alone so a model favorited once doesn't surface twice
+	// just because it's in multiple provider catalogs.
+	favoriteSeen := map[string]bool{}
+	addFavorites := func(items []pickerItem) {
+		for _, item := range items {
+			if item.Value == "" || !m.favoriteModels[item.Value] || favoriteSeen[item.Value] {
+				continue
+			}
+			item.Group = "Favorites"
+			item.Favorite = true
+			result = append(result, item)
+			favoriteSeen[item.Value] = true
+		}
+	}
+	addFavorites(recent)
+	addFavorites(catalog)
+	// Recent and Catalog use the provider-aware de-dup key so the same model ID
+	// offered by different providers shows as distinct, independently selectable
+	// rows. They still skip any model ID already surfaced under Favorites, so a
+	// favorited model doesn't appear in a second group (preserving the prior
+	// "favorited models are hidden from the rest" behavior).
 	seen := map[string]bool{}
-	all := append(append([]pickerItem{}, recent...), catalog...)
-	for _, item := range all {
-		if item.Value == "" || !m.favoriteModels[item.Value] || seen[item.Value] {
+	for _, item := range recent {
+		if item.Value == "" || favoriteSeen[item.Value] {
 			continue
 		}
-		item.Group = "Favorites"
-		item.Favorite = true
-		result = append(result, item)
-		seen[item.Value] = true
-	}
-	for _, item := range recent {
-		if item.Value == "" || seen[item.Value] {
+		key := pickerItemDedupKey(item)
+		if seen[key] {
 			continue
 		}
 		item.Group = "Recent"
 		item.Favorite = m.favoriteModels[item.Value]
 		result = append(result, item)
-		seen[item.Value] = true
+		seen[key] = true
 	}
 	for _, item := range catalog {
-		if item.Value == "" || seen[item.Value] {
+		if item.Value == "" || favoriteSeen[item.Value] {
+			continue
+		}
+		key := pickerItemDedupKey(item)
+		if seen[key] {
 			continue
 		}
 		item.Favorite = m.favoriteModels[item.Value]
 		result = append(result, item)
-		seen[item.Value] = true
+		seen[key] = true
 	}
 	return result
 }
 
-func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID string) pickerItem {
+// recentModelPairsForPicker returns the provider+model pairs to show under
+// "Recent", newest first: the active provider/model is always pinned first
+// (even before it has been recorded to history), followed by persisted
+// history, de-duplicated by provider+model pair and capped to
+// config.MaxRecentModels.
+func (m model) recentModelPairsForPicker() []config.RecentModelEntry {
+	pairs := make([]config.RecentModelEntry, 0, len(m.recentModels)+1)
+	pairs = append(pairs, config.RecentModelEntry{Provider: m.providerName, Model: m.modelName})
+	pairs = append(pairs, m.recentModels...)
+	return config.NormalizeRecentModels(pairs)
+}
+
+// modelPickerRecentItem resolves one "Recent" row for a provider+model pair,
+// tagging it with OwnerProvider so choosing it can switch providers (like any
+// other cross-provider picker row) even when it isn't the active provider.
+func (m model) modelPickerRecentItem(registry modelregistry.Registry, providerName, modelID string) pickerItem {
+	providerName = strings.TrimSpace(providerName)
 	if entry, ok := registry.Resolve(modelID); ok {
 		item := registryModelPickerItem(entry, "Recent")
 		item.Value = modelID
+		item.OwnerProvider = providerName
 		return item
 	}
-	if provider, ok := m.activeProviderDescriptor(); ok {
-		for _, model := range providermodelcatalog.Models(provider) {
-			if model.ID == modelID {
-				item := providerModelPickerItem(provider, model, "Recent")
-				item.Value = modelID
-				return item
+	if profile, ok := m.savedProviderByName(providerName); ok {
+		if descriptor, hasDescriptor := m.descriptorForProfile(profile); hasDescriptor {
+			for _, model := range providermodelcatalog.Models(descriptor) {
+				if model.ID == modelID {
+					item := providerModelPickerItem(descriptor, model, "Recent")
+					item.Value = modelID
+					item.OwnerProvider = profile.Name
+					return item
+				}
 			}
+			item := providerModelPickerItem(descriptor, providermodelcatalog.Model{ID: modelID}, "Recent")
+			item.Value = modelID
+			item.OwnerProvider = profile.Name
+			return item
 		}
-		return providerModelPickerItem(provider, providermodelcatalog.Model{ID: modelID}, "Recent")
 	}
-	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID}
+	return pickerItem{Group: "Recent", Label: modelPickerDisplayName(modelID, ""), Value: modelID, OwnerProvider: providerName}
 }
 
 func registryModelPickerItem(entry modelregistry.ModelEntry, group string) pickerItem {
@@ -387,6 +548,13 @@ func registryModelPickerItem(entry modelregistry.ModelEntry, group string) picke
 		Group: group,
 		Label: firstProviderDisplayValue(entry.DisplayName, entry.ID),
 		Value: entry.ID,
+		// OwnerProvider defaults to the registry entry's canonical provider so
+		// cross-group de-dup (pickerItemDedupKey) can distinguish the same model
+		// id offered by different providers even in the plain-registry fallback
+		// path (no saved providers resolved any models). Callers that resolve a
+		// specific provider profile (e.g. modelPickerRecentItem) overwrite this
+		// with the profile name right after calling this constructor.
+		OwnerProvider: string(entry.Provider),
 	}
 	item.Meta = registryModelPickerMeta(entry)
 	if descriptor, ok := providercatalog.Get(string(entry.Provider)); ok {
@@ -619,7 +787,15 @@ func (m model) normalizeProfileForProvider(provider providercatalog.Descriptor) 
 		strings.TrimSpace(profile.Name) == "" ||
 		strings.TrimSpace(profile.CatalogID) == ""
 	if normalizeIdentity {
-		profile.Name = provider.ID
+		// Only canonicalize an empty or generic placeholder name — never clobber a
+		// real user-provided profile name. The credential store is keyed by
+		// profile.Name (SecureProviderProfile stores under Name), so rewriting it
+		// here made the later profileWithCredential lookup miss the saved key and
+		// rebuild a keyless provider — a 401 on every /model switch for any profile
+		// named differently from its catalog id (e.g. "my-openai").
+		if strings.TrimSpace(profile.Name) == "" || genericProviderCatalogID(profile.Name) {
+			profile.Name = provider.ID
+		}
 		profile.CatalogID = provider.ID
 	}
 	if strings.TrimSpace(profile.BaseURL) == "" {
@@ -707,6 +883,52 @@ func (m model) persistFavoriteModels() error {
 	}
 	_, err := config.SetFavoriteModels(m.userConfigPath, favoriteModelValues(m.favoriteModels))
 	return err
+}
+
+// recordRecentModels prepends the given provider+model pairs (in order, so the
+// last pair ends up frontmost) to the in-memory recent-selection history,
+// de-duplicates by provider+model pair (moving a re-selected pair back to the
+// front rather than leaving a stale older copy), caps the result, and persists
+// it in a single normalize+write regardless of how many pairs are given. Model
+// switches record both the outgoing and incoming pair for one logical switch —
+// otherwise the model a session started on would silently drop out of "Recent"
+// the moment you switch away from it once — and batching avoids two
+// synchronous read-modify-write disk operations for a single user action.
+// Persistence is skipped when there is no user config path, but the in-memory
+// history is still updated so the picker reflects the selection for the rest
+// of the session. Returns the receiver unchanged (no re-normalization, no
+// write) when every pair has a blank model id.
+func (m model) recordRecentModels(pairs ...config.RecentModelEntry) model {
+	entries := append([]config.RecentModelEntry{}, m.recentModels...)
+	changed := false
+	for _, pair := range pairs {
+		modelID := strings.TrimSpace(pair.Model)
+		if modelID == "" {
+			continue
+		}
+		changed = true
+		entries = append([]config.RecentModelEntry{{Provider: strings.TrimSpace(pair.Provider), Model: modelID}}, entries...)
+	}
+	if !changed {
+		return m
+	}
+	m.recentModels = normalizeRecentModelEntries(entries)
+	if path := strings.TrimSpace(m.userConfigPath); path != "" {
+		if _, err := config.SetRecentModels(path, m.recentModels); err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "recent model save error: " + err.Error()})
+		}
+	}
+	return m
+}
+
+// normalizeRecentModelEntries trims, drops entries with no model id,
+// de-duplicates by provider+model pair (keeping the first/newest occurrence),
+// and caps the result to config.MaxRecentModels. Delegates to
+// config.NormalizeRecentModels so options loaded outside of config.Resolve
+// (e.g. tests constructing Options directly) can never drift from the
+// persisted-config normalization rules.
+func normalizeRecentModelEntries(entries []config.RecentModelEntry) []config.RecentModelEntry {
+	return config.NormalizeRecentModels(entries)
 }
 
 func favoriteModelSet(models []string) map[string]bool {

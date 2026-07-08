@@ -81,6 +81,14 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 				"cost": {"input": 0, "output": 0}
 			},
 			{
+				"id": "tencent/hy3",
+				"name": "Tencent HY3",
+				"description": "free Tencent chat route",
+				"context_window": 262144,
+				"tools": true,
+				"tags": ["free"]
+			},
+			{
 				"id": "image-route",
 				"name": "Image Route",
 				"modalities": {"input": ["text"], "output": ["image"]}
@@ -92,8 +100,8 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOpenGatewayCatalog returned error: %v", err)
 	}
-	if got := strings.Join(modelIDs(models), ","); got != "minimax-m3" {
-		t.Fatalf("models = %#v, want one gateway coding model", got)
+	if got := strings.Join(modelIDs(models), ","); got != "minimax-m3,tencent/hy3" {
+		t.Fatalf("models = %#v, want gateway coding models", got)
 	}
 	model := models[0]
 	if model.ID != "minimax-m3" || model.Description != "agentic coding route" {
@@ -108,6 +116,9 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 	if model.Source != "opengateway" {
 		t.Fatalf("gateway source = %q, want opengateway", model.Source)
 	}
+	if models[1].ID != "tencent/hy3" || models[1].ContextWindow != 262144 || !models[1].ToolCall {
+		t.Fatalf("gateway HY3 model = %#v, want Tencent HY3 with context/tools", models[1])
+	}
 }
 
 func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
@@ -118,6 +129,8 @@ func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
 		"xiaomi-mimo":  "xiaomi",
 		"dashscope":    "alibaba",
 		"ollama-cloud": "ollama-cloud",
+		"zai-cn":       "zai",
+		"minimaxi-cn":  "minimax",
 	}
 	for zeroID, want := range tests {
 		provider, ok := providercatalog.Get(zeroID)

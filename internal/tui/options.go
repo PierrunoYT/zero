@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -21,6 +22,7 @@ import (
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
 	Cwd                         string
+	Version                     string // CLI build version, shown on the home screen; empty hides it
 	UserConfigPath              string
 	DoctorUserConfigPath        string
 	ProjectConfigPath           string
@@ -29,6 +31,7 @@ type Options struct {
 	ProviderProfile             config.ProviderProfile
 	SavedProviders              []config.ProviderProfile // all configured providers, for the /model multi-provider list
 	FavoriteModels              []string
+	RecentModels                []config.RecentModelEntry
 	RecapsEnabled               bool
 	Provider                    zeroruntime.Provider
 	NewProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
@@ -48,7 +51,13 @@ type Options struct {
 	SessionCompactor            SessionCompactor
 	PrService                   *PrService
 
-	AgentOptions    agent.Options
+	AgentOptions agent.Options
+	// LoadSkills returns the installed skills (default skills dir merged with any
+	// plugin skill roots), bodies included, for /skills and direct /<skill-name>
+	// invocation. Called lazily per use so newly installed skills are picked up
+	// without a restart. Nil means the session has no skills wiring (skills stay
+	// model-pulled via the skill tool only).
+	LoadSkills      func() []skills.Skill
 	PermissionMode  agent.PermissionMode
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string
@@ -63,6 +72,41 @@ type Options struct {
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
+
+	// KeyBindings configures remappable TUI keybindings. An empty/zero
+	// KeyBindingsConfig means "use built-in defaults" for each action.
+	KeyBindings config.KeyBindingsConfig
+
+	// STT configures speech-to-text dictation (§ docs/dictation.md).
+	STT config.STTConfig
+	// BuildDictationTranscriber constructs the transcriber for the current STT
+	// config. It lives in the CLI layer because it resolves provider API keys
+	// (credstore + env) and base URLs; the TUI only calls it when a recording
+	// starts. preferStreaming asks for the streaming backend; the returned
+	// `streaming` bool reports whether streaming is actually available (false
+	// falls the caller back to the batch pipeline). Nil disables dictation (the
+	// keybinding shows a "not configured" hint). cfg is passed each call (not
+	// captured) so a mid-session config change — e.g. the auto-download writing
+	// localModelPath — takes effect on the next recording.
+	BuildDictationTranscriber func(cfg config.STTConfig, preferStreaming bool) (t Transcriber, streaming bool, err error)
+
+	// ShutdownDictationServer tears down the warm sherpa-onnx streaming server (if
+	// one was started), called alongside the LSP manager's shutdown on exit. Nil
+	// when dictation is not wired.
+	ShutdownDictationServer func(context.Context) error
+
+	// STTDownloadRoot is where the auto-download stores the sherpa-onnx engine
+	// and model (e.g. ~/.config/zero/stt). Empty disables auto-download (the F9
+	// setup message then only points at manual setup / cloud providers).
+	STTDownloadRoot string
+
+	// STTKeyStatus reports whether an API key is already resolvable for a cloud
+	// STT provider ("groq"/"openai"/"deepgram"). Nil disables the inline key
+	// prompt (dictation then just shows the "run zero auth" setup error).
+	STTKeyStatus func(provider string) bool
+	// SaveSTTKey stores an API key for a cloud STT provider in the credential
+	// store, so the inline prompt can capture and persist it.
+	SaveSTTKey func(provider, key string) error
 
 	// AltScreen tells the model it is running inside Bubble Tea's alternate
 	// screen. Run sets this for the interactive app; tests can leave it false

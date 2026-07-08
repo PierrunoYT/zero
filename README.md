@@ -8,6 +8,8 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.25+" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
+  <br>
+  <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
 
 Zero is an AI coding agent for your local terminal. It can inspect a repository,
@@ -50,6 +52,31 @@ zero
 The npm package installs a small wrapper plus the matching Zero binary for your
 platform from GitHub Releases. It supports Linux, macOS, and Windows on x64 and
 arm64.
+
+### Bun
+
+Bun does not run dependency lifecycle scripts by default, so the `postinstall`
+that fetches the Zero binary is skipped and the first run fails with
+`No native binary found next to the npm wrapper`.
+
+The simplest fix is to trust the package after installing, which runs the
+blocked postinstall. This works for project and global installs:
+
+```bash
+# project install
+bun add @gitlawb/zero
+bun pm trust @gitlawb/zero
+
+# global install
+bun add -g @gitlawb/zero
+bun pm -g trust @gitlawb/zero
+```
+
+Alternatives: allow the postinstall up front by adding
+`"trustedDependencies": ["@gitlawb/zero"]` to your project's package.json
+before `bun add`, or run the installer manually
+(`node node_modules/@gitlawb/zero/scripts/postinstall.mjs`) on Bun versions
+that do not have `bun pm trust`.
 
 ### Install scripts
 
@@ -121,6 +148,13 @@ the key in the wizard:
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
+export LONGCAT_API_KEY=...
+```
+
+To configure Meituan LongCat (LongCat-2.0) directly, run:
+
+```bash
+zero providers setup longcat --set-active
 ```
 
 For local models, run Ollama or LM Studio and then use `zero setup` or
@@ -152,6 +186,7 @@ Common slash commands:
 | `/spec`, `/plan` | draft and review a plan before building |
 | `/image` | attach an image for vision-capable models |
 | `/resume`, `/rewind` | continue or roll back local sessions |
+| `/loop` | repeat a prompt or custom `/command` on an interval (`/loop 5m /babysit-prs`) or self-paced |
 | `/compact`, `/context` | manage context usage |
 | `/permissions`, `/tools` | inspect available tools and policy |
 | `/add-dir` | allow an extra write directory for this session |
@@ -248,6 +283,39 @@ zero usage            token usage and estimated cost
 zero cron             scheduled agent jobs
 zero update           check for newer releases
 ```
+
+## Extending Zero
+
+### Project and personal instructions
+
+Zero appends project-specific guidance to the system prompt from the first
+`AGENTS.md`, `ZERO.md`, or `.zero/AGENTS.md` file found in each directory from
+the git root down to your current working directory (checked in that order
+per directory). Files are injected general-to-specific, capped at 8 KiB per
+file and 32 KiB total.
+
+A personal `ZERO.md` under `config.UserConfigDir()/zero/ZERO.md`
+(`$XDG_CONFIG_HOME/zero/ZERO.md` or `~/.config/zero/ZERO.md` on Linux/macOS,
+`%AppData%\Roaming\zero\ZERO.md` on Windows) applies across every workspace, ahead of any project guidelines.
+
+### Plugins
+
+Plugins are discovered from `~/.config/zero/plugins/<name>/plugin.json` (user
+scope — `$XDG_CONFIG_HOME` or `~/.config` on every OS, independent of the
+`config.UserConfigDir()` path used above) and `<cwd>/.zero/plugins/<name>/plugin.json`
+(project scope — resolved from the current working directory, not the repo
+root), and managed with `zero plugins`. A manifest can declare:
+
+- `tools` — custom tools (`command`, `args`, `inputSchema`, and a
+  `permission` of `prompt` or `deny`; `allow` is honored only when manifest tool
+  auto-approval is enabled)
+- `hooks` — commands run on `beforeTool`, `afterTool`, `sessionStart`, or
+  `sessionEnd`
+- `prompts` and `skills` — additional prompt/skill files
+
+MCP servers (`zero mcp`) and standalone markdown skills (`zero skills`) use
+the same extension points and can also be wired up outside of a plugin
+manifest.
 
 ## Appearance And Accessibility
 

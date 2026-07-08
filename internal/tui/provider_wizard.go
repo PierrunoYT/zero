@@ -50,6 +50,18 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 	if msg.apiKey != "" {
 		m.providerWizard.apiKey = msg.apiKey
 	}
+	if msg.tokenLogin {
+		// Persist the profile HERE, on the Update goroutine (see
+		// persistOAuthLoginProvider for the threading contract), and only mirror
+		// it into the in-memory saved list when the write succeeded — a mirror of
+		// a profile that never reached disk shows a phantom provider that works
+		// this session and silently vanishes on restart.
+		if err := persistOAuthLoginProvider(m.userConfigPath, msg.providerID); err != nil {
+			m.providerWizard.oauthErr = "Signed in, but the provider profile could not be saved: " + redaction.ErrorMessage(err, redaction.Options{})
+			return m, nil
+		}
+		m.savedProviders = appendOAuthLoginProfile(m.savedProviders, msg.providerID)
+	}
 	// OAuth succeeded (key minted, or a refreshable token stored for the runtime
 	// resolver). Skip the endpoint/credential steps and go straight to model
 	// selection.
@@ -139,6 +151,48 @@ func runProviderChatGPTLogin() error {
 		return err
 	}
 	return store.Save(oauth.ProviderKey("chatgpt"), token)
+}
+
+// appendOAuthLoginProfile mirrors the profile persistOAuthLoginProvider wrote to
+// config into an in-memory saved-provider list, skipping when a profile already
+// serves the catalog entry (by name or catalog id).
+func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) []config.ProviderProfile {
+	descriptor, ok := providercatalog.Get(providerID)
+	if !ok {
+		return saved
+	}
+	for _, profile := range saved {
+		if strings.EqualFold(strings.TrimSpace(profile.CatalogID), descriptor.ID) ||
+			strings.EqualFold(strings.TrimSpace(profile.Name), descriptor.ID) {
+			return saved
+		}
+	}
+	return append(saved, config.ProviderProfile{
+		Name:         descriptor.ID,
+		ProviderKind: providerWizardProviderKind(descriptor),
+		CatalogID:    descriptor.ID,
+		BaseURL:      descriptor.DefaultBaseURL,
+		Model:        descriptor.DefaultModel,
+	})
+}
+
+// persistOAuthLoginProvider guarantees the stored login is reachable from the
+// provider list even when the wizard is abandoned before the model step: the
+// token alone is invisible — no profile means no entry in /provider, /model, or
+// `zero providers use`, which reads as the login having vanished.
+//
+// MUST run on the Update goroutine (call it from a message handler, never from
+// inside a tea.Cmd): config.json writes are unlocked read-modify-writes, and a
+// background login — a device-code poll can complete minutes later — racing a
+// UI-thread write would silently clobber it (lost update). The returned error
+// lets the caller surface a failed write instead of showing a provider that
+// never reached disk.
+func persistOAuthLoginProvider(configPath string, catalogID string) error {
+	if strings.TrimSpace(configPath) == "" {
+		return nil
+	}
+	_, err := config.EnsureCatalogProvider(configPath, catalogID)
+	return err
 }
 
 // buildOAuthPresetEnv layers the process env with the preset opt-in so a
@@ -249,6 +303,12 @@ const (
 	providerWizardStepCredential
 	providerWizardStepModel
 	providerWizardStepDone
+	// Manager steps (provider_manager.go): the list-first /provider surface.
+	// They live on the same state struct so every overlay gate, key route, and
+	// mouse hook that already checks m.providerWizard covers them for free.
+	providerWizardStepManage
+	providerWizardStepEditMenu
+	providerWizardStepEditValue
 )
 
 // providerWizardMethodOption is a row in the "How do you want to connect?" step.
@@ -297,6 +357,7 @@ type providerWizardState struct {
 	selectedProvider int
 	models           []providerWizardModel
 	selectedModel    int
+	providerSearch   string
 	modelSearch      string
 	baseURL          string
 	profileName      string
@@ -318,6 +379,20 @@ type providerWizardState struct {
 	oauthDevice           bool
 	deviceUserCode        string
 	deviceVerificationURI string
+	// Manager state (provider_manager.go): the list-first /provider surface.
+	manage           bool
+	manageRows       []providerManagerRow
+	manageCursor     int
+	manageDeleting   bool
+	manageStatus     string
+	manageCredGen    int
+	manageActiveName string
+	// Edit state: field-level editor for one saved profile.
+	editOriginal config.ProviderProfile
+	editDraft    config.ProviderProfile
+	editCursor   int
+	editField    providerEditField
+	editBuffer   string
 }
 
 func (m model) newProviderWizard() *providerWizardState {
@@ -343,7 +418,18 @@ func providerWizardProviders() []providercatalog.Descriptor {
 }
 
 func (wizard *providerWizardState) currentProvider() providercatalog.Descriptor {
-	if wizard == nil || len(wizard.providers) == 0 {
+	if wizard == nil {
+		return providercatalog.Descriptor{}
+	}
+	if wizard.step == providerWizardStepProvider {
+		providers := wizard.filteredProviders()
+		if len(providers) == 0 {
+			return providercatalog.Descriptor{}
+		}
+		wizard.selectedProvider = clampInt(wizard.selectedProvider, 0, len(providers)-1)
+		return providers[wizard.selectedProvider]
+	}
+	if len(wizard.providers) == 0 {
 		return providercatalog.Descriptor{}
 	}
 	wizard.selectedProvider = clampInt(wizard.selectedProvider, 0, len(wizard.providers)-1)
@@ -399,10 +485,11 @@ func (wizard *providerWizardState) move(delta int) {
 		}
 		wizard.selectedMethod = ((wizard.selectedMethod+delta)%len(options) + len(options)) % len(options)
 	case providerWizardStepProvider:
-		if len(wizard.providers) == 0 {
+		providers := wizard.filteredProviders()
+		if len(providers) == 0 {
 			return
 		}
-		wizard.selectedProvider = ((wizard.selectedProvider+delta)%len(wizard.providers) + len(wizard.providers)) % len(wizard.providers)
+		wizard.selectedProvider = ((wizard.selectedProvider+delta)%len(providers) + len(providers)) % len(providers)
 		wizard.selectedModel = 0
 		wizard.modelSearch = ""
 		wizard.baseURL = ""
@@ -450,6 +537,21 @@ func (wizard *providerWizardState) advance() {
 		if wizard.oauthMode {
 			return
 		}
+		if len(wizard.filteredProviders()) == 0 {
+			return
+		}
+		// Resolve the selected provider's index in the full list before clearing
+		// the search — selectedProvider is an index into the filtered slice, and
+		// clearing the search swaps to the full list.
+		if selected := wizard.currentProvider(); selected.ID != "" {
+			for i, p := range wizard.providers {
+				if p.ID == selected.ID {
+					wizard.selectedProvider = i
+					break
+				}
+			}
+		}
+		wizard.providerSearch = ""
 		wizard.refreshModels()
 		wizard.err = ""
 		if providerWizardNeedsEndpoint(wizard.currentProvider()) {
@@ -513,6 +615,7 @@ func (wizard *providerWizardState) retreat() {
 		wizard.step = providerWizardStepMethod
 	case providerWizardStepEndpoint:
 		wizard.step = providerWizardStepProvider
+		wizard.providerSearch = ""
 	case providerWizardStepName:
 		wizard.step = providerWizardStepEndpoint
 	case providerWizardStepCredential:
@@ -595,6 +698,26 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	if m.providerWizard == nil {
 		return m, nil
 	}
+	// A manager-launched add flow honors the manager's "Esc walks back one
+	// level" contract on EVERY step (not just the first): Esc returns to the
+	// provider list instead of destroying the overlay — and with it the user's
+	// cursor and status — from a step deep in the flow. An in-flight OAuth login
+	// is abandoned the same way; bumping the attempt id makes its late result
+	// stale so applyProviderWizardOAuth drops it.
+	if m.providerWizard.manage && !m.providerWizard.managerStep() && keyIs(msg, tea.KeyEsc) {
+		wizard := m.providerWizard
+		if wizard.oauthPending {
+			wizard.oauthPending = false
+			wizard.oauthAttemptID++
+		}
+		wizard.oauthDevice = false
+		wizard.deviceUserCode = ""
+		wizard.deviceVerificationURI = ""
+		wizard.err = ""
+		wizard.oauthErr = ""
+		wizard.step = providerWizardStepManage
+		return m, nil
+	}
 	// While a browser/device OAuth login is in flight, ignore input except Esc,
 	// which abandons the wizard (the background flow times out and is dropped).
 	if m.providerWizard.oauthPending {
@@ -602,6 +725,10 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.providerWizard = nil
 		}
 		return m, nil
+	}
+	// Manager steps (list / edit) own their keys entirely.
+	if m.providerWizard.managerStep() {
+		return m.handleProviderManagerKey(msg)
 	}
 	// Manage-key step: keep/replace/remove a provider's stored key.
 	if m.providerWizard.step == providerWizardStepManageKey {
@@ -627,6 +754,20 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		(keyText(msg) == "d" || keyText(msg) == "D") &&
 		m.providerWizard.currentProvider().OAuthDeviceFlow {
 		return m.startProviderDeviceLogin()
+	}
+	if m.providerWizard.step == providerWizardStepProvider {
+		switch {
+		case keyText(msg) != "":
+			m.providerWizard.appendProviderSearch(keyRunes(msg))
+			return m, nil
+		case keyBackspace(msg):
+			m.providerWizard.deleteProviderSearchRune()
+			return m, nil
+		case keyCtrl(msg, 'u'):
+			m.providerWizard.providerSearch = ""
+			m.providerWizard.selectedProvider = 0
+			return m, nil
+		}
 	}
 	if m.providerWizard.step == providerWizardStepEndpoint {
 		switch {
@@ -746,6 +887,8 @@ func (m model) handleProviderWizardPaste(content string) (model, tea.Cmd) {
 		return m, nil
 	}
 	switch m.providerWizard.step {
+	case providerWizardStepProvider:
+		m.providerWizard.appendProviderSearch([]rune(content))
 	case providerWizardStepEndpoint:
 		m.providerWizard.appendBaseURL([]rune(content))
 	case providerWizardStepName:
@@ -754,6 +897,13 @@ func (m model) handleProviderWizardPaste(content string) (model, tea.Cmd) {
 		m.providerWizard.appendAPIKey([]rune(content))
 	case providerWizardStepModel:
 		m.providerWizard.appendModelSearch([]rune(content))
+	case providerWizardStepEditValue:
+		for _, r := range content {
+			if r == '\n' || r == '\r' || r == '\t' {
+				continue
+			}
+			m.providerWizard.editBuffer += string(r)
+		}
 	}
 	return m, nil
 }
@@ -879,6 +1029,50 @@ func (wizard *providerWizardState) deleteModelSearchRune() {
 	wizard.selectedModel = 0
 }
 
+func (wizard *providerWizardState) appendProviderSearch(runes []rune) {
+	for _, r := range runes {
+		if unicode.IsControl(r) {
+			continue
+		}
+		wizard.providerSearch += string(r)
+	}
+	wizard.selectedProvider = 0
+}
+
+func (wizard *providerWizardState) deleteProviderSearchRune() {
+	if wizard.providerSearch == "" {
+		return
+	}
+	runes := []rune(wizard.providerSearch)
+	wizard.providerSearch = string(runes[:len(runes)-1])
+	wizard.selectedProvider = 0
+}
+
+func (wizard *providerWizardState) filteredProviders() []providercatalog.Descriptor {
+	if wizard == nil {
+		return nil
+	}
+	query := strings.ToLower(strings.TrimSpace(wizard.providerSearch))
+	if query == "" {
+		return append([]providercatalog.Descriptor{}, wizard.providers...)
+	}
+	providers := make([]providercatalog.Descriptor, 0, len(wizard.providers))
+	for _, provider := range wizard.providers {
+		if providerMatchesQuery(provider, query) {
+			providers = append(providers, provider)
+		}
+	}
+	return providers
+}
+
+func providerMatchesQuery(provider providercatalog.Descriptor, query string) bool {
+	if query == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{provider.ID, provider.Name, strings.Join(provider.Aliases, " ")}, " "))
+	return strings.Contains(haystack, query)
+}
+
 func (m model) applyProviderWizard() (model, tea.Cmd) {
 	wizard := m.providerWizard
 	if wizard == nil {
@@ -923,6 +1117,9 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	m.providerProfile = profile
 	m.providerName = profile.Name
 	m.modelName = profile.Model
+	// Keep the in-memory saved list in sync so the provider manager and /model
+	// picker show the new profile without a restart.
+	m.savedProviders = upsertSavedProviderProfile(m.savedProviders, profile)
 	// Keep sub-agent child processes on the same provider we just switched to —
 	// same as the /model and /provider switch paths (command_center.go). Without
 	// this, a ZERO_PROVIDER exported by an earlier switch stays pointing at the
@@ -1042,13 +1239,23 @@ func (wizard *providerWizardState) render(width int) string {
 		lines = append(lines, wizard.renderModelStep(innerWidth)...)
 	case providerWizardStepDone:
 		lines = append(lines, wizard.renderDoneStep(innerWidth)...)
+	case providerWizardStepManage:
+		lines = append(lines, wizard.renderManageStep(innerWidth)...)
+	case providerWizardStepEditMenu:
+		lines = append(lines, wizard.renderEditMenuStep(innerWidth)...)
+	case providerWizardStepEditValue:
+		lines = append(lines, wizard.renderEditValueStep(innerWidth)...)
 	}
 	lines = append(lines,
 		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
 		zeroTheme.faint.Render(wizard.footer()),
 	)
 
-	block := styledBlockFillTitle(overlayWidth, "Provider setup", lines, zeroTheme.lineStrong, lipgloss.NewStyle())
+	title := "Provider setup"
+	if wizard.managerStep() {
+		title = "Providers"
+	}
+	block := styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	if width > overlayWidth {
 		return indentBlock(block, (width-overlayWidth)/2)
 	}
@@ -1056,8 +1263,30 @@ func (wizard *providerWizardState) render(width int) string {
 }
 
 func (wizard *providerWizardState) footer() string {
+	text := wizard.footerText()
+	// Inside a manager-launched add flow, Esc walks back to the provider list
+	// (see handleProviderWizardKey) — the hint must match.
+	if wizard.manage && !wizard.managerStep() {
+		text = strings.ReplaceAll(text, "Esc close", "Esc back")
+	}
+	return text
+}
+
+func (wizard *providerWizardState) footerText() string {
 	canRight := wizard.canAdvanceWithRight()
 	switch wizard.step {
+	case providerWizardStepManage:
+		if wizard.manageDeleting {
+			return "Enter/y delete   Esc/n cancel"
+		}
+		if len(wizard.manageRows) == 0 {
+			return "a add   Esc close"
+		}
+		return "↑/↓ move   Enter activate   a add   e edit   d delete   Esc close"
+	case providerWizardStepEditMenu:
+		return "↑/↓ move   Enter edit field / save   Esc back"
+	case providerWizardStepEditValue:
+		return "type to edit   Enter apply   Ctrl+U clear   Esc back"
 	case providerWizardStepMethod:
 		return "↑/↓ move   Enter/→ continue   Esc close"
 	case providerWizardStepProvider:
@@ -1100,7 +1329,7 @@ func providerWizardOverlayWidth(width int, step providerWizardStep) int {
 	switch step {
 	case providerWizardStepProvider:
 		target = providerWizardProviderWidth
-	case providerWizardStepModel:
+	case providerWizardStepModel, providerWizardStepManage:
 		target = providerWizardModelWidth
 	}
 	target = minInt(target, width)
@@ -1113,6 +1342,14 @@ func providerWizardOverlayWidth(width int, step providerWizardStep) int {
 func providerWizardStepLine(wizard *providerWizardState) string {
 	if wizard == nil {
 		return ""
+	}
+	if wizard.managerStep() {
+		switch wizard.step {
+		case providerWizardStepManage:
+			return pluralCount(len(wizard.manageRows), "saved provider")
+		default:
+			return "edit provider"
+		}
 	}
 	step := wizard.step
 	type stepLabel struct {
@@ -1248,9 +1485,15 @@ func (wizard *providerWizardState) renderProviderStep(width int) []string {
 		header = "Choose an OAuth provider"
 	}
 	lines := []string{zeroTheme.accent.Render(header)}
-	maxVisible := minInt(maxProviderWizardProvidersVisible, len(wizard.providers))
-	start := selectableListStart(len(wizard.providers), maxVisible, wizard.selectedProvider)
-	for offset, provider := range wizard.providers[start : start+maxVisible] {
+	lines = append(lines, wizard.renderProviderSearch(width))
+	providers := wizard.filteredProviders()
+	if len(providers) == 0 {
+		lines = append(lines, zeroTheme.faint.Render("  no matching providers"))
+		return lines
+	}
+	maxVisible := minInt(maxProviderWizardProvidersVisible, len(providers))
+	start := selectableListStart(len(providers), maxVisible, wizard.selectedProvider)
+	for offset, provider := range providers[start : start+maxVisible] {
 		lines = append(lines, wizard.renderSelectableProvider(width, start+offset, provider))
 	}
 	// A failed OAuth attempt leaves the wizard on this list (it does not advance),
@@ -1263,6 +1506,11 @@ func (wizard *providerWizardState) renderProviderStep(width int) []string {
 		}
 	}
 	return lines
+}
+
+func (wizard *providerWizardState) renderProviderSearch(width int) string {
+	query := strings.TrimSpace(wizard.providerSearch)
+	return providerWizardInputLine("search > ", query, "provider name, id, or alias...", width)
 }
 
 // providerWizardOAuthErrHint returns a provider-specific next step for a failed
@@ -1555,7 +1803,10 @@ func providerWizardCredentialLabel(provider providercatalog.Descriptor, apiKey s
 	if strings.TrimSpace(apiKey) != "" {
 		return "pasted key"
 	}
-	if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
+	// Mirror providerWizardProfile: a custom endpoint left blank is saved with
+	// no APIKeyEnv, so the summary must not claim it will read one — that
+	// would misdescribe the profile actually being saved (issue #555 follow-up).
+	if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" && !provider.Custom {
 		return env + " env var"
 	}
 	return "not required"
@@ -1583,7 +1834,12 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 	}
 	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
 		profile.APIKey = apiKey
-	} else if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
+	} else if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" && !provider.Custom {
+		// Custom endpoints don't get a guessed env var default: RequiresAuth on
+		// these two catalog entries is just the wizard's template default (it
+		// doesn't know whether the user's own endpoint needs auth), so a blank
+		// credential step here means "this endpoint needs no auth," not "read
+		// OPENAI_API_KEY/ANTHROPIC_API_KEY at runtime."
 		profile.APIKeyEnv = env
 	}
 	return profile
@@ -1602,7 +1858,7 @@ func providerWizardEndpointError(value string) string {
 		return "endpoint URL must start with http:// or https://"
 	}
 	if parsed.Scheme == "http" && !providerWizardIsLoopbackHost(parsed.Hostname()) {
-		return "endpoint URL must use https:// unless it is local loopback"
+		return "endpoint URL must use https:// unless it is local loopback or a private network address"
 	}
 	return ""
 }
@@ -1613,7 +1869,7 @@ func providerWizardIsLoopbackHost(host string) bool {
 		return true
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
 
 func providerWizardDisplayName(provider providercatalog.Descriptor, baseURL string, profileName string) string {
