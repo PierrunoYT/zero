@@ -361,15 +361,10 @@ func releasePlatform(goos string) (string, error) {
 	case "windows":
 		return "windows", nil
 	default:
-		// No prebuilt release archives are published for this GOOS (e.g. a
-		// binary built natively on Android/Termux reports GOOS "android").
-		// Fail loudly rather than silently no-op'ing so users don't mistake
-		// a skipped check for "you're already up to date" — `zero update
-		// --check` is documented as read-only, but "safe" doesn't mean
-		// "silently wrong". Building/installing zero on such a platform
-		// falls outside the release matrix, so `zero update`/`zero upgrade`
-		// can't check or install; rebuild from source instead.
-		return "", fmt.Errorf("zero does not publish release builds for platform %q (supported: linux, macos, windows) — update/upgrade checks aren't available; rebuild from source instead", goos)
+		// No prebuilt release archives exist for this GOOS (e.g. Android/Termux).
+		// Fail loudly so users don't mistake a skipped check for "up to date";
+		// rebuild from source instead.
+		return "", fmt.Errorf("zero does not publish release builds for platform %q (supported: linux, macos, windows); update/upgrade checks aren't available, rebuild from source instead", goos)
 	}
 }
 
