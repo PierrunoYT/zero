@@ -1374,6 +1374,19 @@ func TestAgentResponseCompletesStuckPlan(t *testing.T) {
 	})
 }
 
+func TestAgentResponseSurfacesRunCompletionWarning(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		RunCompletionWarning: func() string { return "scratch warning" },
+	})
+	m.pending = true
+	m.activeRunID = 7
+	updated, _ := m.Update(agentResponseMsg{runID: 7, rows: []transcriptRow{{kind: rowAssistant, text: "done", final: true}}})
+	next := updated.(model)
+	if !transcriptContains(next.transcript, "scratch warning") {
+		t.Fatalf("expected run completion warning in transcript, got %#v", next.transcript)
+	}
+}
+
 // TestToolResultDetailPrefersPreview: the card body uses the rich card-only
 // Display.Preview on a successful result, falls back to Output when there's no
 // preview, and always uses Output (the failure) on an error.

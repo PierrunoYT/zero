@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -10,46 +9,80 @@ import (
 	"time"
 )
 
-// scratchFileWarning builds a completion-time warning listing brand-new files
-// the model created during this run (via write_file) that are still sitting in
-// the workspace, untracked by git, when the run ends. This is the safest fix
-// for https://github.com/Gitlawb/zero/issues/551 — Zero never guesses which
-// files are "scratch" and deletes them (a wrong guess would destroy real
-// work), it just surfaces what git would otherwise silently let `git add -A`
-// sweep up, so a leftover `_debug.py` is caught before it is committed instead
-// of after.
+type scratchFileBaseline map[string]bool
+
+// scratchFileSnapshot records the untracked scratch-like files that already
+// existed before a run starts. Completion warnings compare against this baseline
+// so Zero only reports files newly left behind by the run, including files made
+// by shell commands that bypass the file tools.
+func scratchFileSnapshot(workspaceRoot string) scratchFileBaseline {
+	untracked, ok := gitUntrackedFiles(workspaceRoot)
+	if !ok {
+		return nil
+	}
+	baseline := make(scratchFileBaseline, len(untracked))
+	for _, path := range untracked {
+		if scratchLikePath(path) {
+			baseline[path] = true
+		}
+	}
+	return baseline
+}
+
+// scratchFileWarning builds a completion-time warning listing scratch/debug-like
+// files that became untracked during this run. It deliberately does not warn for
+// every new untracked file: brand-new deliverables are a normal coding-task
+// result, while names such as `_debug.py`, `_fix_test.py`, or `scratch.js` are
+// the class of throwaway artifacts called out in issue #551.
 //
-// Returns "" when there is nothing to report: no files were created, git is
-// unavailable, workspaceRoot isn't a git repo, or every created file was
-// either removed again or already tracked/staged by the model itself.
-func scratchFileWarning(workspaceRoot string, createdFiles []string) string {
-	if len(createdFiles) == 0 {
+// Returns "" when there is nothing to report: git is unavailable,
+// workspaceRoot isn't a git repo, no baseline was captured, or no new
+// scratch-like untracked files remain.
+func scratchFileWarning(workspaceRoot string, baseline scratchFileBaseline) string {
+	if baseline == nil {
 		return ""
 	}
-	if _, err := exec.LookPath("git"); err != nil {
+	untracked, ok := gitUntrackedFiles(workspaceRoot)
+	if !ok {
 		return ""
 	}
 
-	// Filter to files that still exist; the model may have deleted its own
-	// scratch work already, which needs no warning.
-	existing := make([]string, 0, len(createdFiles))
-	for _, path := range createdFiles {
-		if _, err := os.Stat(path); err == nil {
-			existing = append(existing, path)
+	var scratchFiles []string
+	for _, path := range untracked {
+		if baseline[path] || !scratchLikePath(path) {
+			continue
 		}
+		baseline[path] = true
+		scratchFiles = append(scratchFiles, path)
 	}
-	if len(existing) == 0 {
+	if len(scratchFiles) == 0 {
 		return ""
+	}
+
+	displayPaths := make([]string, len(scratchFiles))
+	for i, path := range scratchFiles {
+		displayPaths[i] = filepath.ToSlash(path)
+	}
+	plural := "s"
+	if len(displayPaths) == 1 {
+		plural = ""
+	}
+	return "This run left " + strconv.Itoa(len(displayPaths)) + " new scratch/debug-like file" + plural + " untracked in git: " +
+		strings.Join(displayPaths, ", ") + ". Review before committing/staging."
+}
+
+func gitUntrackedFiles(workspaceRoot string) ([]string, bool) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	args := append([]string{"-C", workspaceRoot, "status", "--porcelain", "-z", "--untracked-files=all", "--"}, existing...)
-	output, err := exec.CommandContext(ctx, "git", args...).Output()
+	output, err := exec.CommandContext(ctx, "git", "-C", workspaceRoot, "status", "--porcelain", "-z", "--untracked-files=all").Output()
 	if err != nil {
 		// Not a git repo (or git failed for some other reason) — nothing
 		// reliable to report against, so stay silent rather than guess.
-		return ""
+		return nil, false
 	}
 
 	var untracked []string
@@ -60,21 +93,22 @@ func scratchFileWarning(workspaceRoot string, createdFiles []string) string {
 		relative := strings.TrimPrefix(entry, "?? ")
 		untracked = append(untracked, relative)
 	}
-	if len(untracked) == 0 {
-		return ""
-	}
+	return untracked, true
+}
 
-	displayPaths := make([]string, len(untracked))
-	for i, path := range untracked {
-		displayPaths[i] = filepath.ToSlash(path)
+func scratchLikePath(path string) bool {
+	name := strings.ToLower(filepath.Base(filepath.ToSlash(path)))
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
 	}
-	plural := "s"
-	verb := "are"
-	if len(displayPaths) == 1 {
-		plural = ""
-		verb = "is"
+	if strings.HasPrefix(name, "scratch") || strings.HasPrefix(name, "debug") || strings.HasPrefix(name, "tmp") || strings.HasPrefix(name, "temp") || strings.HasPrefix(name, "repro") {
+		return true
 	}
-	return "This run created " + strconv.Itoa(len(displayPaths)) + " new file" + plural + " that " + verb +
-		" still untracked in git and may be scratch/debug output left behind: " +
-		strings.Join(displayPaths, ", ") + ". Review before committing/staging."
+	for _, marker := range []string{"scratch", "debug", "tmp", "temp", "repro", "fix_test"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
 }

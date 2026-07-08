@@ -729,6 +729,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Scope:         scope,
 	})
 	lastKnownMCPConfig := mcpConfig
+	fileTracker := tools.NewFileTracker()
+	scratchBaseline := scratchFileSnapshot(workspaceRoot)
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,
@@ -747,12 +749,15 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		NewProvider:          deps.newProvider,
 		ProbeProviderHealth:  deps.probeProviderHealth,
 		UserAgent:            userAgent(),
-		Registry:             registry,
-		SessionStore:         deps.newSessionStore(),
-		SandboxStore:         sandboxStore,
-		MCPConfig:            mcpConfig,
-		MCPPermissionStore:   mcpPermissionStore,
-		MCPTokenStore:        mcpTokenStore,
+		RunCompletionWarning: func() string {
+			return scratchFileWarning(workspaceRoot, scratchBaseline)
+		},
+		Registry:           registry,
+		SessionStore:       deps.newSessionStore(),
+		SandboxStore:       sandboxStore,
+		MCPConfig:          mcpConfig,
+		MCPPermissionStore: mcpPermissionStore,
+		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
 			if ctx == nil {
 				ctx = context.Background()
@@ -778,7 +783,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			PermissionMode: permissionMode,
 			Autonomy:       "low",
 			Sandbox:        sandboxEngine,
-			FileTracker:    tools.NewFileTracker(),
+			FileTracker:    fileTracker,
 			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
 			DeferThreshold: resolved.Tools.DeferThreshold,
 			Specialists:    specialistRuntime.specialists,
