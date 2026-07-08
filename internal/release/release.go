@@ -316,7 +316,7 @@ func ReleasePlatform(goos string) (string, error) {
 	case "windows":
 		return "windows", nil
 	default:
-		return "", fmt.Errorf("zero does not publish release builds for platform %q (supported: linux, macos, windows); update/upgrade checks aren't available, rebuild from source instead", goos)
+		return "", fmt.Errorf("no release package naming defined for platform %q (release platforms: linux, macos, windows)", goos)
 	}
 }
 
