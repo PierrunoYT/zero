@@ -736,7 +736,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	})
 	lastKnownMCPConfig := mcpConfig
 	fileTracker := tools.NewFileTracker()
-	scratchBaseline := scratchFileSnapshot(workspaceRoot)
+	var scratchBaseline scratchFileBaseline
 	sttServerManager := newDictationServerManager(resolved.STT)
 	// Keep STT downloads in the SAME config tree the rest of the TUI uses. Deriving
 	// from userConfigPath (rather than config.UserConfigDir()) matters when the config
@@ -766,6 +766,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		NewProvider:          deps.newProvider,
 		ProbeProviderHealth:  deps.probeProviderHealth,
 		UserAgent:            userAgent(),
+		PrepareRunCompletionWarning: func() {
+			scratchBaseline = scratchFileSnapshot(workspaceRoot)
+		},
 		RunCompletionWarning: func() string {
 			return scratchFileWarning(workspaceRoot, scratchBaseline)
 		},

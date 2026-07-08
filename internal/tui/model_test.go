@@ -1387,6 +1387,20 @@ func TestAgentResponseSurfacesRunCompletionWarning(t *testing.T) {
 	}
 }
 
+func TestBeginRunPreparesRunCompletionWarningEachTurn(t *testing.T) {
+	prepares := 0
+	m := newModel(context.Background(), Options{
+		PrepareRunCompletionWarning: func() { prepares++ },
+	})
+
+	m = m.beginRun(nil)
+	m = m.beginRun(nil)
+
+	if prepares != 2 {
+		t.Fatalf("PrepareRunCompletionWarning called %d times, want once per run", prepares)
+	}
+}
+
 // TestToolResultDetailPrefersPreview: the card body uses the rich card-only
 // Display.Preview on a successful result, falls back to Output when there's no
 // preview, and always uses Output (the failure) on an error.

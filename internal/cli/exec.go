@@ -514,6 +514,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// the write tools also use it for conflict checks across a run.
 	fileTracker := tools.NewFileTracker()
 	scratchBaseline := scratchFileSnapshot(workspaceRoot)
+	emitScratchWarning := func() {
+		if notice := scratchFileWarning(workspaceRoot, scratchBaseline); notice != "" {
+			writer.warning(notice)
+		}
+	}
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
@@ -602,6 +607,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return exitCrash
 	}
 	if err != nil {
+		emitScratchWarning()
 		// A Ctrl+C / SIGTERM cancellation is a clean shutdown, not a provider error.
 		if errors.Is(err, context.Canceled) || runCtx.Err() != nil {
 			sessionRecorder.append(sessions.EventError, map[string]any{"message": "interrupted"})
@@ -655,9 +661,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Surface new scratch/debug-like files left untracked in git when we finish —
 	// including files created by shell commands that bypass the file tools (issue
 	// #551). Normal new deliverable files stay quiet to avoid warning fatigue.
-	if notice := scratchFileWarning(workspaceRoot, scratchBaseline); notice != "" {
-		writer.warning(notice)
-	}
+	emitScratchWarning()
 	// A headless run the completion gate marked INCOMPLETE (no-tool-call stall,
 	// self-reported non-completion, or max-turns cutoff) must NOT be reported as a
 	// success: exit 4 AND a machine-readable terminal event saying so. Handled per
