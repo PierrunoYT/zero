@@ -273,6 +273,69 @@ func TestSetFavoriteModelsPersistsUserPreferences(t *testing.T) {
 	}
 }
 
+func TestSetRecentModelsPersistsOrderDedupesAndCaps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	cfg, err := SetRecentModels(path, []RecentModelEntry{
+		{Provider: " openrouter ", Model: " google/gemini-2.5-pro "},
+		{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"}, // duplicate pair, older: dropped
+		{Provider: "", Model: ""},                                // blank model: dropped
+		{Provider: "openrouter", Model: "a"},
+		{Provider: "openrouter", Model: "b"},
+		{Provider: "openrouter", Model: "c"},
+		{Provider: "openrouter", Model: "d"}, // beyond MaxRecentModels (5): dropped
+	})
+	if err != nil {
+		t.Fatalf("SetRecentModels() error = %v", err)
+	}
+
+	want := []RecentModelEntry{
+		{Provider: "openrouter", Model: "google/gemini-2.5-pro"},
+		{Provider: "openrouter", Model: "minimax/minimax-m2.1"},
+		{Provider: "openrouter", Model: "a"},
+		{Provider: "openrouter", Model: "b"},
+		{Provider: "openrouter", Model: "c"},
+	}
+	if !reflect.DeepEqual(cfg.Preferences.RecentModels, want) {
+		t.Fatalf("RecentModels = %#v, want %#v", cfg.Preferences.RecentModels, want)
+	}
+	persisted := readConfigFixture(t, path)
+	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
+		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
+	if persisted.ActiveProvider != "openai" || len(persisted.Providers) != 1 {
+		t.Fatalf("provider config was not preserved: %#v", persisted)
+	}
+}
+
+// Two providers offering the same model id must both survive normalization —
+// recent history de-duplicates by provider+model pair, not model id alone.
+func TestSetRecentModelsDedupesByProviderAndModelPair(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+
+	cfg, err := SetRecentModels(path, []RecentModelEntry{
+		{Provider: "provider-a", Model: "shared-model"},
+		{Provider: "provider-b", Model: "shared-model"},
+	})
+	if err != nil {
+		t.Fatalf("SetRecentModels() error = %v", err)
+	}
+	want := []RecentModelEntry{
+		{Provider: "provider-a", Model: "shared-model"},
+		{Provider: "provider-b", Model: "shared-model"},
+	}
+	if !reflect.DeepEqual(cfg.Preferences.RecentModels, want) {
+		t.Fatalf("RecentModels = %#v, want both providers preserved: %#v", cfg.Preferences.RecentModels, want)
+	}
+}
+
 func TestSetThemePersistsUserPreference(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
