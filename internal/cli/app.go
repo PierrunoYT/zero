@@ -746,6 +746,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Scope:         scope,
 	})
 	lastKnownMCPConfig := mcpConfig
+	fileTracker := tools.NewFileTracker()
+	var scratchBaseline scratchFileBaseline
 	sttServerManager := newDictationServerManager(resolved.STT)
 	// Keep STT downloads in the SAME config tree the rest of the TUI uses. Deriving
 	// from userConfigPath (rather than config.UserConfigDir()) matters when the config
@@ -775,12 +777,18 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		NewProvider:          deps.newProvider,
 		ProbeProviderHealth:  deps.probeProviderHealth,
 		UserAgent:            userAgent(),
-		Registry:             registry,
-		SessionStore:         deps.newSessionStore(),
-		SandboxStore:         sandboxStore,
-		MCPConfig:            mcpConfig,
-		MCPPermissionStore:   mcpPermissionStore,
-		MCPTokenStore:        mcpTokenStore,
+		PrepareRunCompletionWarning: func() {
+			scratchBaseline = scratchFileSnapshot(workspaceRoot)
+		},
+		RunCompletionWarning: func() string {
+			return scratchFileWarning(workspaceRoot, scratchBaseline)
+		},
+		Registry:           registry,
+		SessionStore:       deps.newSessionStore(),
+		SandboxStore:       sandboxStore,
+		MCPConfig:          mcpConfig,
+		MCPPermissionStore: mcpPermissionStore,
+		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
 			if ctx == nil {
 				ctx = context.Background()
@@ -806,7 +814,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			PermissionMode: permissionMode,
 			Autonomy:       "low",
 			Sandbox:        sandboxEngine,
-			FileTracker:    tools.NewFileTracker(),
+			FileTracker:    fileTracker,
 			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
 			DeferThreshold: resolved.Tools.DeferThreshold,
 			Specialists:    specialistRuntime.specialists,

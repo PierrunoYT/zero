@@ -110,36 +110,38 @@ type model struct {
 	titledSessions map[string]bool
 	// retitle* drive the sequential /retitle backfill: queued session ids still
 	// awaiting a title, whether a backfill is running, and its progress counters.
-	retitleQueue       []string
-	retitleActive      bool
-	retitleTotal       int
-	retitleDone        int
-	retitleOK          int
-	usageTracker       *usage.Tracker
-	sessionCompactor   SessionCompactor
-	prService          *PrService
-	prState            PrState
-	prWatcherStop      func()
-	runtimeMessageSink func(tea.Msg)
-	agentOptions       agent.Options
-	notifier           *notify.Notifier
-	permissionMode     agent.PermissionMode
-	selfCorrectTests   bool
-	reasoningEffort    modelregistry.ReasoningEffort
-	responseStyle      string
-	keyBindings        keyBindings
-	themeMode          themeMode // palette preference: auto (default), dark, light
-	hasDarkBg          bool      // last terminal background-detection result (auto mode)
-	userAgent          string
-	compactRequests    int
-	compactInFlight    bool
-	compactFrame       int
-	lastCompactResult  *CompactResult
-	lastCompactError   string
-	unpricedRequests   int
-	unpricedTokens     int
-	lastUsage          usage.Normalized
-	lastUsageSeen      bool
+	retitleQueue                []string
+	retitleActive               bool
+	retitleTotal                int
+	retitleDone                 int
+	retitleOK                   int
+	usageTracker                *usage.Tracker
+	sessionCompactor            SessionCompactor
+	prService                   *PrService
+	prState                     PrState
+	prWatcherStop               func()
+	runtimeMessageSink          func(tea.Msg)
+	prepareRunCompletionWarning func()
+	runCompletionWarning        func() string
+	agentOptions                agent.Options
+	notifier                    *notify.Notifier
+	permissionMode              agent.PermissionMode
+	selfCorrectTests            bool
+	reasoningEffort             modelregistry.ReasoningEffort
+	responseStyle               string
+	keyBindings                 keyBindings
+	themeMode                   themeMode // palette preference: auto (default), dark, light
+	hasDarkBg                   bool      // last terminal background-detection result (auto mode)
+	userAgent                   string
+	compactRequests             int
+	compactInFlight             bool
+	compactFrame                int
+	lastCompactResult           *CompactResult
+	lastCompactError            string
+	unpricedRequests            int
+	unpricedTokens              int
+	lastUsage                   usage.Normalized
+	lastUsageSeen               bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -810,6 +812,8 @@ func newModel(ctx context.Context, options Options) model {
 		prState:                     prService.GetState(),
 		input:                       input,
 		spinner:                     runSpinner,
+		prepareRunCompletionWarning: options.PrepareRunCompletionWarning,
+		runCompletionWarning:        options.RunCompletionWarning,
 		now:                         time.Now,
 		notifier:                    notifier,
 		altScreen:                   options.AltScreen,
@@ -2206,6 +2210,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				turnTools:   msg.turnTools,
 				turnElapsed: msg.turnElapsed,
 			})
+		}
+		if m.runCompletionWarning != nil {
+			if notice := strings.TrimSpace(m.runCompletionWarning()); notice != "" {
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: notice})
+			}
 		}
 		m.streamingText = nil
 		m.streamingReasoning = ""
@@ -4506,6 +4515,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 // (normal prompt + spec draft/impl) keeps these in sync — a missing
 // turnStartedAt previously dropped the elapsed timer on spec-mode runs.
 func (m model) beginRun(cancel context.CancelFunc) model {
+	if m.prepareRunCompletionWarning != nil {
+		m.prepareRunCompletionWarning()
+	}
 	m.runID++
 	m.activeRunID = m.runID
 	m.runCancel = cancel
