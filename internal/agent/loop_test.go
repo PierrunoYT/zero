@@ -115,7 +115,13 @@ func (provider *cancelingProvider) StreamCompletion(ctx context.Context, request
 func TestRunDispatchesSessionEndHookAfterContextCancellation(t *testing.T) {
 	goBinary, err := exec.LookPath("go")
 	if err != nil {
-		t.Skip("go binary not on PATH")
+		goBinary = filepath.Join(runtime.GOROOT(), "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
 	}
 	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
 	if err != nil {
