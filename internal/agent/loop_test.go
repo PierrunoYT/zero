@@ -115,7 +115,10 @@ func (provider *cancelingProvider) StreamCompletion(ctx context.Context, request
 func TestRunDispatchesSessionEndHookAfterContextCancellation(t *testing.T) {
 	goBinary, err := exec.LookPath("go")
 	if err != nil {
-		goBinary = filepath.Join(runtime.GOROOT(), "bin", "go")
+		// The test binary runs on the build machine, so its build-time GOROOT
+		// still identifies the toolchain that produced it.
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
 		if runtime.GOOS == "windows" {
 			goBinary += ".exe"
 		}
