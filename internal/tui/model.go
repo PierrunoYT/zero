@@ -280,16 +280,23 @@ type model struct {
 	chatBodyLines int
 
 	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
-	// is already in native scrollback; in alt-screen mode this frontier stays
-	// idle so history cannot reveal prior shell output.
+	// is already in native scrollback. Alt-screen mode advances the same
+	// frontier, but keeps the settled prefix as cached body items so fullscreen
+	// scrolling still exposes the complete transcript without rebuilding it on
+	// every frame.
 	// flushedAny gates the first turn-separator blank line; flushQueue/
 	// printInFlight serialize ordered scrollback prints; headerPrinted records
 	// the one-time inline title-bar print at startup.
-	flushed       int
-	flushedAny    bool
-	flushQueue    []string
-	printInFlight bool
-	headerPrinted bool
+	flushed                  int
+	flushedAny               bool
+	flushedPreviousKind      rowKind
+	flushedHavePreviousKind  bool
+	flushQueue               []string
+	printInFlight            bool
+	headerPrinted            bool
+	altScreenSettledItems    []transcriptBodyItem
+	altScreenSettledWidth    int
+	altScreenSettledFrontier int
 
 	// Composer input history (shell-style ↑/↓ recall of submitted inputs).
 	// lastPrompt is the verbatim text of the most recent submitted prompt, so
@@ -369,8 +376,9 @@ type model struct {
 	// mouseReleased, when true, forces terminal mouse capture OFF so the user can
 	// drag-select and copy text natively (Ctrl+E toggles it). App mouse features
 	// (clickable suggestions, right-click paste, transcript select) pause while on.
-	mouseReleased       bool
-	transcriptSelection transcriptSelectionState
+	mouseReleased         bool
+	transcriptSelection   transcriptSelectionState
+	transcriptInteraction *transcriptRenderInteraction
 	// hover identifies the single clickable row (if any) currently under the
 	// mouse cursor with no button pressed, so it renders in a distinct style —
 	// the visual cue that it's clickable. Requires AllMotion mouse reporting
@@ -808,6 +816,7 @@ func newModel(ctx context.Context, options Options) model {
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
 		transcriptBodyHeights:       newTranscriptBodyHeightCache(defaultTranscriptBodyHeightCacheMaxEntries),
+		transcriptInteraction:       &transcriptRenderInteraction{},
 		prService:                   prService,
 		prState:                     prService.GetState(),
 		input:                       input,

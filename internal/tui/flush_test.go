@@ -36,7 +36,7 @@ func TestSettledRowsAdvanceFrontierAndLeaveLiveView(t *testing.T) {
 	}
 }
 
-func TestAltScreenKeepsSettledRowsInManagedView(t *testing.T) {
+func TestAltScreenAdvancesFrontierAndCachesSettledRows(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	m = updated.(model)
@@ -47,12 +47,29 @@ func TestAltScreenKeepsSettledRowsInManagedView(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("alt-screen mode should not print rows into native scrollback")
 	}
-	if next.flushed != 0 {
-		t.Fatalf("alt-screen mode should keep the flush frontier unchanged, got %d", next.flushed)
+	if next.flushed != len(next.transcript) {
+		t.Fatalf("alt-screen mode should advance the frontier to %d, got %d", len(next.transcript), next.flushed)
 	}
 	view := viewString(next.View())
 	if !strings.Contains(view, "hello there") || !strings.Contains(view, "noted") {
-		t.Fatalf("settled rows should remain in the managed alt-screen view, got %q", view)
+		t.Fatalf("cached settled rows should remain in the managed alt-screen view, got %q", view)
+	}
+}
+
+func TestAltScreenSettledCacheRebuildsAfterRowToggle(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = updated.(model)
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowReasoning, text: "private thought"})
+	m, _ = m.settleTranscript()
+
+	m = m.toggleTranscriptRow(len(m.transcript) - 1)
+	m, _ = m.settleTranscript()
+	if !m.transcript[len(m.transcript)-1].expanded {
+		t.Fatal("expected reasoning row to be expanded")
+	}
+	if m.altScreenSettledWidth == 0 || len(m.altScreenSettledItems) == 0 {
+		t.Fatal("expected invalidated settled cache to be rebuilt")
 	}
 }
 
