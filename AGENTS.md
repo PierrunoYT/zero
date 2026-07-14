@@ -21,7 +21,7 @@ This file outlines the project conventions and repository guidelines for coding 
 If you are an AI coding agent executing tasks in this repository, you **MUST** run all Go code quality and security checks before committing code or completing your task:
 
 1. **Format & Vet**: Run `go fmt ./...` and `go vet ./...`.
-2. **Lint**: Run `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --enable-only unused,ineffassign,staticcheck ./...`.
-3. **Security**: Run `go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...`.
+2. **Lint**: Run `make lint-static`.
+3. **Security**: Run `make vulncheck`.
 
 If any check fails or cannot be run, do not ignore it. Prompt the user for instructions or setup assistance before proceeding.

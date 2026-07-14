@@ -1,7 +1,19 @@
 # Zero build/test/lint targets. AGENTS.md says "Build with `make`" and "Run `make
 # lint` before opening a PR" — these targets back those instructions.
 .DEFAULT_GOAL := build
-.PHONY: build build-all test test-race vet fmt fmt-check lint tidy clean help
+GO_VERSION := $(shell go list -m -f "{{.GoVersion}}")
+GO_TOOLCHAIN := go$(GO_VERSION)
+DEADCODE_VERSION := v0.46.0
+GOLANGCI_LINT_VERSION := v2.12.2
+GOVULNCHECK_VERSION := v1.3.0
+
+ifeq ($(OS),Windows_NT)
+TOOLCHAIN_ENV := set "GOTOOLCHAIN=$(GO_TOOLCHAIN)" &&
+else
+TOOLCHAIN_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
+endif
+
+.PHONY: build build-all test test-race vet fmt fmt-check lint lint-static deadcode vulncheck tidy clean help
 
 # Build the main CLI binary into ./zero.
 build:
@@ -33,6 +45,17 @@ fmt-check:
 # Lint = formatting check + vet (no extra tooling required).
 lint: fmt-check vet
 
+# Versioned tools select the toolchain from their own modules when invoked with
+# package@version. Pin them to this module's Go version so they can load it.
+lint-static:
+	$(TOOLCHAIN_ENV) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --enable-only unused,ineffassign,staticcheck ./...
+
+deadcode:
+	$(TOOLCHAIN_ENV) go run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) -test=false ./...
+
+vulncheck:
+	$(TOOLCHAIN_ENV) go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
 tidy:
 	go mod tidy
 
@@ -41,4 +64,4 @@ clean:
 	go clean ./...
 
 help:
-	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, tidy, clean"
+	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, lint-static, deadcode, vulncheck, tidy, clean"
