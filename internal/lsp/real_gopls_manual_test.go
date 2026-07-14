@@ -11,9 +11,13 @@ import (
 
 // TestManagerCheckRealGopls drives the exact path the self-correct LSP wiring
 // uses (NewManager -> Check) against a REAL gopls and asserts a real diagnostic
-// comes back. Skips when gopls is not installed. Temporary manual-verification
-// test (the rest of the suite uses a fake server).
+// comes back. Opt-in manual-verification test (the rest of the suite uses a
+// fake server): the health, version, or cache state of a developer's globally
+// installed gopls must not fail the default hermetic suite.
 func TestManagerCheckRealGopls(t *testing.T) {
+	if os.Getenv("ZERO_LSP_REAL_GOPLS_TEST") == "" {
+		t.Skip("set ZERO_LSP_REAL_GOPLS_TEST=1 to run the real gopls integration test")
+	}
 	if _, err := exec.LookPath("gopls"); err != nil {
 		t.Skip("gopls not on PATH; skipping real-server check")
 	}
