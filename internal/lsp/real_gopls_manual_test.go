@@ -15,7 +15,7 @@ import (
 // fake server): the health, version, or cache state of a developer's globally
 // installed gopls must not fail the default hermetic suite.
 func TestManagerCheckRealGopls(t *testing.T) {
-	if os.Getenv("ZERO_LSP_REAL_GOPLS_TEST") == "" {
+	if os.Getenv("ZERO_LSP_REAL_GOPLS_TEST") != "1" {
 		t.Skip("set ZERO_LSP_REAL_GOPLS_TEST=1 to run the real gopls integration test")
 	}
 	if _, err := exec.LookPath("gopls"); err != nil {
