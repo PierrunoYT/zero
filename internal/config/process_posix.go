@@ -11,10 +11,20 @@ func configureCommandProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func terminateCommandProcess(cmd *exec.Cmd) {
-	if cmd.Process == nil {
+type commandProcess struct {
+	cmd *exec.Cmd
+}
+
+func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
+	return &commandProcess{cmd: cmd}
+}
+
+func (p *commandProcess) Terminate() {
+	if p.cmd.Process == nil {
 		return
 	}
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	_ = cmd.Process.Kill()
+	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+	_ = p.cmd.Process.Kill()
 }
+
+func (p *commandProcess) Close() {}

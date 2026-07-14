@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,8 @@ func TestLoadProviderCommandFailureIncludesExitAndRedactsOutput(t *testing.T) {
 }
 
 func TestLoadProviderCommandTimeout(t *testing.T) {
-	command := writeCommand(t, commandScript{SleepSeconds: 10})
+	pidFile := filepath.Join(t.TempDir(), "sleep.pid")
+	command := writeCommand(t, commandScript{SleepSeconds: 10, PidFile: pidFile})
 
 	start := time.Now()
 	_, err := LoadProviderCommand(command)
@@ -85,6 +87,29 @@ func TestLoadProviderCommandTimeout(t *testing.T) {
 	if elapsed > maxElapsed {
 		t.Fatalf("timeout returned after %s, want roughly 5s", elapsed)
 	}
+	assertProcessTerminated(t, pidFile)
+}
+
+func assertProcessTerminated(t *testing.T, pidFile string) {
+	t.Helper()
+
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read sleeper pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse sleeper pid %q: %v", data, err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("sleeper process %d still alive after timeout", pid)
 }
 
 func TestLoadProviderCommandInvalidJSON(t *testing.T) {
@@ -118,6 +143,7 @@ type commandScript struct {
 	Stderr       string
 	ExitCode     int
 	SleepSeconds int
+	PidFile      string
 }
 
 func writeCommand(t *testing.T, script commandScript) string {
@@ -128,7 +154,11 @@ func writeCommand(t *testing.T, script commandScript) string {
 		path := filepath.Join(dir, "provider.cmd")
 		lines := []string{"@echo off"}
 		if script.SleepSeconds > 0 {
-			lines = append(lines, "powershell -NoProfile -Command \"Start-Sleep -Seconds "+itoa(script.SleepSeconds)+"\"")
+			sleep := "Start-Sleep -Seconds " + itoa(script.SleepSeconds)
+			if script.PidFile != "" {
+				sleep = "Set-Content -Path '" + script.PidFile + "' -Value $PID -Encoding Ascii; " + sleep
+			}
+			lines = append(lines, "powershell -NoProfile -Command \""+sleep+"\"")
 		}
 		if script.Stdout != "" {
 			lines = append(lines, "echo "+script.Stdout)
@@ -146,6 +176,9 @@ func writeCommand(t *testing.T, script commandScript) string {
 	path := filepath.Join(dir, "provider.sh")
 	lines := []string{"#!/bin/sh"}
 	if script.SleepSeconds > 0 {
+		if script.PidFile != "" {
+			lines = append(lines, "echo $$ > '"+script.PidFile+"'")
+		}
 		lines = append(lines, "sleep "+itoa(script.SleepSeconds))
 	}
 	if script.Stdout != "" {
