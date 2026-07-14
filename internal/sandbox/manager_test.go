@@ -393,6 +393,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		filepath.Join(zeroDir, "oauth-tokens.json"),
 		filepath.Join(zeroDir, "oauth-tokens.json.secret"),
 		filepath.Join(zeroDir, "mcp-oauth-tokens.json"),
+		filepath.Join(zeroDir, "mcp-oauth-tokens.json.secret"),
 	}
 	for _, path := range append([]string{keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret"}, zeroFiles...) {
 		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {

@@ -167,7 +167,8 @@ func credentialDenyReadPaths(policy Policy) []string {
 		return nil
 	}
 	// Failed home/config lookups only drop their derived candidates; explicit
-	// credential-file overrides must be protected regardless.
+	// credential-file overrides are still submitted as candidates (and, like
+	// every candidate, filtered by on-disk existence below).
 	home, _ := os.UserHomeDir()
 	configDir, _ := zeroUserConfigDir()
 	return credentialDenyReadPathsIn(credentialPathOptions{
@@ -211,6 +212,7 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 			filepath.Join(zeroDir, "oauth-tokens.json"),
 			filepath.Join(zeroDir, "oauth-tokens.json.secret"),
 			filepath.Join(zeroDir, "mcp-oauth-tokens.json"),
+			filepath.Join(zeroDir, "mcp-oauth-tokens.json.secret"),
 		)
 	}
 	for _, tokenPath := range []string{options.OAuthTokens, options.MCPOAuthTokens} {
@@ -240,8 +242,10 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 }
 
 // zeroUserConfigDir mirrors config.UserConfigDir without importing config
-// (config depends on sandbox). Zero deliberately uses ~/.config on macOS and
-// os.UserConfigDir everywhere else.
+// (config depends on sandbox). On macOS Zero deliberately honors
+// XDG_CONFIG_HOME when set and falls back to ~/.config, instead of the
+// os.UserConfigDir default (~/Library/Application Support); everywhere else
+// it uses os.UserConfigDir.
 func zeroUserConfigDir() (string, error) {
 	if runtime.GOOS != "darwin" {
 		return os.UserConfigDir()
