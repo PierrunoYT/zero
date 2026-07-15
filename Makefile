@@ -2,9 +2,12 @@
 # lint` before opening a PR" — these targets back those instructions.
 .DEFAULT_GOAL := build
 # Lazily expanded (=) so `go list -m` only runs when a tool target below
-# actually uses the toolchain, not at parse time for every target. Recipes use
-# a plain POSIX `GOTOOLCHAIN=...` prefix: GNU Make runs recipes through sh even
-# on Windows (MSYS/Git Bash), so no cmd.exe-specific form is needed.
+# actually uses the toolchain, not at parse time for every target. GOTOOLCHAIN
+# is set via Make's own `export` (below, scoped to the pinned-tool targets)
+# rather than a POSIX `GOTOOLCHAIN=... cmd` recipe prefix: Make sets exported
+# variables in the child process environment itself before invoking $(SHELL),
+# so this works under any configured SHELL (sh, cmd.exe, PowerShell) instead
+# of only shells that understand inline env-var-assignment syntax.
 GO_VERSION = $(shell go list -m -f "{{.GoVersion}}")
 GO_TOOLCHAIN = go$(GO_VERSION)
 DEADCODE_VERSION := v0.46.0
@@ -45,14 +48,19 @@ lint: fmt-check vet
 
 # Versioned tools select the toolchain from their own modules when invoked with
 # package@version. Pin them to this module's Go version so they can load it.
+# The target-specific `export` sets GOTOOLCHAIN in these three targets' recipe
+# environment only (not build/test/vet/etc.), via Make itself rather than
+# shell syntax — see the GO_TOOLCHAIN comment above.
+lint-static deadcode vulncheck: export GOTOOLCHAIN = $(GO_TOOLCHAIN)
+
 lint-static:
-	GOTOOLCHAIN=$(GO_TOOLCHAIN) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --enable-only unused,ineffassign,staticcheck ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --enable-only unused,ineffassign,staticcheck ./...
 
 deadcode:
-	GOTOOLCHAIN=$(GO_TOOLCHAIN) go run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) -test=false ./...
+	go run golang.org/x/tools/cmd/deadcode@$(DEADCODE_VERSION) -test=false ./...
 
 vulncheck:
-	GOTOOLCHAIN=$(GO_TOOLCHAIN) go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 tidy:
 	go mod tidy
