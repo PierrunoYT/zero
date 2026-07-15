@@ -257,8 +257,25 @@ func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspa
 		Name:              spec.Name,
 		Args:              cloneStrings(spec.Args),
 		Dir:               spec.Dir,
-		Env:               cloneStrings(spec.Env),
+		Env:               directCommandEnv(spec),
 	}
+}
+
+// directCommandEnv scrubs sensitive credentials from the environment for a
+// direct (unwrapped) command plan: the platform sandbox backend is
+// unavailable, disabled, or not required, so this is the actual environment
+// the child process inherits. Without scrubbing here, config-derived
+// apiKeyEnv and dynamic OAuth client-secret variables would leak into
+// commands that fall back to this path (e.g. EnforcementDegraded).
+func directCommandEnv(spec CommandSpec) []string {
+	env := cloneStrings(spec.Env)
+	if spec.Env == nil {
+		// Match the wrapped-plan behavior: an unset spec.Env means "inherit the
+		// caller's environment," so scrub a snapshot of it rather than passing
+		// nil through to exec.Cmd, which would skip scrubbing entirely.
+		env = os.Environ()
+	}
+	return scrubSensitiveEnv(env, spec.sensitiveEnvKeys...)
 }
 
 func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, string, error) {

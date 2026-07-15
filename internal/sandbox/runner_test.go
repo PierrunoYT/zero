@@ -122,6 +122,47 @@ func TestBuildCommandPlanDegradesUnavailableFallback(t *testing.T) {
 	}
 }
 
+// TestBuildCommandPlanDegradedFallbackScrubsInheritedEnv covers the
+// EnforcementDegraded fallback path: when the native backend is
+// unavailable, BuildCommandPlan falls back to a direct (unwrapped) plan
+// whose spec.Env is nil, so exec.Cmd would otherwise inherit the caller's
+// environment — including configured and dynamically named credentials —
+// unscrubbed.
+func TestBuildCommandPlanDegradedFallbackScrubsInheritedEnv(t *testing.T) {
+	t.Setenv("COMPANY_LLM_SECRET", "custom-secret")
+	t.Setenv("ZERO_OAUTH_ACME_CLIENT_SECRET", "oauth-secret")
+	t.Setenv("SAFE_VAR", "hello")
+
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot:    root,
+		Policy:           DefaultPolicy(),
+		Backend:          Backend{Name: BackendUnavailable, Message: "native sandbox unavailable"},
+		SensitiveEnvKeys: []string{"COMPANY_LLM_SECRET"},
+	})
+
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "/bin/sh",
+		Args: []string{"-c", "pwd"},
+		Dir:  root,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.Wrapped || plan.EnforcementLevel != EnforcementDegraded {
+		t.Fatalf("plan = %#v, want degraded direct plan", plan)
+	}
+	for _, entry := range plan.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "COMPANY_LLM_SECRET") || strings.EqualFold(key, "ZERO_OAUTH_ACME_CLIENT_SECRET") {
+			t.Fatalf("degraded plan.Env retained sensitive key %q: %v", key, plan.Env)
+		}
+	}
+	if got := envListValue(plan.Env, "SAFE_VAR", ""); got != "hello" {
+		t.Fatalf("SAFE_VAR = %q, want hello", got)
+	}
+}
+
 func TestBuildCommandPlanRejectsOutsideDirectory(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
