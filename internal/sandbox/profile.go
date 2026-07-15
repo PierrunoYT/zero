@@ -149,8 +149,9 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 
 // credentialDenyReadPaths returns default deny-read entries for well-known
 // cloud credential stores, the file GOOGLE_APPLICATION_CREDENTIALS points to,
-// and Zero's own config/token/key files so sandboxed commands cannot read
-// secrets under the read-all workspace posture. Two deliberate limits:
+// and Zero's own config/credential/token directory so sandboxed commands
+// cannot read secrets under the read-all workspace posture. Three deliberate
+// limits:
 //
 //   - Windows is skipped: a non-empty profile DenyRead switches the Windows
 //     runner onto the capability-SID/ACL deny path and away from the
@@ -158,6 +159,12 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 //     once the Windows deny-read model is settled.
 //   - A candidate nested under a user-configured AllowRead entry is dropped,
 //     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
+//   - Candidates are emitted whether or not they currently exist on disk: a
+//     rule installed only for stores present at profile-build time would miss
+//     a store created later in a long-lived sandboxed session (e.g. `zero
+//     auth login` run concurrently), and every backend already treats a deny
+//     rule over a not-yet-existing path as a harmless no-op that still takes
+//     effect once the path appears.
 //
 // These are profile-level rules only; they are intentionally NOT merged into
 // Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and
@@ -203,30 +210,23 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		candidates = append(candidates, target)
 	}
 	if configDir := strings.TrimSpace(options.ZeroConfigDir); configDir != "" {
-		zeroDir := filepath.Join(configDir, "zero")
-		candidates = append(candidates,
-			filepath.Join(zeroDir, "config.json"),
-			filepath.Join(zeroDir, "credentials.json"),
-			filepath.Join(zeroDir, "credentials.enc"),
-			filepath.Join(zeroDir, "credentials.enc.secret"),
-			filepath.Join(zeroDir, "oauth-tokens.json"),
-			filepath.Join(zeroDir, "oauth-tokens.json.secret"),
-			filepath.Join(zeroDir, "mcp-oauth-tokens.json"),
-			filepath.Join(zeroDir, "mcp-oauth-tokens.json.secret"),
-		)
+		// Deny the whole directory rather than an itemized file list. Zero's
+		// credential/token/config stores each publish through a randomly-named
+		// sibling before an atomic rename (oauth-tokens.json.tmp-<pid>-<nanos>,
+		// credentials.{enc,json}.*.tmp, *.secret.*.tmp, .zero-config-*.tmp), and
+		// the legacy MCP token store leaves a mcp-oauth-tokens.json.migrated
+		// backup behind after importing it — an itemized list can never keep up
+		// with those names. Nothing else has a legitimate reason to live here.
+		candidates = append(candidates, filepath.Join(configDir, "zero"))
 	}
-	for _, tokenPath := range []string{options.OAuthTokens, options.MCPOAuthTokens} {
-		if tokenPath = strings.TrimSpace(tokenPath); tokenPath != "" {
+	for _, override := range []string{options.OAuthTokens, options.MCPOAuthTokens} {
+		if tokenPath := resolveCredentialOverridePath(override); tokenPath != "" {
 			candidates = append(candidates, tokenPath, tokenPath+".secret")
 		}
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))
 	for _, path := range normalizeProfilePaths(candidates) {
-		// Only stores that actually exist on this host need a deny rule.
-		if _, err := os.Stat(path); err != nil {
-			continue
-		}
 		reincluded := false
 		for _, allow := range allowRoots {
 			if pathWithinRoot(allow, path) {
@@ -239,6 +239,31 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		}
 	}
 	return out
+}
+
+// resolveCredentialOverridePath mirrors the token stores' own override
+// resolution (oauth.ResolveStorePath, mcp.ResolveTokenStorePath — duplicated
+// here rather than imported, the same tradeoff zeroUserConfigDir makes,
+// because internal/mcp depends on this package): a relative override is
+// resolved literally against the process working directory, NOT tilde-
+// expanded the way normalizeProfilePath expands other candidates. Using
+// normalizeProfilePath here would derive a deny path that doesn't match
+// where the store actually writes — e.g. ZERO_OAUTH_TOKENS_PATH=~/x resolves
+// to <cwd>/~/x on disk (the store never expands "~"), but normalizeProfilePath
+// would deny $HOME/x instead, leaving the real file unprotected.
+func resolveCredentialOverridePath(override string) string {
+	override = strings.TrimSpace(override)
+	if override == "" {
+		return ""
+	}
+	if filepath.IsAbs(override) {
+		return filepath.Clean(override)
+	}
+	abs, err := filepath.Abs(override)
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(abs)
 }
 
 // zeroUserConfigDir mirrors config.UserConfigDir without importing config

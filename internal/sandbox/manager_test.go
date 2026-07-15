@@ -385,6 +385,9 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	keyFile := filepath.Join(home, "sa-key.json")
 	oauthOverride := filepath.Join(home, "custom-oauth.json")
 	mcpOverride := filepath.Join(home, "custom-mcp-oauth.json")
+	// The migrated legacy MCP token backup and the atomic-write temp siblings
+	// every store publishes before its rename; none of these are itemized by
+	// name, so they only stay protected if the whole zeroDir is denied.
 	zeroFiles := []string{
 		filepath.Join(zeroDir, "config.json"),
 		filepath.Join(zeroDir, "credentials.json"),
@@ -394,6 +397,10 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		filepath.Join(zeroDir, "oauth-tokens.json.secret"),
 		filepath.Join(zeroDir, "mcp-oauth-tokens.json"),
 		filepath.Join(zeroDir, "mcp-oauth-tokens.json.secret"),
+		filepath.Join(zeroDir, "mcp-oauth-tokens.json.migrated"),
+		filepath.Join(zeroDir, "oauth-tokens.json.tmp-1234-5678"),
+		filepath.Join(zeroDir, "credentials.enc.9-1.tmp"),
+		filepath.Join(zeroDir, ".zero-config-1.tmp"),
 	}
 	for _, path := range append([]string{keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret"}, zeroFiles...) {
 		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
@@ -409,16 +416,27 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		MCPOAuthTokens:    mcpOverride,
 	}
 	paths := credentialDenyReadPathsIn(options, nil)
-	wantPaths := append([]string{awsDir, gcloudDir, keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret"}, zeroFiles...)
+	wantPaths := []string{awsDir, gcloudDir, keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret", zeroDir}
 	for _, want := range normalizeProfilePaths(wantPaths) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
 		}
 	}
+	// zeroFiles is covered by the zeroDir subpath deny above, not by an
+	// itemized entry — including the never-enumerated migrated backup and
+	// temp-write siblings.
+	for _, zeroFile := range zeroFiles {
+		if stringSliceContains(paths, normalizeProfilePaths([]string{zeroFile})[0]) {
+			t.Errorf("credential deny paths = %#v, want itemized %q dropped in favor of the zeroDir subpath rule", paths, zeroFile)
+		}
+	}
 
-	// A path the host does not have is dropped, not emitted blind.
-	if stringSliceContains(paths, filepath.Join(home, ".azure")) {
-		t.Errorf("credential deny paths = %#v, must not include the absent ~/.azure", paths)
+	// A default candidate absent from disk at profile-build time is still
+	// emitted: a rule installed only for what exists now would miss a store
+	// created later in a long-lived sandboxed session (e.g. a concurrent
+	// `zero auth login`, or a token file appearing mid-session).
+	if !stringSliceContains(paths, filepath.Join(home, ".azure")) {
+		t.Errorf("credential deny paths = %#v, want the not-yet-existing ~/.azure included", paths)
 	}
 
 	// An explicit AllowRead entry covering a store is an opt-out.
@@ -426,10 +444,8 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	if stringSliceContains(optedOut, normalizeProfilePaths([]string{awsDir})[0]) {
 		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop ~/.aws", optedOut)
 	}
-	for _, zeroFile := range normalizeProfilePaths(zeroFiles) {
-		if stringSliceContains(optedOut, zeroFile) {
-			t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop %q", optedOut, zeroFile)
-		}
+	if stringSliceContains(optedOut, normalizeProfilePaths([]string{zeroDir})[0]) {
+		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop %q", optedOut, zeroDir)
 	}
 	if !stringSliceContains(optedOut, normalizeProfilePaths([]string{keyFile})[0]) {
 		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut)
@@ -447,6 +463,36 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 }
 
+// TestCredentialDenyReadPathsInOverrideMatchesStoreResolution reproduces the
+// audit finding that a relative-and-tilde ZERO_OAUTH_TOKENS_PATH /
+// ZERO_MCP_OAUTH_TOKENS_PATH override produced a deny rule for a DIFFERENT
+// path than the one the token stores actually resolve (oauth.ResolveStorePath
+// / mcp.ResolveTokenStorePath never expand "~"; they resolve a relative
+// override literally against the working directory), leaving the real file
+// unprotected.
+func TestCredentialDenyReadPathsInOverrideMatchesStoreResolution(t *testing.T) {
+	override := "~/relative-tilde-tokens.json"
+	options := credentialPathOptions{OAuthTokens: override, MCPOAuthTokens: override}
+	paths := credentialDenyReadPathsIn(options, nil)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeResolved := filepath.Clean(filepath.Join(cwd, override))
+	if !stringSliceContains(paths, storeResolved) {
+		t.Errorf("credential deny paths = %#v, want the store's literal resolution %q included", paths, storeResolved)
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		tildeExpanded := normalizeProfilePaths([]string{override})[0]
+		if tildeExpanded != storeResolved && stringSliceContains(paths, tildeExpanded) {
+			t.Errorf("credential deny paths = %#v, must not deny the tilde-expanded %q instead of what the store resolves to (home %q)", paths, tildeExpanded, home)
+		}
+	}
+}
+
 func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows credential deny-read is tracked separately")
@@ -454,6 +500,16 @@ func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	zeroDir := filepath.Join(configHome, "zero")
+
+	// Build the profile BEFORE the store directory exists on disk: a
+	// sandboxed command launched early in a session must still deny reads of
+	// credentials created later, not just ones present at profile-build time.
+	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	want := normalizeProfilePaths([]string{zeroDir})[0]
+	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, want Zero config directory %q even before it exists", profile.FileSystem.DenyRead, want)
+	}
+
 	if err := os.MkdirAll(zeroDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -461,10 +517,15 @@ func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	migrated := filepath.Join(zeroDir, "mcp-oauth-tokens.json.migrated")
+	if err := os.WriteFile(migrated, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
-	want := normalizeProfilePaths([]string{secret})[0]
+	// Re-derive after the files exist: the same directory rule covers both
+	// the known store filename and the never-itemized migrated backup.
+	profile = PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
 	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
-		t.Fatalf("DenyRead = %#v, want Zero credential file %q", profile.FileSystem.DenyRead, want)
+		t.Fatalf("DenyRead = %#v, want Zero config directory %q", profile.FileSystem.DenyRead, want)
 	}
 }
