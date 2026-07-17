@@ -30,6 +30,28 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install Make on Windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: choco install make --no-progress -y
+
+      - name: Check vulnerabilities through native Windows Make
+        if: matrix.os == 'windows-latest'
+        shell: cmd
+        run: make vulncheck
+
+      - name: Check dead code through native Windows Make
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        shell: cmd
+        run: make deadcode
+
+      - name: Run static lint through native Windows Make
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        shell: cmd
+        run: make lint-static
+
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'
         shell: bash

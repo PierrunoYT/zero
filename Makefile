@@ -1,20 +1,17 @@
 # Zero build/test/lint targets. AGENTS.md says "Build with `make`" and "Run `make
 # lint` before opening a PR" — these targets back those instructions.
 .DEFAULT_GOAL := build
-# Lazily expanded (=) so `go list -m` only runs when a tool target below
-# actually uses the toolchain, not at parse time for every target. GOTOOLCHAIN
-# is set via Make's own `export` (below, scoped to the pinned-tool targets)
-# rather than a POSIX `GOTOOLCHAIN=... cmd` recipe prefix: Make sets exported
-# variables in the child process environment itself before invoking $(SHELL),
-# so this works under any configured SHELL (sh, cmd.exe, PowerShell) instead
-# of only shells that understand inline env-var-assignment syntax.
-GO_VERSION = $(shell go list -m -f "{{.GoVersion}}")
-GO_TOOLCHAIN = go$(GO_VERSION)
+GO_MOD_WORDS := $(file <go.mod)
+ifneq ($(word 3,$(GO_MOD_WORDS)),go)
+$(error expected go.mod to begin with module <path> followed by go <version>)
+endif
+GO_VERSION := $(word 4,$(GO_MOD_WORDS))
+GO_TOOLCHAIN := go$(GO_VERSION)
 DEADCODE_VERSION := v0.46.0
 GOLANGCI_LINT_VERSION := v2.12.2
 GOVULNCHECK_VERSION := v1.3.0
 
-.PHONY: build build-all test test-race vet fmt fmt-check lint lint-static deadcode vulncheck tidy clean help
+.PHONY: build build-all test test-race vet fmt fmt-check lint lint-static deadcode vulncheck tidy clean baseline help
 
 # Build the main CLI binary into ./zero.
 build:
@@ -47,10 +44,9 @@ fmt-check:
 lint: fmt-check vet
 
 # Versioned tools select the toolchain from their own modules when invoked with
-# package@version. Pin them to this module's Go version so they can load it.
-# The target-specific `export` sets GOTOOLCHAIN in these three targets' recipe
-# environment only (not build/test/vet/etc.), via Make itself rather than
-# shell syntax — see the GO_TOOLCHAIN comment above.
+# package@version. Parse this module's required version directly from go.mod so
+# an inherited stale GOTOOLCHAIN or a multi-module GOWORK cannot break the
+# recovery probe. The target-specific export is shell-independent.
 lint-static deadcode vulncheck: export GOTOOLCHAIN = $(GO_TOOLCHAIN)
 
 lint-static:
@@ -69,5 +65,19 @@ clean:
 	rm -f zero
 	go clean ./...
 
+# Run the per-turn benchmark harness over the checked-in baseline manifest and
+# write the JSON result to internal/perfbench/reports/baseline.json. Requires a
+# built `zero` binary and a model; set ZERO_BENCH_MODEL (required) and
+# ZERO_BENCH_BINARY (defaults to ./zero) to configure the run. The report is
+# machine-specific and regenerated, not hand-edited.
+baseline: build
+	@if [ -z "$(ZERO_BENCH_MODEL)" ]; then echo "Set ZERO_BENCH_MODEL (and optionally ZERO_BENCH_BINARY) before running 'make baseline'"; exit 2; fi
+	@ZERO_BIN="$${ZERO_BENCH_BINARY:-./zero}"; \
+	go run ./cmd/zero-perf-bench turn \
+		--suite internal/perfbench/manifests/baseline.json \
+		--model $(ZERO_BENCH_MODEL) \
+		--binary "$$ZERO_BIN" \
+		--output internal/perfbench/reports/baseline.json
+
 help:
-	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, lint-static, deadcode, vulncheck, tidy, clean"
+	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, lint-static, deadcode, vulncheck, tidy, clean, baseline"

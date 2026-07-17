@@ -129,9 +129,16 @@ the key in the wizard:
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
+export AIMLAPI_API_KEY=...
 export LONGCAT_API_KEY=...
 export MINIMAX_API_KEY=...
 export MINIMAXI_API_KEY=...
+```
+
+To configure AI/ML API directly, run:
+
+```bash
+zero providers setup aimlapi --set-active
 ```
 
 To configure Meituan LongCat (LongCat-2.0) directly, run:
@@ -184,6 +191,8 @@ Useful controls:
 |---|---|
 | `Enter` | send the prompt |
 | `/` | open slash-command suggestions |
+| `Ctrl+X` then letter | common slash commands (e.g. `m` → `/model`; `Ctrl+X` `?` for full list) |
+| `Ctrl+P` / `Ctrl+N` | previous / next item in menus (arrows still work) |
 | `Shift+Tab` | cycle permission mode |
 | `Ctrl+B` | show/hide the sidebar |
 | `Ctrl+C` | cancel or exit |
@@ -332,7 +341,7 @@ manifest.
 | Control | Effect |
 |---|---|
 | `NO_COLOR=<anything>` | disables color output |
-| `ZERO_THEME=<name>` | selects the startup theme (`auto`, `dark`, `light`, or a color theme like `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`, `solarized-light`) |
+| `ZERO_THEME=<name>` | selects the startup theme (`auto`, `dark`, `light`, or a color theme like `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark`, `solarized-dark`, `rose-pine`, `everforest`, `neon`, `solarized-light`, `dune`) |
 | `--theme <name>` | selects the TUI theme from the CLI (same names) |
 | `/theme` | opens the theme picker inside the TUI (live preview; `/theme <name>` switches directly) |
 | `ZERO_NO_FADE=1` | disables streaming fade animation |
@@ -358,15 +367,9 @@ Before committing any changes, ensure all Go code quality and security checks pa
 3. **Linting**: Run `make lint-static`.
 4. **Vulnerability Scan**: Run `make vulncheck`.
 
-If you prefer to install these tools globally on your path, you can run:
-
-```bash
-# Install golangci-lint
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-
-# Install govulncheck
-go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-```
+Use the repository-managed targets rather than globally installed binaries:
+the targets apply the module's required Go toolchain as well as the reviewed,
+pinned tool versions.
 
 ### Cross-Compile Examples
 
@@ -379,6 +382,7 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 
 - [Install](docs/INSTALL.md)
 - [Update flow](docs/UPDATE.md)
+- [Themes](docs/THEMES.md)
 - [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md)
 - [Specialists](docs/SPECIALISTS.md)
 - [GitHub Action](docs/GITHUB_ACTION.md)
