@@ -186,22 +186,22 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 // look at what's on disk, so a caller offering to mutate a provider by name
 // should check this first: "not on disk" needs different handling (nothing to
 // persist/remove there) than a name that doesn't exist anywhere at all.
-func ProviderPersisted(path string, name string) bool {
+func ProviderPersisted(path string, name string) (bool, error) {
 	path = strings.TrimSpace(path)
 	name = strings.TrimSpace(name)
 	if path == "" || name == "" {
-		return false
+		return false, nil
 	}
 	cfg, err := loadConfigFile(path)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, provider := range cfg.Providers {
 		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // RemoveProvider deletes the named provider profile from the config at path.

@@ -348,9 +348,15 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		return m, nil
 	}
 
+	persisted, err := config.ProviderPersisted(m.userConfigPath, name)
+	if err != nil {
+		wizard.manageStatus = "Delete failed: " + err.Error()
+		return m, nil
+	}
 	var notes []string
 	var activeAfter string
-	if config.ProviderPersisted(m.userConfigPath, name) {
+	var cleanup tea.Cmd
+	if persisted {
 		cfg, err := config.RemoveProvider(m.userConfigPath, name)
 		if err != nil {
 			wizard.manageStatus = "Delete failed: " + err.Error()
@@ -358,13 +364,10 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		}
 		activeAfter = cfg.ActiveProvider
 		notes = []string{"Deleted " + name + "."}
+		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile)
 	} else {
-		// Env-derived providers (e.g. from an ambient OPENAI_API_KEY) are
-		// synthesized in-memory by Resolve on every launch and never gain a
-		// config.json row, so there's nothing on disk to remove —
-		// RemoveProvider would only ever fail with a confusing "not found"
-		// even though the provider is genuinely visible/usable this session.
-		// Drop it from the session's list instead and say why it can return.
+		// Env-derived providers have no persisted profile or credential to
+		// delete. Keep this path session-only.
 		notes = []string{
 			"Removed " + name + " from this session.",
 			"It wasn't saved in config.json (likely set via an environment variable) — unset it to stop Zero from detecting it automatically.",
@@ -380,7 +383,6 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	} else if activeAfter != "" && !strings.EqualFold(activeAfter, name) {
 		notes = append(notes, "Active provider: "+activeAfter+".")
 	}
-	cleanup := providerManagerCleanupCmd(m.userConfigPath, row.profile)
 
 	if len(m.savedProviders) == 0 {
 		m.providerWizard = nil
@@ -588,6 +590,15 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		return m, nil
 	}
 	oldName := strings.TrimSpace(wizard.editOriginal.Name)
+	persisted, err := config.ProviderPersisted(m.userConfigPath, oldName)
+	if err != nil {
+		wizard.err = err.Error()
+		return m, nil
+	}
+	if !persisted {
+		wizard.err = "provider " + oldName + " is not saved in config.json, so there is no saved profile to edit"
+		return m, nil
+	}
 	newName := strings.TrimSpace(wizard.editDraft.Name)
 	if newName == "" {
 		wizard.err = "name cannot be empty"

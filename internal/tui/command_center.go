@@ -682,12 +682,12 @@ func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error
 	if model == "" {
 		return false, nil
 	}
-	if !config.ProviderPersisted(path, name) {
-		// Env-derived providers (e.g. an ambient OPENAI_API_KEY) are synthesized
-		// in-memory by Resolve and never gain a config.json row, so there's
-		// nothing on disk to update — SetProviderModel would only ever fail
-		// with a confusing "not found". Treat it like the no-path/no-name cases
-		// above: nothing to persist, not an error.
+	persisted, err := config.ProviderPersisted(path, name)
+	if err != nil {
+		return false, err
+	}
+	if !persisted {
+		// Env-derived providers have no config.json row to update.
 		return false, nil
 	}
 	if _, err := config.SetProviderModel(path, name, model); err != nil {
