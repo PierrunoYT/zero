@@ -1370,7 +1370,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// selection is a passive highlight, so Esc dropping it is cheap and
 			// expected (mirrors how editors clear selection on Esc).
 			if m.selectedFile != "" {
-				m.selectedFile = ""
+				m.setSelectedFile("")
 				return m, nil
 			}
 			if m.hasQueuedMessage() {
@@ -2437,7 +2437,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Collapse a repeated swarm status/collect card so re-checks don't flood
 		// the chat with identical blocks.
+		beforeCollapse := len(m.transcript)
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
+		if removed := beforeCollapse - len(m.transcript); removed > 0 {
+			m.flushed = max(0, m.flushed-removed)
+			m.altScreenSettledWidth = 0
+		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		m = m.captureStepWork(msg.row)
 		// A finished command tool may have mutated files git can see but no

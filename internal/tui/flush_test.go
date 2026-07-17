@@ -101,6 +101,81 @@ func TestAltScreenSettledCacheRebuildsAfterDoctorStatusUpdate(t *testing.T) {
 	}
 }
 
+func TestAltScreenSettledCacheInvalidatesWithFileSelection(t *testing.T) {
+	m := filesPanelTestModel()
+	m.altScreen = true
+	m.width = 80
+	m.height = 30
+	m, _ = m.settleTranscript()
+	if m.altScreenSettledWidth == 0 {
+		t.Fatal("precondition: settled cache should be populated")
+	}
+
+	m = m.selectFile("internal/tui/sidebar.go")
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("selecting a file touched by a settled row must invalidate the cache")
+	}
+	m, _ = m.settleTranscript()
+	selectedView := viewString(m.View())
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = updated.(model)
+	if m.selectedFile != "" {
+		t.Fatalf("Esc should clear the selected file, got %q", m.selectedFile)
+	}
+	if m.altScreenSettledWidth == 0 || m.altScreenSettledFrontier != m.flushed {
+		t.Fatal("clearing a selected file should rebuild the invalidated cache")
+	}
+	if clearedView := viewString(m.View()); clearedView == selectedView {
+		t.Fatal("clearing a selected file should remove the settled row's selection tint")
+	}
+}
+
+func TestAltScreenRepeatedStatusCollapseRewindsSettledFrontier(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = updated.(model)
+	m.pending = true
+	m.activeRunID = 7
+	m.transcript = appendTranscriptRow(m.transcript,
+		transcriptRow{kind: rowToolCall, id: "old", tool: "swarm_status", runID: 7},
+	)
+	m.transcript = appendTranscriptRow(m.transcript,
+		transcriptRow{kind: rowToolResult, id: "old", tool: "swarm_status", status: tools.StatusOK, detail: "1 running", runID: 7},
+	)
+	m.transcript = appendTranscriptRow(m.transcript,
+		transcriptRow{kind: rowToolCall, id: "new", tool: "swarm_status", runID: 7},
+	)
+	m, _ = m.settleTranscript()
+	if m.flushed != len(m.transcript)-1 {
+		t.Fatalf("precondition: frontier=%d, want %d", m.flushed, len(m.transcript)-1)
+	}
+
+	updated, _ = m.Update(agentRowMsg{
+		runID: 7,
+		row: transcriptRow{
+			kind: rowToolResult, id: "new", tool: "swarm_status", status: tools.StatusError, detail: "1 running", runID: 7,
+		},
+	})
+	m = updated.(model)
+	if len(m.transcript) != 3 {
+		t.Fatalf("repeated status should collapse to welcome plus the new call/result pair, got %d rows", len(m.transcript))
+	}
+	if m.flushed != len(m.transcript) {
+		t.Fatalf("collapsed replacement should settle through %d rows, got frontier %d", len(m.transcript), m.flushed)
+	}
+	if m.altScreenSettledWidth == 0 || m.altScreenSettledFrontier != m.flushed {
+		t.Fatal("collapsed replacement should rebuild the invalidated settled cache")
+	}
+	cachedView := viewString(m.View())
+	rebuilt := m
+	rebuilt.altScreenSettledWidth = 0
+	rebuilt, _ = rebuilt.settleTranscript()
+	if rebuiltView := viewString(rebuilt.View()); rebuiltView != cachedView {
+		t.Fatal("collapsed replacement cache is stale compared with a forced rebuild")
+	}
+}
+
 func TestRunningToolCallBlocksFrontierUntilResult(t *testing.T) {
 	m := sizedTestModel(80)
 	m.pending = true

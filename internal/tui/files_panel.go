@@ -348,12 +348,25 @@ func (m model) lastRowIndexForFile(path string) int {
 	return -1
 }
 
+func (m *model) setSelectedFile(path string) {
+	if m.selectedFile == path {
+		return
+	}
+	oldRow := m.lastRowIndexForFile(m.selectedFile)
+	newRow := m.lastRowIndexForFile(path)
+	m.selectedFile = path
+	if (oldRow >= 0 && oldRow < m.flushed) || (newRow >= 0 && newRow < m.flushed) {
+		m.altScreenSettledWidth = 0
+	}
+}
+
 // selectFile marks path as the selected file and scrolls the transcript so its
 // most recent edit card is in view; the card tint comes from the renderers
 // reading selectedFile (rowTouchesSelectedFile).
 func (m model) selectFile(path string) model {
-	m.selectedFile = path
-	if offset, ok := m.scrollOffsetForTranscriptRow(m.lastRowIndexForFile(path)); ok {
+	rowIndex := m.lastRowIndexForFile(path)
+	m.setSelectedFile(path)
+	if offset, ok := m.scrollOffsetForTranscriptRow(rowIndex); ok {
 		m.chatScrollOffset = offset
 		if offset == 0 {
 			m.chatBodyLines = 0

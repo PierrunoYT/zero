@@ -1388,7 +1388,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		// opens/switches the file view.
 		if path, ok := m.fileRowAtMouse(msg); ok {
 			if m.fileView.active || m.selectedFile == path {
-				m.selectedFile = path
+				m.setSelectedFile(path)
 				return m.openFileView(path), nil, true
 			}
 			return m.selectFile(path), nil, true
