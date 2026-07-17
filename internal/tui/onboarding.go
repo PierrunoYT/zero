@@ -183,7 +183,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.advanceSetup()
 		}
 		return m, nil
-	case keyIs(msg, tea.KeyUp):
+	case keyIs(msg, tea.KeyUp) || keyCtrl(msg, 'p'):
 		if m.setup.stage == setupStageMethod {
 			m.moveSetupMethod(-1)
 		} else if m.setup.stage == setupStageProvider {
@@ -192,7 +192,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSetupModel(-1)
 		}
 		return m, nil
-	case keyIs(msg, tea.KeyDown):
+	case keyIs(msg, tea.KeyDown) || keyCtrl(msg, 'n'):
 		if m.setup.stage == setupStageMethod {
 			m.moveSetupMethod(1)
 		} else if m.setup.stage == setupStageProvider {

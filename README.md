@@ -191,6 +191,8 @@ Useful controls:
 |---|---|
 | `Enter` | send the prompt |
 | `/` | open slash-command suggestions |
+| `Ctrl+X` then letter | common slash commands (e.g. `m` → `/model`; `Ctrl+X` `?` for full list) |
+| `Ctrl+P` / `Ctrl+N` | previous / next item in menus (arrows still work) |
 | `Shift+Tab` | cycle permission mode |
 | `Ctrl+B` | show/hide the sidebar |
 | `Ctrl+C` | cancel or exit |
