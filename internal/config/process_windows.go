@@ -37,8 +37,17 @@ func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
 		return proc
 	}
 	// The main thread is suspended (see configureCommandProcess); resume it
-	// once we're done attaching, however that turns out.
-	defer resumeMainThread(cmd.Process.Pid)
+	// once we're done attaching, however that turns out. If resuming fails
+	// outright (Toolhelp/OpenThread/ResumeThread errors are otherwise
+	// swallowed), the process would sit suspended forever and never exit on
+	// its own, making the failure look like an ordinary 5s provider-command
+	// timeout. Terminate it immediately instead so the real cause surfaces
+	// quickly and no suspended process is left behind.
+	defer func() {
+		if !resumeMainThread(cmd.Process.Pid) {
+			proc.Terminate()
+		}
+	}()
 
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
@@ -58,17 +67,20 @@ func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
 	return proc
 }
 
-// resumeMainThread resumes the (assumed suspended) primary thread of pid.
-// It's a no-op if the thread can't be found or is already running.
-func resumeMainThread(pid int) {
+// resumeMainThread resumes every (assumed suspended) thread of pid and
+// reports whether at least one was actually resumed. Callers must treat a
+// false result as a failed resume, not a benign no-op: a suspended process
+// that's never woken up will neither exit nor produce output on its own.
+func resumeMainThread(pid int) bool {
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
 	if err != nil {
-		return
+		return false
 	}
 	defer func() { _ = windows.CloseHandle(snapshot) }()
 
 	var entry windows.ThreadEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
+	resumed := false
 	for err := windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
 		if entry.OwnerProcessID != uint32(pid) {
 			continue
@@ -77,9 +89,12 @@ func resumeMainThread(pid int) {
 		if err != nil {
 			continue
 		}
-		_, _ = windows.ResumeThread(thread)
+		if _, err := windows.ResumeThread(thread); err == nil {
+			resumed = true
+		}
 		_ = windows.CloseHandle(thread)
 	}
+	return resumed
 }
 
 func (p *commandProcess) Terminate() {
@@ -99,7 +114,12 @@ func (p *commandProcess) Terminate() {
 	}
 	// Fallback for the rare case where job creation or assignment failed:
 	// there's no containment, so the PID is the best signal available even
-	// though it carries the same reuse risk noted above.
+	// though it carries the same reuse risk noted above. Known limitation:
+	// unlike the job-object path, this can't reach a descendant that has
+	// already reparented away from the tree taskkill /T walks. This is not
+	// a regression versus pre-job-object behavior (taskkill /T was the only
+	// mechanism then too); closing it fully would require containment that
+	// doesn't depend on job objects and is tracked as a follow-up.
 	taskkill := taskkillPath()
 	_ = exec.Command(taskkill, "/T", "/F", "/PID", strconv.Itoa(p.cmd.Process.Pid)).Run()
 	_ = p.cmd.Process.Kill()
