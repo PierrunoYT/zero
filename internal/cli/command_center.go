@@ -419,7 +419,7 @@ func formatProviderCLILine(provider providerCLISummary) string {
 	}
 	line := fmt.Sprintf("%s %s [%s] model=%s apiModel=%s api key: %s", marker, displayCLIValue(provider.Name, "none"), displayCLIValue(provider.ProviderKind, "unknown"), displayCLIValue(provider.Model, "none"), displayCLIValue(provider.APIModel, "unknown"), providerCredentialState(provider.providerSummary))
 	if !provider.Selectable {
-		line += " (runtime-only; not selectable/saved)"
+		line += " (not selectable via providers use)"
 	}
 	if provider.Message != "" {
 		line += " (" + provider.Status + ": " + provider.Message + ")"

@@ -220,11 +220,12 @@ func TestRunProvidersListMarksUserAndRuntimeProfiles(t *testing.T) {
 	}
 
 	stdout.Reset()
+	stderr.Reset()
 	if code := runWithDeps([]string{"providers", "list"}, &stdout, &stderr, deps); code != exitSuccess {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "runtime-only; not selectable/saved") {
-		t.Fatalf("runtime marker missing: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "not selectable via providers use") {
+		t.Fatalf("non-selectable marker missing: %s", stdout.String())
 	}
 }
 

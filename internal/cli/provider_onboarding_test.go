@@ -12,6 +12,7 @@ import (
 )
 
 func TestRunProvidersUseSetsActiveProvider(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
