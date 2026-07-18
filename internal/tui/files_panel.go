@@ -352,11 +352,15 @@ func (m *model) setSelectedFile(path string) {
 	if m.selectedFile == path {
 		return
 	}
-	oldRow := m.lastRowIndexForFile(m.selectedFile)
-	newRow := m.lastRowIndexForFile(path)
+	oldPath := m.selectedFile
 	m.selectedFile = path
-	if (oldRow >= 0 && oldRow < m.flushed) || (newRow >= 0 && newRow < m.flushed) {
-		m.altScreenSettledWidth = 0
+	for i := 0; i < m.flushed && i < len(m.transcript); i++ {
+		for _, changedPath := range m.transcript[i].changedFiles {
+			if changedPath == oldPath || changedPath == path {
+				m.altScreenSettledWidth = 0
+				return
+			}
+		}
 	}
 }
 

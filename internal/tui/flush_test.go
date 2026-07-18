@@ -131,6 +131,29 @@ func TestAltScreenSettledCacheInvalidatesWithFileSelection(t *testing.T) {
 	}
 }
 
+func TestAltScreenSettledCacheInvalidatesForOlderFileCard(t *testing.T) {
+	const path = "internal/tui/sidebar.go"
+	m := model{
+		transcript: []transcriptRow{
+			{kind: rowToolResult, changedFiles: []string{path}},
+			{kind: rowToolResult, changedFiles: []string{path}},
+		},
+		flushed:               1,
+		altScreenSettledWidth: 80,
+	}
+
+	m.setSelectedFile(path)
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("selecting a file with an older settled card must invalidate the cache")
+	}
+
+	m.altScreenSettledWidth = 80
+	m.setSelectedFile("")
+	if m.altScreenSettledWidth != 0 {
+		t.Fatal("clearing a file with an older settled card must invalidate the cache")
+	}
+}
+
 func TestAltScreenRepeatedStatusCollapseRewindsSettledFrontier(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
