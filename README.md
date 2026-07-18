@@ -358,6 +358,12 @@ go run ./cmd/zero-release smoke
 go run ./cmd/zero-perf-bench
 ```
 
+Experimental: `ZERO_OPENAI_TURN_SESSION=1` enables the optimized OpenAI turn
+session (background connection prewarm + request-prefix telemetry) for headless
+`zero exec` runs against official OpenAI profiles. Off by default; `0`/`false`
+disable. A/B-benchmark it by running the same `zero-perf-bench` suite with the
+variable unset and set.
+
 ### Code Quality and Security Checks
 
 Before committing any changes, ensure all Go code quality and security checks pass. The `make` targets below pin each tool to this module's Go version, so they load correctly even when your default `go` toolchain is older — running the plain `go run ...@version` form yourself can select the tool module's own (older) toolchain and fail to load this module instead.
@@ -389,6 +395,24 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 - [Benchmarks](docs/BENCHMARK.md)
 - [Performance](docs/PERFORMANCE.md)
 - [Agent evals](docs/AGENT_EVALS.md)
+
+## Community
+
+Questions, setup help, ideas, and sharing all live in
+[GitHub Discussions](https://github.com/Gitlawb/zero/discussions):
+
+| Category | Use it for |
+|---|---|
+| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | Setup help, provider/model configuration, "how do I" questions |
+| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | Feature proposals and design discussion before any PR |
+| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | Your skills, plugins, MCP setups, themes, and workflows |
+| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | Releases and project news from the maintainers |
+
+For a good Q&A answer fast, include `zero --version`, your OS and install
+method, the provider/model in use, and `zero doctor` output. See
+[SUPPORT.md](SUPPORT.md). Bugs belong in
+[issues](https://github.com/Gitlawb/zero/issues/new/choose); security reports
+follow [SECURITY.md](SECURITY.md), never a public thread.
 
 ## Contributing
 

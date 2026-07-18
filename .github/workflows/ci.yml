@@ -37,6 +37,10 @@ jobs:
 
       - name: Validate quality targets with stock macOS Make
         if: matrix.os == 'macos-latest'
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: grep.patternType
+          GIT_CONFIG_VALUE_0: fixed
         run: make -n vulncheck
 
       - name: Check vulnerabilities through native Windows Make

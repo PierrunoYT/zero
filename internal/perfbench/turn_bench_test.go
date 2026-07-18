@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -530,14 +531,17 @@ func TestRunTurnBenchBuildOnlyMechanism(t *testing.T) {
 	}
 }
 
-// TestTurnSchemaVersion3 pins the schema bump. v3 records the tier
-// reclassification (refactor structural-positive and nav answer-oracles moved
-// into correctnessPassRate), so a v2->v3 cross-version comparison cannot
-// silently misread the jump as a model improvement — exactly the misread the
-// tier system exists to prevent.
-func TestTurnSchemaVersion3(t *testing.T) {
-	if TurnSchemaVersion != 3 {
-		t.Fatalf("TurnSchemaVersion = %d, want 3", TurnSchemaVersion)
+// TestTurnSchemaVersion pins the schema bump so a shape change is a conscious
+// decision. v3 recorded the tier reclassification (refactor structural-positive
+// and nav answer-oracles moved into correctnessPassRate). v4 adds tasksErrored:
+// tasks whose every iteration died before the agent produced a run are now
+// first-class in the report instead of visible only in warnings, so a
+// spawn-broken run cannot print a clean-looking summary or exit 0. v5 is
+// additive only: execProfile stamps the execution profile the run was
+// benchmarked under so profile A/B reports are self-describing.
+func TestTurnSchemaVersion(t *testing.T) {
+	if TurnSchemaVersion != 5 {
+		t.Fatalf("TurnSchemaVersion = %d, want 5", TurnSchemaVersion)
 	}
 }
 
@@ -1066,4 +1070,188 @@ func TestNav08CountOracleRejectsFmtOnlyNoTesting(t *testing.T) {
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	assertVerifyFailed(t, "nav-08 fmt-only-no-testing", outcome)
+}
+
+func TestResolveBinaryAbsolutizesExplicitPath(t *testing.T) {
+	dir := t.TempDir()
+	name := "zero-probe.exe"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	resolved, err := ResolveBinary("./" + name)
+	if err != nil {
+		t.Fatalf("ResolveBinary: %v", err)
+	}
+	if !filepath.IsAbs(resolved) {
+		t.Fatalf("ResolveBinary returned relative path %q; the turn runner sets cmd.Dir per task, so a relative binary fails to spawn from every fixture copy", resolved)
+	}
+}
+
+func TestRunTurnBenchCountsErroredTasks(t *testing.T) {
+	set := TaskSet{
+		ID: "errored-suite",
+		Tasks: []BenchTask{
+			{ID: "t1", Class: "nav", Prompt: "p1", VerificationCommand: []string{"true"}},
+			{ID: "t2", Class: "longproc", Prompt: "p2"},
+		},
+	}
+	cfg := TurnBenchConfig{
+		Model:      "fake-model",
+		Iterations: 1,
+		Runner: func(context.Context, BenchTask, RunContext) TurnTaskOutcome {
+			return TurnTaskOutcome{Err: errors.New("fork/exec ./zero: file does not exist")}
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.TasksErrored != 2 {
+		t.Fatalf("TasksErrored=%d, want 2 (every iteration of both tasks errored)", result.TasksErrored)
+	}
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings=%d, want 2 run warnings", len(result.Warnings))
+	}
+	summary := FormatTurnBenchSummary(result)
+	if !strings.Contains(summary, "ERRORED: 2 task(s)") {
+		t.Fatalf("summary does not surface the errored tasks:\n%s", summary)
+	}
+	if !strings.Contains(summary, "fork/exec ./zero") {
+		t.Fatalf("summary does not echo the underlying run error:\n%s", summary)
+	}
+}
+
+func TestRunTurnBenchPartialErrorStillCounts(t *testing.T) {
+	set := TaskSet{
+		ID: "partial-suite",
+		Tasks: []BenchTask{
+			{ID: "ok", Class: "nav", Prompt: "p", VerificationCommand: []string{"true"}},
+			{ID: "dead", Class: "nav", Prompt: "p", VerificationCommand: []string{"true"}},
+		},
+	}
+	canned := map[string]*trace.TurnTrace{"ok": cannedTrace(100, 10, 1000)}
+	inner := fakeTurnRunner(canned)
+	cfg := TurnBenchConfig{
+		Model:      "fake-model",
+		Iterations: 1,
+		Runner: func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
+			if task.ID == "dead" {
+				return TurnTaskOutcome{Err: errors.New("spawn failed")}
+			}
+			return inner(ctx, task, rc)
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.TasksErrored != 1 {
+		t.Fatalf("TasksErrored=%d, want 1", result.TasksErrored)
+	}
+	if result.TasksAttempted != 2 {
+		t.Fatalf("TasksAttempted=%d, want 2", result.TasksAttempted)
+	}
+}
+
+// The exec-profile passthrough: the profile must reach every task's zero exec
+// invocation as --exec-profile (with the prompt staying last) and stay out of
+// the args entirely when unset.
+func TestBuildTurnExecArgsIncludesExecProfile(t *testing.T) {
+	task := BenchTask{ID: "t", Prompt: "do the thing"}
+	args := buildTurnExecArgs(task, RunContext{Model: "m", ExecProfile: "fast"}, "trace.ndjson", nil)
+	found := false
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--exec-profile" && args[i+1] == "fast" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("args must carry --exec-profile fast, got %v", args)
+	}
+	if args[len(args)-1] != "do the thing" {
+		t.Fatalf("prompt must stay the last argument, got %v", args)
+	}
+
+	args = buildTurnExecArgs(task, RunContext{Model: "m"}, "trace.ndjson", nil)
+	for _, arg := range args {
+		if arg == "--exec-profile" {
+			t.Fatalf("no profile configured, but args carry --exec-profile: %v", args)
+		}
+	}
+}
+
+// The configured profile must reach the runner's RunContext and be stamped
+// into the result, so a profile A/B report is self-describing. The boundary
+// canonicalizes (case/whitespace) so equivalent postures always carry the same
+// label, and rejects unknown names so a direct library caller cannot slip an
+// unvalidated profile into a report the way the CLI (parse-time check) cannot.
+func TestRunTurnBenchStampsExecProfile(t *testing.T) {
+	set := TaskSet{
+		ID:    "profile-suite",
+		Tasks: []BenchTask{{ID: "t1", Class: "longproc", Prompt: "p"}},
+	}
+	var gotProfile string
+	cfg := TurnBenchConfig{
+		Model:       "fake-model",
+		ExecProfile: " FAST ",
+		Iterations:  1,
+		Runner: func(_ context.Context, _ BenchTask, rc RunContext) TurnTaskOutcome {
+			gotProfile = rc.ExecProfile
+			return TurnTaskOutcome{Passed: true, WallMs: 10, Trace: cannedTrace(10, 1, 100)}
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if gotProfile != "fast" {
+		t.Fatalf("runner RunContext.ExecProfile = %q, want the canonical fast", gotProfile)
+	}
+	if result.ExecProfile != "fast" {
+		t.Fatalf("result.ExecProfile = %q, want the canonical fast", result.ExecProfile)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	if !strings.Contains(string(raw), `"execProfile":"fast"`) {
+		t.Fatal("published JSON must carry execProfile")
+	}
+}
+
+func TestRunTurnBenchRejectsUnknownExecProfile(t *testing.T) {
+	set := TaskSet{
+		ID:    "profile-suite",
+		Tasks: []BenchTask{{ID: "t1", Class: "longproc", Prompt: "p"}},
+	}
+	ran := false
+	cfg := TurnBenchConfig{
+		Model:       "fake-model",
+		ExecProfile: "blanced",
+		Iterations:  1,
+		Runner: func(context.Context, BenchTask, RunContext) TurnTaskOutcome {
+			ran = true
+			return TurnTaskOutcome{Passed: true, WallMs: 10, Trace: cannedTrace(10, 1, 100)}
+		},
+	}
+	_, err := RunTurnBench(context.Background(), set, cfg)
+	if err == nil || !strings.Contains(err.Error(), "unknown execution profile") {
+		t.Fatalf("err = %v, want an unknown-profile rejection", err)
+	}
+	if ran {
+		t.Fatal("nothing may run under an unknown profile")
+	}
 }
