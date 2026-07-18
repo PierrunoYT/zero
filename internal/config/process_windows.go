@@ -27,8 +27,9 @@ func configureCommandProcess(cmd *exec.Cmd) {
 // walks the tree by parent PID in user space and can miss descendants,
 // letting them run to completion while Wait blocks on inherited pipes.
 type commandProcess struct {
-	cmd *exec.Cmd
-	job windows.Handle
+	cmd           *exec.Cmd
+	job           windows.Handle
+	processHandle windows.Handle
 }
 
 func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
@@ -49,16 +50,16 @@ func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
 		}
 	}()
 
+	handle, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		return proc
+	}
+	proc.processHandle = handle
+
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return proc
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
-	if err != nil {
-		_ = windows.CloseHandle(job)
-		return proc
-	}
-	defer func() { _ = windows.CloseHandle(handle) }()
 	if err := windows.AssignProcessToJobObject(job, handle); err != nil {
 		_ = windows.CloseHandle(job)
 		return proc
@@ -112,31 +113,42 @@ func (p *commandProcess) Terminate() {
 	if p.cmd.Process == nil {
 		return
 	}
-	// Fallback for the rare case where job creation or assignment failed:
-	// there's no containment, so the PID is the best signal available even
-	// though it carries the same reuse risk noted above. Known limitation:
-	// unlike the job-object path, this can't reach a descendant that has
-	// already reparented away from the tree taskkill /T walks. This is not
-	// a regression versus pre-job-object behavior (taskkill /T was the only
-	// mechanism then too); closing it fully would require containment that
-	// doesn't depend on job objects and is tracked as a follow-up.
-	taskkill := taskkillPath()
-	_ = exec.Command(taskkill, "/T", "/F", "/PID", strconv.Itoa(p.cmd.Process.Pid)).Run()
-	_ = p.cmd.Process.Kill()
-}
-
-// Close releases the job handle without touching any still-running
-// descendants: the job carries no KILL_ON_JOB_CLOSE limit, so on the
-// success path a provider command's detached helpers keep running exactly
-// as they did before job objects were introduced. Descendant termination
-// happens explicitly via Terminate, called only on timeout/error.
-func (p *commandProcess) Close() {
-	if p.job == 0 {
+	if p.processHandle == 0 {
+		// Without a retained identity, never target a numeric PID that may
+		// have been reaped and reused. os.Process.Kill uses Go's original
+		// process state instead.
+		_ = p.cmd.Process.Kill()
 		return
 	}
-	_ = windows.CloseHandle(p.job)
-	p.job = 0
+	// Fallback for the rare case where job creation or assignment failed:
+	// only invoke taskkill while the identity-preserving handle confirms the
+	// original root is still active. Keeping that handle open through Run
+	// prevents Windows from reusing its PID for an unrelated process.
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(p.processHandle, &exitCode); err == nil && exitCode == stillActive {
+		taskkill := taskkillPath()
+		_ = exec.Command(taskkill, "/T", "/F", "/PID", strconv.Itoa(p.cmd.Process.Pid)).Run()
+	}
+	_ = windows.TerminateProcess(p.processHandle, 1)
 }
+
+// Close releases the retained handles without touching any still-running
+// descendants: the job carries no KILL_ON_JOB_CLOSE limit, so on the success
+// path a provider command's detached helpers keep running exactly as they did
+// before job objects were introduced. Descendant termination happens
+// explicitly via Terminate, called only on timeout/error.
+func (p *commandProcess) Close() {
+	if p.job != 0 {
+		_ = windows.CloseHandle(p.job)
+		p.job = 0
+	}
+	if p.processHandle != 0 {
+		_ = windows.CloseHandle(p.processHandle)
+		p.processHandle = 0
+	}
+}
+
+const stillActive = uint32(259) // STILL_ACTIVE
 
 func taskkillPath() string {
 	systemRoot := os.Getenv("SystemRoot")

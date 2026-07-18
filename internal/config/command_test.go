@@ -232,8 +232,13 @@ func writeCommand(t *testing.T, script commandScript) string {
 			lines = append(lines, "echo "+script.Stderr+" 1>&2")
 		}
 		if script.BackgroundSleepSeconds > 0 {
-			bgSleep := "Set-Content -Path '" + psSingleQuote(script.BackgroundPidFile) + "' -Value $PID -Encoding Ascii; Start-Sleep -Seconds " + itoa(script.BackgroundSleepSeconds)
+			readyFile := script.BackgroundPidFile + ".ready"
+			bgSleep := "Set-Content -LiteralPath '" + psSingleQuote(script.BackgroundPidFile) + "' -Value $PID -Encoding Ascii; " +
+				"Set-Content -LiteralPath '" + psSingleQuote(readyFile) + "' -Value ready -Encoding Ascii; " +
+				"Start-Sleep -Seconds " + itoa(script.BackgroundSleepSeconds)
 			lines = append(lines, "start /B powershell -NoProfile -Command \""+bgSleep+"\"")
+			waitForReady := "while (-not (Test-Path -LiteralPath '" + psSingleQuote(readyFile) + "')) { Start-Sleep -Milliseconds 10 }"
+			lines = append(lines, "powershell -NoProfile -Command \""+waitForReady+"\"")
 		}
 		lines = append(lines, "exit /b "+itoa(script.ExitCode))
 		if err := os.WriteFile(path, []byte(strings.Join(lines, "\r\n")), 0o700); err != nil {
