@@ -695,6 +695,7 @@ func (s *acpSession) currentMode() agent.PermissionMode {
 }
 
 func (s *acpSession) setModel(model string) {
+	model = strings.TrimSpace(model)
 	s.mu.Lock()
 	found := false
 	for _, option := range s.models {
@@ -703,7 +704,7 @@ func (s *acpSession) setModel(model string) {
 			break
 		}
 	}
-	if !found && strings.TrimSpace(model) != "" {
+	if !found && model != "" {
 		s.models = append(s.models, SessionConfigOptionValue{Value: model, Name: model})
 	}
 	s.model = model
@@ -717,6 +718,7 @@ func (s *acpSession) currentModel() string {
 }
 
 func (s *acpSession) hasModel(model string) bool {
+	model = strings.TrimSpace(model)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, option := range s.models {
