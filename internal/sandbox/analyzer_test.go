@@ -56,6 +56,8 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "direct vite", script: "vite --host 127.0.0.1", network: true},
 		{name: "next dev", script: "next dev", network: true},
 		{name: "git clone", script: "git clone https://example.com/repo.git", network: true},
+		{name: "git push custom remote", script: "git push gitlawb main", network: true},
+		{name: "git local commit", script: `git commit -m "local change"`, network: false},
 		{name: "gh release download", script: "gh release download v1.0.0", network: true},
 		{name: "no network", script: "ls -la && echo done", network: false},
 		{name: "process pattern is not network", script: `pkill -f "python3 -m http.server 8000"`, network: false},

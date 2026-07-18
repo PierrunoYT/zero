@@ -273,6 +273,7 @@ func TestClassifyASTCatchesNetworkProgramsRegexMisses(t *testing.T) {
 		"ftp ftp.example.com",
 		"sftp user@host",
 		"sudo telnet example.com 23",
+		"git push gitlawb main",
 	} {
 		risk := classifyCommand(command)
 		if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
