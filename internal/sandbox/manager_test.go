@@ -549,7 +549,7 @@ func TestBuildCommandPlanUsesCommandCredentialContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(commandDir, "credentials")
+	want := filepath.Join(plan.Dir, "credentials")
 	if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyRead, want) {
 		t.Fatalf("DenyRead = %#v, want command-relative override parent %q", plan.PermissionProfile.FileSystem.DenyRead, want)
 	}
