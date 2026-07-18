@@ -3,28 +3,55 @@
 package config
 
 import (
+	"io"
 	"os/exec"
 	"syscall"
 )
 
-func configureCommandProcess(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-}
-
 type commandProcess struct {
-	cmd *exec.Cmd
+	groupID     int
+	anchor      *exec.Cmd
+	anchorInput io.WriteCloser
 }
 
-func attachCommandProcess(cmd *exec.Cmd) *commandProcess {
-	return &commandProcess{cmd: cmd}
+// startCommandProcess retains a live process-group leader until cleanup. The
+// provider shell may be reaped before Wait finishes draining descendant-held
+// pipes, so its PID cannot safely identify the group after Wait returns.
+func startCommandProcess(cmd *exec.Cmd) (*commandProcess, error) {
+	anchor := exec.Command("sh", "-c", "read _")
+	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	anchorInput, err := anchor.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := anchor.Start(); err != nil {
+		_ = anchorInput.Close()
+		return nil, err
+	}
+
+	proc := &commandProcess{groupID: anchor.Process.Pid, anchor: anchor, anchorInput: anchorInput}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: proc.groupID}
+	if err := cmd.Start(); err != nil {
+		proc.Close()
+		return nil, err
+	}
+	return proc, nil
 }
 
 func (p *commandProcess) Terminate() {
-	if p.cmd.Process == nil {
-		return
+	if p.groupID != 0 {
+		_ = syscall.Kill(-p.groupID, syscall.SIGKILL)
 	}
-	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
-	_ = p.cmd.Process.Kill()
 }
 
-func (p *commandProcess) Close() {}
+func (p *commandProcess) Close() {
+	if p.anchorInput != nil {
+		_ = p.anchorInput.Close()
+		p.anchorInput = nil
+	}
+	if p.anchor != nil {
+		_ = p.anchor.Wait()
+		p.anchor = nil
+	}
+	p.groupID = 0
+}

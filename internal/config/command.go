@@ -42,7 +42,6 @@ var errProviderCommandTimeout = errors.New("provider command timeout")
 
 func runProviderCommand(command string, timeout time.Duration) ([]byte, []byte, error) {
 	cmd := shellCommand(command)
-	configureCommandProcess(cmd)
 	// Bound the time Wait spends draining I/O pipes after the process exits,
 	// in case an orphaned descendant still holds the write ends open.
 	cmd.WaitDelay = time.Second
@@ -52,11 +51,10 @@ func runProviderCommand(command string, timeout time.Duration) ([]byte, []byte, 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Start(); err != nil {
+	proc, err := startCommandProcess(cmd)
+	if err != nil {
 		return nil, nil, err
 	}
-
-	proc := attachCommandProcess(cmd)
 	defer proc.Close()
 
 	done := make(chan error, 1)

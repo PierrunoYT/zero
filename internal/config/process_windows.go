@@ -3,11 +3,13 @@
 package config
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -20,6 +22,14 @@ import (
 // descendant escape the job and survive termination.
 func configureCommandProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
+}
+
+func startCommandProcess(cmd *exec.Cmd) (*commandProcess, error) {
+	configureCommandProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return attachCommandProcess(cmd), nil
 }
 
 // commandProcess tracks a started provider command so its entire process
@@ -127,7 +137,9 @@ func (p *commandProcess) Terminate() {
 	var exitCode uint32
 	if err := windows.GetExitCodeProcess(p.processHandle, &exitCode); err == nil && exitCode == stillActive {
 		taskkill := taskkillPath()
-		_ = exec.Command(taskkill, "/T", "/F", "/PID", strconv.Itoa(p.cmd.Process.Pid)).Run()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = exec.CommandContext(ctx, taskkill, "/T", "/F", "/PID", strconv.Itoa(p.cmd.Process.Pid)).Run()
+		cancel()
 	}
 	_ = windows.TerminateProcess(p.processHandle, 1)
 }
