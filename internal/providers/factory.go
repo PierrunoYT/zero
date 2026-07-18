@@ -310,13 +310,6 @@ func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 // login than the bearer — a mismatch the backend rejects.
 func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, options Options) (zeroruntime.Provider, error) {
 	accountKey := options.OAuthLoginKey
-	resolver := openai.CodexAccountResolver(func(ctx context.Context) (string, bool, error) {
-		account := codexAccountForKey(accountKey)
-		if account == "" {
-			return "", false, nil
-		}
-		return account, true, nil
-	})
 	return openai.NewCodexProvider(openai.CodexOptions{
 		Options: openai.Options{
 			BaseURL:         resolved.baseURL,
@@ -337,7 +330,7 @@ func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, 
 		// override. The codex provider's constructor derives the
 		// `/responses` endpoint from BaseURL, so the factory stays out of
 		// the path.
-		AccountResolver: resolver,
+		AccountResolver: CodexAccountResolverForLogin(accountKey),
 	})
 }
 

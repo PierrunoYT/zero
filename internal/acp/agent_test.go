@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -173,8 +175,13 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 			Name: "ChatGPT", CatalogID: "chatgpt", Model: model,
 		}}, nil
 	}
+	deps.DiscoverModels = func(_ context.Context, _ config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: " gpt-5.4-mini ", Description: "Fast"},
+			{ID: "gpt-5.5", Description: "duplicate configured model"},
+		}, nil
+	}
 	h := newHarness(t, deps)
-	defer h.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -193,7 +200,7 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	}
 	var selected SetSessionConfigOptionResult
 	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
-		SessionID: created.SessionID, ConfigID: configIDModel, Value: "gpt-5.4-mini",
+		SessionID: created.SessionID, ConfigID: configIDModel, Value: "  gpt-5.4-mini  ",
 	}, &selected); err != nil {
 		t.Fatalf("set_config_option: %v", err)
 	}
@@ -205,6 +212,9 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	}, &SetSessionConfigOptionResult{}); err == nil {
 		t.Fatal("unknown standard model selection was accepted")
 	}
+	h.stop()
+	h = newHarness(t, deps)
+	defer h.stop()
 	var loaded LoadSessionResult
 	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID}, &loaded); err != nil {
 		t.Fatalf("session/load: %v", err)
@@ -214,6 +224,108 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	}
 	if loaded.ConfigOptions[1].CurrentValue != string(agent.PermissionModeAuto) {
 		t.Fatalf("load mode option = %+v", loaded.ConfigOptions[1])
+	}
+}
+
+func TestACPModelDiscoveryFailureUsesConfiguredFallbackOnly(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "ChatGPT", CatalogID: "chatgpt", Model: " configured-model ",
+		}}, nil
+	}
+	deps.DiscoverModels = func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return nil, fmt.Errorf("discovery unavailable")
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var created NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	option := created.ConfigOptions[0]
+	if option.CurrentValue != "configured-model" || len(option.Options) != 1 || option.Options[0].Value != "configured-model" {
+		t.Fatalf("fallback model option = %+v", option)
+	}
+}
+
+func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, o config.Overrides) (config.ResolvedConfig, error) {
+		model := "configured-model"
+		if o.Provider.Model != "" {
+			model = o.Provider.Model
+		}
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: model,
+		}}, nil
+	}
+	h := newHarness(t, deps)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var created NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	var selected SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: created.SessionID, ConfigID: configIDModel, Value: " vendor/model ",
+	}, &selected); err != nil {
+		t.Fatalf("set custom model: %v", err)
+	}
+	if got := selected.ConfigOptions[0].CurrentValue; got != "vendor/model" {
+		t.Fatalf("custom model = %q", got)
+	}
+	h.stop()
+	h = newHarness(t, deps)
+	defer h.stop()
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: created.SessionID}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "vendor/model" || !modelChoiceExists(option.Options, "vendor/model") {
+		t.Fatalf("loaded custom model option = %+v", option)
+	}
+}
+
+func TestACPModelDiscoveryFiltersProviderIncompatibleModels(t *testing.T) {
+	a := &Agent{deps: Deps{
+		ResolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Provider: config.ProviderProfile{
+				CatalogID: "opencode-go-anthropic-compatible", Model: "minimax-m3",
+			}}, nil
+		},
+		DiscoverModels: func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return []providermodeldiscovery.Model{{ID: "qwen3.7-plus"}, {ID: "claude-sonnet-4.5"}}, nil
+		},
+	}}
+	_, options, restricted, err := a.resolveModelChoices(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restricted || !modelChoiceExists(options, "qwen3.7-plus") || modelChoiceExists(options, "claude-sonnet-4.5") {
+		t.Fatalf("filtered model options = %+v, restricted=%v", options, restricted)
+	}
+}
+
+func TestACPModelDiscoveryHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a := &Agent{deps: Deps{
+		ResolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Provider: config.ProviderProfile{Model: "configured-model"}}, nil
+		},
+		DiscoverModels: func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, context.Canceled
+		},
+	}}
+	if _, _, _, err := a.resolveModelChoices(ctx, t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolve error = %v, want context canceled", err)
 	}
 }
 

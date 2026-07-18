@@ -142,7 +142,7 @@ func defaultDiscoverProviderModels(ctx context.Context, profile config.ProviderP
 	return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{
 		OAuthResolver:        resolver,
 		CodexAccountResolver: providers.CodexAccountResolverForLogin(loginKey),
-		UserAgent:            "zero",
+		UserAgent:            userAgent(),
 	})
 }
 
