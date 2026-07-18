@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -159,12 +160,10 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 //     once the Windows deny-read model is settled.
 //   - A candidate nested under a user-configured AllowRead entry is dropped,
 //     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
-//   - Candidates are emitted whether or not they currently exist on disk: a
-//     rule installed only for stores present at profile-build time would miss
-//     a store created later in a long-lived sandboxed session (e.g. `zero
-//     auth login` run concurrently), and every backend already treats a deny
-//     rule over a not-yet-existing path as a harmless no-op that still takes
-//     effect once the path appears.
+//   - Candidates are emitted whether or not they currently exist on disk so
+//     backends that support future-path rules can protect stores created later.
+//     The Linux bwrap backend drops missing mount targets because it cannot
+//     safely create them beneath its read-only root.
 //
 // These are profile-level rules only; they are intentionally NOT merged into
 // Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and
@@ -176,7 +175,7 @@ func credentialDenyReadPaths(policy Policy) []string {
 	// Failed home/config lookups only drop their derived candidates; explicit
 	// credential-file overrides are still submitted as candidates regardless.
 	home, _ := os.UserHomeDir()
-	configDir, _ := zeroUserConfigDir()
+	configDir, _ := zeroCredentialConfigDir()
 	return credentialDenyReadPathsIn(credentialPathOptions{
 		Home:              home,
 		GoogleCredentials: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
@@ -208,7 +207,7 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	if target := strings.TrimSpace(options.GoogleCredentials); target != "" {
 		candidates = append(candidates, target)
 	}
-	if configDir := strings.TrimSpace(options.ZeroConfigDir); configDir != "" {
+	if configDir := resolveCredentialOverridePath(options.ZeroConfigDir); configDir != "" {
 		// Deny the whole directory rather than an itemized file list. Zero's
 		// credential/token/config stores each publish through a randomly-named
 		// sibling before an atomic rename (oauth-tokens.json.tmp-<pid>-<nanos>,
@@ -218,10 +217,11 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// with those names. Nothing else has a legitimate reason to live here.
 		candidates = append(candidates, filepath.Join(configDir, "zero"))
 	}
-	for _, override := range []string{options.OAuthTokens, options.MCPOAuthTokens} {
-		if tokenPath := resolveCredentialOverridePath(override); tokenPath != "" {
-			candidates = append(candidates, tokenPath, tokenPath+".secret")
-		}
+	if tokenPath := resolveCredentialOverridePath(options.OAuthTokens); tokenPath != "" {
+		candidates = append(candidates, tokenPath, tokenPath+".secret")
+	}
+	if tokenPath := resolveCredentialOverridePath(options.MCPOAuthTokens); tokenPath != "" {
+		candidates = append(candidates, tokenPath, tokenPath+".secret", tokenPath+".migrated")
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))
@@ -255,14 +255,24 @@ func resolveCredentialOverridePath(override string) string {
 	if override == "" {
 		return ""
 	}
-	if filepath.IsAbs(override) {
-		return filepath.Clean(override)
-	}
 	abs, err := filepath.Abs(override)
 	if err != nil {
 		return ""
 	}
-	return filepath.Clean(abs)
+	return abs
+}
+
+// zeroCredentialConfigDir follows the OAuth stores' literal XDG resolution.
+// In particular, "~/config" is relative syntax to those stores, not a request
+// for shell-style home expansion.
+func zeroCredentialConfigDir() (string, error) {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		if resolved := resolveCredentialOverridePath(xdg); resolved != "" {
+			return resolved, nil
+		}
+		return "", fmt.Errorf("resolve XDG_CONFIG_HOME %q", xdg)
+	}
+	return zeroUserConfigDir()
 }
 
 // zeroUserConfigDir mirrors config.UserConfigDir without importing config

@@ -416,7 +416,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		MCPOAuthTokens:    mcpOverride,
 	}
 	paths := credentialDenyReadPathsIn(options, nil)
-	wantPaths := []string{awsDir, gcloudDir, keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret", zeroDir}
+	wantPaths := []string{awsDir, gcloudDir, keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret", mcpOverride + ".migrated", zeroDir}
 	for _, want := range normalizeProfilePaths(wantPaths) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
@@ -490,6 +490,31 @@ func TestCredentialDenyReadPathsInOverrideMatchesStoreResolution(t *testing.T) {
 		if tildeExpanded != storeResolved && stringSliceContains(paths, tildeExpanded) {
 			t.Errorf("credential deny paths = %#v, must not deny the tilde-expanded %q instead of what the store resolves to (home %q)", paths, tildeExpanded, home)
 		}
+	}
+}
+
+func TestCredentialDenyReadPathsInConfigDirMatchesLiteralXDGResolution(t *testing.T) {
+	configDir := "~/literal-xdg"
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	resolvedConfigDir, err := zeroCredentialConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := credentialDenyReadPathsIn(credentialPathOptions{ZeroConfigDir: resolvedConfigDir}, nil)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(cwd, configDir, "zero")
+	if resolvedConfigDir != filepath.Dir(want) {
+		t.Fatalf("zero credential config dir = %q, want literal XDG resolution %q", resolvedConfigDir, filepath.Dir(want))
+	}
+	if !stringSliceContains(paths, want) {
+		t.Fatalf("credential deny paths = %#v, want literal XDG resolution %q", paths, want)
+	}
+	if expanded := normalizeProfilePaths([]string{filepath.Join(configDir, "zero")})[0]; expanded != want && stringSliceContains(paths, expanded) {
+		t.Fatalf("credential deny paths = %#v, must not use tilde-expanded XDG path %q", paths, expanded)
 	}
 }
 

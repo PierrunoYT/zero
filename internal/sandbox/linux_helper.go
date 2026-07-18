@@ -305,10 +305,10 @@ func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
 	if path == "" {
 		return args
 	}
-	if pathExists(path) {
-		return append(args, "--ro-bind", path, path)
+	if _, err := os.Stat(path); err != nil {
+		return args
 	}
-	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
+	return append(args, "--ro-bind", path, path)
 }
 
 func appendUnreadableLinuxPathArgs(args []string, path string) []string {
@@ -316,7 +316,11 @@ func appendUnreadableLinuxPathArgs(args []string, path string) []string {
 	if path == "" {
 		return args
 	}
-	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+	info, err := os.Stat(path)
+	if err != nil {
+		return args
+	}
+	if !info.IsDir() {
 		return append(args, "--ro-bind", "/dev/null", path)
 	}
 	return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)

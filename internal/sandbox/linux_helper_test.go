@@ -196,6 +196,33 @@ func TestLinuxBwrapRootReadUsesReadOnlyHostRoot(t *testing.T) {
 	}
 }
 
+func TestLinuxBwrapPathCarveoutsSkipMissingMountTargets(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "missing", "nested")
+	if got := appendReadOnlyLinuxPathArgs(nil, missing); len(got) != 0 {
+		t.Fatalf("missing read-only target args = %#v, want none", got)
+	}
+	if got := appendUnreadableLinuxPathArgs(nil, missing); len(got) != 0 {
+		t.Fatalf("missing deny-read target args = %#v, want none", got)
+	}
+	if _, err := os.Stat(filepath.Dir(missing)); !os.IsNotExist(err) {
+		t.Fatalf("building carveouts materialized a host path: %v", err)
+	}
+
+	deniedDir := filepath.Join(root, "denied")
+	if err := os.Mkdir(deniedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	assertArgsContainSequence(t, appendUnreadableLinuxPathArgs(nil, deniedDir), "--perms", "000", "--tmpfs", deniedDir, "--remount-ro", deniedDir)
+
+	deniedFile := filepath.Join(root, "secret.json")
+	if err := os.WriteFile(deniedFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertArgsContainSequence(t, appendUnreadableLinuxPathArgs(nil, deniedFile), "--ro-bind", "/dev/null", deniedFile)
+	assertArgsContainSequence(t, appendReadOnlyLinuxPathArgs(nil, deniedFile), "--ro-bind", deniedFile, deniedFile)
+}
+
 func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Linux bwrap temp root assertions use Unix paths")

@@ -4,6 +4,8 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,8 +38,13 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("Mkdir blocked: %v", err)
 	}
 
+	missingDenied := fmt.Sprintf("/etc/zero-sandbox-missing-%d-%d/nested", os.Getpid(), time.Now().UnixNano())
+	if _, err := os.Stat(filepath.Dir(missingDenied)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing deny-path precondition failed: %v", err)
+	}
+
 	policy := DefaultPolicy()
-	policy.DenyRead = []string{secretDir}
+	policy.DenyRead = []string{secretDir, missingDenied}
 	policy.DenyWrite = []string{blockedDir}
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: backend})
 	output, runErr := runLinuxSandboxSmokeCommand(t, engine, CommandSpec{
@@ -57,6 +64,9 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 			t.Skipf("Linux sandbox launch is unsupported in this environment: %v\n%s", runErr, output)
 		}
 		t.Fatalf("allowed smoke command failed: %v\n%s", runErr, output)
+	}
+	if _, err := os.Stat(filepath.Dir(missingDenied)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sandbox launch materialized missing deny path on host: %v", err)
 	}
 
 	for _, tc := range []struct {

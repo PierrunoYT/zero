@@ -10,7 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
-// TestZeroUserConfigDirMatchesConfigUserConfigDir guards against silent drift
+// TestZeroUserConfigDirMatchesConfigUserConfigDir prevents silent drift
 // between sandbox.zeroUserConfigDir and config.UserConfigDir. The sandbox copy
 // exists only to avoid an import cycle (config already depends on sandbox); if
 // the two diverge, deny rules would target a different directory than the
