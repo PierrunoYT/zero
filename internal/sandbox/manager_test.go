@@ -383,8 +383,13 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyFile := filepath.Join(home, "sa-key.json")
-	oauthOverride := filepath.Join(home, "custom-oauth.json")
-	mcpOverride := filepath.Join(home, "custom-mcp-oauth.json")
+	oauthDir := filepath.Join(home, "oauth-store")
+	mcpDir := filepath.Join(home, "mcp-store")
+	if err := mkdirAll(oauthDir, mcpDir); err != nil {
+		t.Fatal(err)
+	}
+	oauthOverride := filepath.Join(oauthDir, "tokens.json")
+	mcpOverride := filepath.Join(mcpDir, "tokens.json")
 	// The migrated legacy MCP token backup and the atomic-write temp siblings
 	// every store publishes before its rename; none of these are itemized by
 	// name, so they only stay protected if the whole zeroDir is denied.
@@ -416,7 +421,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		MCPOAuthTokens:    mcpOverride,
 	}
 	paths := credentialDenyReadPathsIn(options, nil)
-	wantPaths := []string{awsDir, gcloudDir, keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret", mcpOverride + ".migrated", zeroDir}
+	wantPaths := []string{awsDir, gcloudDir, keyFile, oauthDir, mcpDir, zeroDir}
 	for _, want := range normalizeProfilePaths(wantPaths) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
@@ -470,43 +475,44 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 // / mcp.ResolveTokenStorePath never expand "~"; they resolve a relative
 // override literally against the working directory), leaving the real file
 // unprotected.
-func TestCredentialDenyReadPathsInOverrideMatchesStoreResolution(t *testing.T) {
+func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
+	commandDir := t.TempDir()
 	override := "~/relative-tilde-tokens.json"
-	options := credentialPathOptions{OAuthTokens: override, MCPOAuthTokens: override}
+	options := credentialPathOptionsFromEnvironment(commandDir, []string{
+		"HOME=",
+		"USERPROFILE=" + filepath.Join(commandDir, "profile-home"),
+		"XDG_CONFIG_HOME=~/literal-xdg",
+		"ZERO_OAUTH_TOKENS_PATH=" + override,
+		"ZERO_MCP_OAUTH_TOKENS_PATH=mcp/tokens.json",
+	})
 	paths := credentialDenyReadPathsIn(options, nil)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
+	wantHome := filepath.Join(commandDir, "profile-home")
+	if options.Home != wantHome {
+		t.Fatalf("home = %q, want USERPROFILE fallback %q", options.Home, wantHome)
 	}
-	storeResolved := filepath.Clean(filepath.Join(cwd, override))
-	if !stringSliceContains(paths, storeResolved) {
-		t.Errorf("credential deny paths = %#v, want the store's literal resolution %q included", paths, storeResolved)
+	wantConfig := filepath.Join(commandDir, "~", "literal-xdg")
+	if options.ZeroConfigDir != wantConfig {
+		t.Fatalf("config dir = %q, want command-relative literal XDG path %q", options.ZeroConfigDir, wantConfig)
 	}
-
-	home, err := os.UserHomeDir()
-	if err == nil {
-		tildeExpanded := normalizeProfilePaths([]string{override})[0]
-		if tildeExpanded != storeResolved && stringSliceContains(paths, tildeExpanded) {
-			t.Errorf("credential deny paths = %#v, must not deny the tilde-expanded %q instead of what the store resolves to (home %q)", paths, tildeExpanded, home)
+	for _, want := range []string{
+		filepath.Join(wantConfig, "zero"),
+		filepath.Join(commandDir, "~"),
+		filepath.Join(commandDir, "mcp"),
+	} {
+		if !stringSliceContains(paths, want) {
+			t.Errorf("credential deny paths = %#v, want command-relative root %q", paths, want)
 		}
 	}
 }
 
 func TestCredentialDenyReadPathsInConfigDirMatchesLiteralXDGResolution(t *testing.T) {
 	configDir := "~/literal-xdg"
-	t.Setenv("XDG_CONFIG_HOME", configDir)
-	resolvedConfigDir, err := zeroCredentialConfigDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	commandDir := t.TempDir()
+	resolvedConfigDir := credentialPathOptionsFromEnvironment(commandDir, []string{"XDG_CONFIG_HOME=" + configDir}).ZeroConfigDir
 	paths := credentialDenyReadPathsIn(credentialPathOptions{ZeroConfigDir: resolvedConfigDir}, nil)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(cwd, configDir, "zero")
+	want := filepath.Join(commandDir, configDir, "zero")
 	if resolvedConfigDir != filepath.Dir(want) {
 		t.Fatalf("zero credential config dir = %q, want literal XDG resolution %q", resolvedConfigDir, filepath.Dir(want))
 	}
@@ -515,6 +521,37 @@ func TestCredentialDenyReadPathsInConfigDirMatchesLiteralXDGResolution(t *testin
 	}
 	if expanded := normalizeProfilePaths([]string{filepath.Join(configDir, "zero")})[0]; expanded != want && stringSliceContains(paths, expanded) {
 		t.Fatalf("credential deny paths = %#v, must not use tilde-expanded XDG path %q", paths, expanded)
+	}
+}
+
+func TestBuildCommandPlanUsesCommandCredentialContext(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	workspace := t.TempDir()
+	commandDir := filepath.Join(workspace, "nested")
+	if err := os.MkdirAll(commandDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Backend:       Backend{Name: BackendUnavailable, Platform: runtime.GOOS},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "true",
+		Dir:  commandDir,
+		Env: []string{
+			"HOME=" + filepath.Join(workspace, "home"),
+			"ZERO_OAUTH_TOKENS_PATH=credentials/tokens.json",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(commandDir, "credentials")
+	if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, want command-relative override parent %q", plan.PermissionProfile.FileSystem.DenyRead, want)
 	}
 }
 

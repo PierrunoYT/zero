@@ -6,57 +6,109 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
-// TestZeroUserConfigDirMatchesConfigUserConfigDir prevents silent drift
-// between sandbox.zeroUserConfigDir and config.UserConfigDir. The sandbox copy
-// exists only to avoid an import cycle (config already depends on sandbox); if
-// the two diverge, deny rules would target a different directory than the
-// stores write to.
-func TestZeroUserConfigDirMatchesConfigUserConfigDir(t *testing.T) {
-	t.Run("default", func(t *testing.T) {
-		assertUserConfigDirParity(t)
+func TestCredentialDeniesMatchTokenStoreFallbacks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	workspace := t.TempDir()
+	profileHome := filepath.Join(workspace, "profile-home")
+	envMap := map[string]string{"HOME": "", "USERPROFILE": profileHome, "XDG_CONFIG_HOME": ""}
+	oauthPath, err := oauth.ResolveStorePath(envMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpPath, err := mcp.ResolveTokenStorePath(envMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Platform: runtime.GOOS},
 	})
-
-	t.Run("xdg_override", func(t *testing.T) {
-		xdg := t.TempDir()
-		t.Setenv("XDG_CONFIG_HOME", xdg)
-		assertUserConfigDirParity(t)
+	plan, err := engine.BuildCommandPlan(sandbox.CommandSpec{
+		Name: "true",
+		Dir:  workspace,
+		Env:  []string{"HOME=", "USERPROFILE=" + profileHome, "XDG_CONFIG_HOME="},
 	})
-
-	t.Run("xdg_cleared", func(t *testing.T) {
-		t.Setenv("XDG_CONFIG_HOME", "")
-		assertUserConfigDirParity(t)
-		if runtime.GOOS == "darwin" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := filepath.Join(home, ".config")
-			got, err := sandbox.ZeroUserConfigDir()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != want {
-				t.Fatalf("zeroUserConfigDir() = %q, want macOS ~/.config fallback %q", got, want)
-			}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, storePath := range []string{oauthPath, mcpPath} {
+		want := filepath.Dir(storePath)
+		if !containsPath(plan.PermissionProfile.FileSystem.DenyRead, want) {
+			t.Fatalf("DenyRead = %#v, want token-store root %q", plan.PermissionProfile.FileSystem.DenyRead, want)
 		}
-	})
+	}
 }
 
-func assertUserConfigDirParity(t *testing.T) {
-	t.Helper()
-	want, err := config.UserConfigDir()
+func TestCredentialDeniesMatchRelativeTokenOverridesAtCommandDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows credential deny-read is tracked separately")
+	}
+	workspace := t.TempDir()
+	commandDir := filepath.Join(workspace, "nested")
+	if err := os.MkdirAll(commandDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalDir, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("config.UserConfigDir: %v", err)
+		t.Fatal(err)
 	}
-	got, err := sandbox.ZeroUserConfigDir()
+	if err := os.Chdir(commandDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(originalDir) }()
+
+	envMap := map[string]string{
+		"HOME":                       filepath.Join(workspace, "home"),
+		"ZERO_OAUTH_TOKENS_PATH":     "oauth/tokens.json",
+		"ZERO_MCP_OAUTH_TOKENS_PATH": "mcp/tokens.json",
+	}
+	oauthPath, err := oauth.ResolveStorePath(envMap)
 	if err != nil {
-		t.Fatalf("sandbox.ZeroUserConfigDir: %v", err)
+		t.Fatal(err)
 	}
-	if got != want {
-		t.Fatalf("sandbox.ZeroUserConfigDir() = %q, config.UserConfigDir() = %q", got, want)
+	mcpPath, err := mcp.ResolveTokenStorePath(envMap)
+	if err != nil {
+		t.Fatal(err)
 	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Platform: runtime.GOOS},
+	})
+	plan, err := engine.BuildCommandPlan(sandbox.CommandSpec{
+		Name: "true",
+		Dir:  commandDir,
+		Env: []string{
+			"HOME=" + envMap["HOME"],
+			"ZERO_OAUTH_TOKENS_PATH=" + envMap["ZERO_OAUTH_TOKENS_PATH"],
+			"ZERO_MCP_OAUTH_TOKENS_PATH=" + envMap["ZERO_MCP_OAUTH_TOKENS_PATH"],
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, storePath := range []string{oauthPath, mcpPath} {
+		want := filepath.Dir(storePath)
+		if !containsPath(plan.PermissionProfile.FileSystem.DenyRead, want) {
+			t.Fatalf("DenyRead = %#v, want override publication root %q", plan.PermissionProfile.FileSystem.DenyRead, want)
+		}
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
+			return true
+		}
+	}
+	return false
 }

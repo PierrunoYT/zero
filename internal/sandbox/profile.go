@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -60,8 +59,8 @@ var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
 // gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
 // under the OS-level sandbox even though the rest of .git is writable to git
-// subprocesses. Nonexistent paths are harmless no-ops in every backend's
-// enforcement (seatbelt regex, bwrap ro-bind, Windows ACL deny entry).
+// subprocesses. Backends must either enforce these paths or fail closed when a
+// missing target cannot be represented safely.
 func gitMetadataWriteCarveouts(root string) []string {
 	return []string{
 		filepath.Join(root, ".git", "hooks"),
@@ -74,6 +73,11 @@ func DefaultPermissionProfile(workspaceRoot string) PermissionProfile {
 }
 
 func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope) PermissionProfile {
+	baseDir, _ := os.Getwd()
+	return permissionProfileFromPolicy(workspaceRoot, policy, scope, baseDir, nil)
+}
+
+func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Scope, credentialBaseDir string, credentialEnv []string) PermissionProfile {
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}
@@ -90,19 +94,21 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	}
 	readRoots := permissionProfileReadRoots(workspaceRoot, policy, scope, roots)
 	writeRoots := make([]WritableRoot, 0, len(roots))
+	tempRoots := defaultTempWriteRoots()
 	for _, root := range roots {
-		writeRoots = append(writeRoots, WritableRoot{
-			Root:                   root,
-			ReadOnlySubpaths:       gitMetadataWriteCarveouts(root),
-			ProtectedMetadataNames: append([]string{}, sandboxFullyProtectedMetadataNames...),
-		})
+		writable := WritableRoot{Root: root}
+		if !profilePathInList(tempRoots, root) {
+			writable.ReadOnlySubpaths = gitMetadataWriteCarveouts(root)
+			writable.ProtectedMetadataNames = append([]string{}, sandboxFullyProtectedMetadataNames...)
+		}
+		writeRoots = append(writeRoots, writable)
 	}
 	return PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:                 FileSystemRestricted,
 			ReadRoots:            readRoots,
 			WriteRoots:           writeRoots,
-			DenyRead:             dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy)...)),
+			DenyRead:             dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy, credentialBaseDir, credentialEnv)...)),
 			DenyWrite:            normalizeProfilePaths(policy.DenyWrite),
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
@@ -162,27 +168,66 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 //     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
 //   - Candidates are emitted whether or not they currently exist on disk so
 //     backends that support future-path rules can protect stores created later.
-//     The Linux bwrap backend drops missing mount targets because it cannot
-//     safely create them beneath its read-only root.
+//     Linux fails closed before launching when a missing path cannot be mounted.
 //
 // These are profile-level rules only; they are intentionally NOT merged into
 // Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and
 // must keep reflecting user configuration alone.
-func credentialDenyReadPaths(policy Policy) []string {
+func credentialDenyReadPaths(policy Policy, baseDir string, commandEnv []string) []string {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	// Failed home/config lookups only drop their derived candidates; explicit
-	// credential-file overrides are still submitted as candidates regardless.
-	home, _ := os.UserHomeDir()
-	configDir, _ := zeroCredentialConfigDir()
-	return credentialDenyReadPathsIn(credentialPathOptions{
+	options := credentialPathOptionsFromEnvironment(baseDir, commandEnv)
+	return credentialDenyReadPathsIn(options, policy.AllowRead)
+}
+
+func profilePathInList(paths []string, want string) bool {
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialPathOptionsFromEnvironment(baseDir string, commandEnv []string) credentialPathOptions {
+	env := commandEnv
+	if env == nil {
+		env = os.Environ()
+	}
+	home := strings.TrimSpace(credentialEnvValue(env, "HOME"))
+	if home == "" {
+		home = strings.TrimSpace(credentialEnvValue(env, "USERPROFILE"))
+	}
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	home = resolveCredentialOverridePath(home, baseDir)
+	configDir := strings.TrimSpace(credentialEnvValue(env, "XDG_CONFIG_HOME"))
+	if configDir == "" && home != "" {
+		configDir = filepath.Join(home, ".config")
+	} else {
+		configDir = resolveCredentialOverridePath(configDir, baseDir)
+	}
+	return credentialPathOptions{
 		Home:              home,
-		GoogleCredentials: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+		GoogleCredentials: resolveCredentialOverridePath(credentialEnvValue(env, "GOOGLE_APPLICATION_CREDENTIALS"), baseDir),
 		ZeroConfigDir:     configDir,
-		OAuthTokens:       os.Getenv("ZERO_OAUTH_TOKENS_PATH"),
-		MCPOAuthTokens:    os.Getenv("ZERO_MCP_OAUTH_TOKENS_PATH"),
-	}, policy.AllowRead)
+		OAuthTokens:       resolveCredentialOverridePath(credentialEnvValue(env, "ZERO_OAUTH_TOKENS_PATH"), baseDir),
+		MCPOAuthTokens:    resolveCredentialOverridePath(credentialEnvValue(env, "ZERO_MCP_OAUTH_TOKENS_PATH"), baseDir),
+	}
+}
+
+func credentialEnvValue(env []string, key string) string {
+	value := ""
+	for _, entry := range env {
+		name, candidate, ok := strings.Cut(entry, "=")
+		if ok && name == key {
+			value = candidate
+		}
+	}
+	return value
 }
 
 type credentialPathOptions struct {
@@ -207,7 +252,7 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 	if target := strings.TrimSpace(options.GoogleCredentials); target != "" {
 		candidates = append(candidates, target)
 	}
-	if configDir := resolveCredentialOverridePath(options.ZeroConfigDir); configDir != "" {
+	if configDir := strings.TrimSpace(options.ZeroConfigDir); configDir != "" {
 		// Deny the whole directory rather than an itemized file list. Zero's
 		// credential/token/config stores each publish through a randomly-named
 		// sibling before an atomic rename (oauth-tokens.json.tmp-<pid>-<nanos>,
@@ -217,11 +262,14 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		// with those names. Nothing else has a legitimate reason to live here.
 		candidates = append(candidates, filepath.Join(configDir, "zero"))
 	}
-	if tokenPath := resolveCredentialOverridePath(options.OAuthTokens); tokenPath != "" {
-		candidates = append(candidates, tokenPath, tokenPath+".secret")
+	if tokenPath := strings.TrimSpace(options.OAuthTokens); tokenPath != "" {
+		// File and key writes use random atomic-publication siblings. Protecting
+		// the configured parent is the only exact-path rule that covers every
+		// sibling without a race; callers should use a credential-dedicated dir.
+		candidates = append(candidates, filepath.Dir(tokenPath))
 	}
-	if tokenPath := resolveCredentialOverridePath(options.MCPOAuthTokens); tokenPath != "" {
-		candidates = append(candidates, tokenPath, tokenPath+".secret", tokenPath+".migrated")
+	if tokenPath := strings.TrimSpace(options.MCPOAuthTokens); tokenPath != "" {
+		candidates = append(candidates, filepath.Dir(tokenPath))
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))
@@ -250,48 +298,23 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 // where the store actually writes — e.g. ZERO_OAUTH_TOKENS_PATH=~/x resolves
 // to <cwd>/~/x on disk (the store never expands "~"), but normalizeProfilePath
 // would deny $HOME/x instead, leaving the real file unprotected.
-func resolveCredentialOverridePath(override string) string {
+func resolveCredentialOverridePath(override string, baseDir string) string {
 	override = strings.TrimSpace(override)
 	if override == "" {
 		return ""
 	}
-	abs, err := filepath.Abs(override)
-	if err != nil {
-		return ""
+	if filepath.IsAbs(override) {
+		return filepath.Clean(override)
 	}
-	return abs
-}
-
-// zeroCredentialConfigDir follows the OAuth stores' literal XDG resolution.
-// In particular, "~/config" is relative syntax to those stores, not a request
-// for shell-style home expansion.
-func zeroCredentialConfigDir() (string, error) {
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		if resolved := resolveCredentialOverridePath(xdg); resolved != "" {
-			return resolved, nil
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		var err error
+		baseDir, err = os.Getwd()
+		if err != nil {
+			return ""
 		}
-		return "", fmt.Errorf("resolve XDG_CONFIG_HOME %q", xdg)
 	}
-	return zeroUserConfigDir()
-}
-
-// zeroUserConfigDir mirrors config.UserConfigDir without importing config
-// (config depends on sandbox). On macOS Zero deliberately honors
-// XDG_CONFIG_HOME when set and falls back to ~/.config, instead of the
-// os.UserConfigDir default (~/Library/Application Support); everywhere else
-// it uses os.UserConfigDir.
-func zeroUserConfigDir() (string, error) {
-	if runtime.GOOS != "darwin" {
-		return os.UserConfigDir()
-	}
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		return xdg, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config"), nil
+	return filepath.Clean(filepath.Join(baseDir, override))
 }
 
 // userGitConfigReadPaths returns the user's global git config FILES so a

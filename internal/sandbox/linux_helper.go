@@ -160,7 +160,11 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 		"--new-session",
 		"--die-with-parent",
 	}
-	args = append(args, linuxBwrapFilesystemArgs(config.PermissionProfile)...)
+	filesystemArgs, err := linuxBwrapFilesystemArgs(config.PermissionProfile)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, filesystemArgs...)
 	if pathExists(helperPath) {
 		args = append(args, "--ro-bind", helperPath, helperPath)
 	}
@@ -188,7 +192,7 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 	return args, nil
 }
 
-func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
+func linuxBwrapFilesystemArgs(profile PermissionProfile) ([]string, error) {
 	fs := profile.FileSystem
 	if fs.Kind == FileSystemUnrestricted {
 		// Disabled filesystem policy means no write jail: expose the host root
@@ -200,7 +204,7 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 				args = append(args, "--bind", root.Root, root.Root)
 			}
 		}
-		return args
+		return args, nil
 	}
 
 	args := []string{}
@@ -228,19 +232,35 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 		}
 		args = append(args, "--bind", root.Root, root.Root)
 		for _, subpath := range root.ReadOnlySubpaths {
-			args = appendReadOnlyLinuxPathArgs(args, subpath)
+			var err error
+			args, err = appendReadOnlyLinuxPathArgs(args, subpath)
+			if err != nil {
+				return nil, err
+			}
 		}
 		for _, name := range root.ProtectedMetadataNames {
-			args = appendReadOnlyLinuxPathArgs(args, filepath.Join(root.Root, name))
+			var err error
+			args, err = appendReadOnlyLinuxPathArgs(args, filepath.Join(root.Root, name))
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, path := range fs.DenyWrite {
-		args = appendReadOnlyLinuxPathArgs(args, path)
+		var err error
+		args, err = appendReadOnlyLinuxPathArgs(args, path)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, path := range fs.DenyRead {
-		args = appendUnreadableLinuxPathArgs(args, path)
+		var err error
+		args, err = appendUnreadableLinuxPathArgs(args, path)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return args
+	return args, nil
 }
 
 func linuxWriteRootsWithTemp(fs FileSystemPolicy) []WritableRoot {
@@ -300,30 +320,30 @@ func linuxPlatformReadRoots() []string {
 	return roots
 }
 
-func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
+func appendReadOnlyLinuxPathArgs(args []string, path string) ([]string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return args
+		return args, nil
 	}
 	if _, err := os.Stat(path); err != nil {
-		return args
+		return nil, fmt.Errorf("cannot enforce Linux read-only path %q: %w", path, err)
 	}
-	return append(args, "--ro-bind", path, path)
+	return append(args, "--ro-bind", path, path), nil
 }
 
-func appendUnreadableLinuxPathArgs(args []string, path string) []string {
+func appendUnreadableLinuxPathArgs(args []string, path string) ([]string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return args
+		return args, nil
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return args
+		return nil, fmt.Errorf("cannot enforce Linux deny-read path %q: %w", path, err)
 	}
 	if !info.IsDir() {
-		return append(args, "--ro-bind", "/dev/null", path)
+		return append(args, "--ro-bind", "/dev/null", path), nil
 	}
-	return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
+	return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path), nil
 }
 
 func shouldUnshareLinuxNetwork(policy NetworkPolicy) bool {
