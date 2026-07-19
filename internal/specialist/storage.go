@@ -63,25 +63,17 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("specialist %q requires a system prompt", manifest.Metadata.Name)
 	}
 	content := FormatMarkdown(manifest)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Manifest{}, fmt.Errorf("create specialist directory: %w", err)
 	}
 	if input.Overwrite {
-		info, err := os.Lstat(path)
-		if err != nil && !os.IsNotExist(err) {
-			return Manifest{}, fmt.Errorf("inspect specialist file: %w", err)
+		if err := writeSpecialistAtomic(path, content); err != nil {
+			return Manifest{}, err
 		}
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return Manifest{}, fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
-		}
+		return manifest, nil
 	}
-	flags := os.O_WRONLY | os.O_CREATE
-	if input.Overwrite {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_EXCL
-	}
-	file, err := os.OpenFile(path, flags, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
 			return Manifest{}, fmt.Errorf("specialist already exists: %s", manifest.Metadata.Name)
@@ -96,6 +88,43 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("close specialist file: %w", err)
 	}
 	return manifest, nil
+}
+
+func writeSpecialistAtomic(path string, content string) (err error) {
+	temp, err := os.CreateTemp(filepath.Dir(path), ".specialist-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary specialist file: %w", err)
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+	}()
+
+	if err := temp.Chmod(0o600); err != nil {
+		return fmt.Errorf("set temporary specialist file permissions: %w", err)
+	}
+	if _, err := temp.WriteString(content); err != nil {
+		return fmt.Errorf("write temporary specialist file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		return fmt.Errorf("sync temporary specialist file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close temporary specialist file: %w", err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect specialist file: %w", err)
+	}
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace specialist file: %w", err)
+	}
+	return nil
 }
 
 func (storage *Storage) Delete(input DeleteInput) (string, error) {

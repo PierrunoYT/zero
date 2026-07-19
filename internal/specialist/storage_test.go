@@ -3,6 +3,7 @@ package specialist
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -87,5 +88,51 @@ func TestStorageCreateForceRejectsSymlink(t *testing.T) {
 	}
 	if string(data) != "outside" {
 		t.Fatalf("symlink target was modified: %q", string(data))
+	}
+	assertNoTemporarySpecialistFiles(t, userDir)
+}
+
+func TestStorageCreateForceAtomicallyReplacesFile(t *testing.T) {
+	userDir := t.TempDir()
+	path := filepath.Join(userDir, "safe.md")
+	if err := os.WriteFile(path, []byte("old content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storage := NewStorage(Paths{UserDir: userDir})
+
+	manifest, err := storage.Create(CreateInput{
+		Name:         "safe",
+		Description:  "Safe",
+		SystemPrompt: "new content",
+		Overwrite:    true,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), FormatMarkdown(manifest); got != want {
+		t.Fatalf("file content = %q, want %q", got, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
+		t.Fatalf("file permissions = %o, want 600", got)
+	}
+	assertNoTemporarySpecialistFiles(t, userDir)
+}
+
+func assertNoTemporarySpecialistFiles(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, ".specialist-*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary specialist files remain: %v", matches)
 	}
 }
