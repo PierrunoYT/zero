@@ -312,6 +312,101 @@ func TestClientNotificationHandlersPreserveOrder(t *testing.T) {
 	}
 }
 
+func TestClientNotificationBurstDoesNotBlockResponse(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	client := NewClient(clientReader, clientWriter)
+	defer client.Close()
+	defer serverWriter.Close()
+	defer clientWriter.Close()
+
+	handlerStarted := make(chan struct{})
+	handlerDone := make(chan error, 1)
+	client.SetNotificationHandler(func(method string, _ json.RawMessage) {
+		if method != "blocking" {
+			return
+		}
+		close(handlerStarted)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := client.Call(ctx, "workspace/applyEdit", nil)
+		handlerDone <- err
+	})
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(serverReader)
+		body, err := readMessage(reader)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		var request incomingMessage
+		if err := json.Unmarshal(body, &request); err != nil {
+			serverDone <- err
+			return
+		}
+		for i := 0; i < notificationQueueSize+1; i++ {
+			if err := writeMessage(serverWriter, map[string]any{
+				"jsonrpc": "2.0",
+				"method":  fmt.Sprintf("queued-%03d", i),
+			}); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+		serverDone <- writeMessage(serverWriter, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      request.ID,
+			"result":  nil,
+		})
+	}()
+
+	if err := writeMessage(serverWriter, map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "blocking",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocking notification handler did not start")
+	}
+	select {
+	case err := <-handlerDone:
+		if err != nil {
+			t.Fatalf("notification handler call failed under burst: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("notification burst blocked the response read loop")
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server failed: %v", err)
+	}
+}
+
+func TestClientNotificationOverflowDropsOldestInOrder(t *testing.T) {
+	client := &Client{notifyReady: make(chan struct{}, 1)}
+	for i := 0; i < notificationQueueSize+2; i++ {
+		client.enqueueNotification(notification{method: fmt.Sprintf("notification-%03d", i)})
+	}
+
+	for i := 2; i < notificationQueueSize+2; i++ {
+		notification, ok := client.dequeueNotification()
+		if !ok {
+			t.Fatalf("notification %d missing", i)
+		}
+		want := fmt.Sprintf("notification-%03d", i)
+		if notification.method != want {
+			t.Fatalf("notification = %q, want %q", notification.method, want)
+		}
+	}
+	if _, ok := client.dequeueNotification(); ok {
+		t.Fatal("notification queue exceeded its bound")
+	}
+}
+
 func TestClientRejectsCallsAfterClose(t *testing.T) {
 	clientReader, serverWriter := io.Pipe()
 	serverReader, clientWriter := io.Pipe()

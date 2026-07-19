@@ -32,7 +32,10 @@ type Client struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 	readErr   error
-	notify    chan notification
+
+	notifyMu    sync.Mutex
+	notifyQueue []notification
+	notifyReady chan struct{}
 }
 
 type notification struct {
@@ -89,10 +92,10 @@ type incomingMessage struct {
 // server process exits); call Close to stop using the client.
 func NewClient(r io.Reader, w io.Writer) *Client {
 	client := &Client{
-		writer:  w,
-		pending: make(map[int64]chan rpcResponse),
-		closed:  make(chan struct{}),
-		notify:  make(chan notification, notificationQueueSize),
+		writer:      w,
+		pending:     make(map[int64]chan rpcResponse),
+		closed:      make(chan struct{}),
+		notifyReady: make(chan struct{}, 1),
 	}
 	go client.notificationLoop()
 	go client.readLoop(bufio.NewReader(r))
@@ -176,11 +179,7 @@ func (c *Client) readLoop(reader *bufio.Reader) {
 			// required or the server can block waiting on it (e.g. registerCapability).
 			_ = c.write(outgoingReply{JSONRPC: "2.0", ID: msg.ID, Result: nil})
 		case msg.Method != "":
-			select {
-			case c.notify <- notification{method: msg.Method, params: msg.Params}:
-			case <-c.closed:
-				return
-			}
+			c.enqueueNotification(notification{method: msg.Method, params: msg.Params})
 		case hasID:
 			var id int64
 			if err := json.Unmarshal(msg.ID, &id); err == nil {
@@ -195,15 +194,51 @@ func (c *Client) notificationLoop() {
 		select {
 		case <-c.closed:
 			return
-		case notification := <-c.notify:
-			c.mu.Lock()
-			handler := c.handler
-			c.mu.Unlock()
-			if handler != nil {
-				handler(notification.method, notification.params)
+		case <-c.notifyReady:
+			for {
+				notification, ok := c.dequeueNotification()
+				if !ok {
+					break
+				}
+				c.mu.Lock()
+				handler := c.handler
+				c.mu.Unlock()
+				if handler != nil {
+					handler(notification.method, notification.params)
+				}
 			}
 		}
 	}
+}
+
+func (c *Client) enqueueNotification(item notification) {
+	c.notifyMu.Lock()
+	// Never block protocol reads: at capacity, retain the newest notifications
+	// and preserve their FIFO order by dropping the oldest queued item.
+	if len(c.notifyQueue) == notificationQueueSize {
+		copy(c.notifyQueue, c.notifyQueue[1:])
+		c.notifyQueue[len(c.notifyQueue)-1] = item
+	} else {
+		c.notifyQueue = append(c.notifyQueue, item)
+	}
+	c.notifyMu.Unlock()
+
+	select {
+	case c.notifyReady <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) dequeueNotification() (notification, bool) {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	if len(c.notifyQueue) == 0 {
+		return notification{}, false
+	}
+	item := c.notifyQueue[0]
+	c.notifyQueue[0] = notification{}
+	c.notifyQueue = c.notifyQueue[1:]
+	return item, true
 }
 
 func (c *Client) deliver(id int64, resp rpcResponse) {
