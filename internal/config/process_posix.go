@@ -30,7 +30,11 @@ func startCommandProcess(cmd *exec.Cmd) (*commandProcess, error) {
 	}
 
 	proc := &commandProcess{groupID: anchor.Process.Pid, anchor: anchor, anchorInput: anchorInput}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: proc.groupID}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	cmd.SysProcAttr.Pgid = proc.groupID
 	if err := cmd.Start(); err != nil {
 		proc.Close()
 		return nil, err

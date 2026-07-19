@@ -8,6 +8,28 @@ import (
 	"testing"
 )
 
+func TestCommandProcessPreservesSysProcAttr(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 0")
+	attr := &syscall.SysProcAttr{Pdeathsig: 0}
+	cmd.SysProcAttr = attr
+
+	proc, err := startCommandProcess(cmd)
+	if err != nil {
+		t.Fatalf("startCommandProcess: %v", err)
+	}
+	defer proc.Close()
+
+	if cmd.SysProcAttr != attr {
+		t.Fatal("startCommandProcess replaced SysProcAttr")
+	}
+	if !cmd.SysProcAttr.Setpgid || cmd.SysProcAttr.Pgid != proc.groupID {
+		t.Fatalf("process group = Setpgid %v, Pgid %d; want true, %d", cmd.SysProcAttr.Setpgid, cmd.SysProcAttr.Pgid, proc.groupID)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+}
+
 func TestCommandProcessRetainsGroupIdentityAfterProviderWait(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 7")
 	proc, err := startCommandProcess(cmd)
