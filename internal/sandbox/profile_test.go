@@ -41,8 +41,8 @@ func TestCredentialDeniesMatchTokenStoreFallbacks(t *testing.T) {
 	}
 	for _, storePath := range []string{oauthPath, mcpPath} {
 		want := filepath.Dir(storePath)
-		if !containsPath(plan.PermissionProfile.FileSystem.DenyRead, want) {
-			t.Fatalf("DenyRead = %#v, want token-store root %q", plan.PermissionProfile.FileSystem.DenyRead, want)
+		if !containsPath(plan.PermissionProfile.FileSystem.DenyReadIfExists, want) {
+			t.Fatalf("DenyReadIfExists = %#v, want token-store root %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, want)
 		}
 	}
 }
@@ -96,9 +96,8 @@ func TestCredentialDeniesMatchRelativeTokenOverridesAtCommandDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, storePath := range []string{oauthPath, mcpPath} {
-		want := filepath.Dir(storePath)
-		if !containsPath(plan.PermissionProfile.FileSystem.DenyRead, want) {
-			t.Fatalf("DenyRead = %#v, want override publication root %q", plan.PermissionProfile.FileSystem.DenyRead, want)
+		if !containsPath(plan.PermissionProfile.FileSystem.DenyReadIfExists, storePath) {
+			t.Fatalf("DenyReadIfExists = %#v, want override path %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, storePath)
 		}
 	}
 }

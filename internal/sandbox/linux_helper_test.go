@@ -246,6 +246,33 @@ func TestLinuxBwrapPathCarveoutsFailClosedForMissingMountTargets(t *testing.T) {
 	assertArgsContainSequence(t, args, "--ro-bind", deniedFile, deniedFile)
 }
 
+func TestLinuxBwrapSkipsMissingAutomaticBaselines(t *testing.T) {
+	root := t.TempDir()
+	missingCredential := filepath.Join(root, "home", ".config", "zero")
+	profile := PermissionProfile{FileSystem: FileSystemPolicy{
+		Kind:             FileSystemRestricted,
+		ReadRoots:        []string{string(filepath.Separator)},
+		WriteRoots:       []WritableRoot{{Root: root, ReadOnlySubpaths: []string{filepath.Join(root, ".git", "hooks")}, ProtectedMetadataNames: []string{".zero"}}},
+		DenyReadIfExists: []string{missingCredential},
+	}}
+
+	args, err := linuxBwrapFilesystemArgs(profile)
+	if err != nil {
+		t.Fatalf("missing automatic baselines must not abort launch: %v", err)
+	}
+	if stringSliceContains(args, missingCredential) {
+		t.Fatalf("missing automatic baseline unexpectedly emitted: %#v", args)
+	}
+	if err := os.MkdirAll(missingCredential, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args, err = linuxBwrapFilesystemArgs(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertArgsContainSequence(t, args, "--perms", "000", "--tmpfs", missingCredential, "--remount-ro", missingCredential)
+}
+
 func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Linux bwrap temp root assertions use Unix paths")
@@ -255,9 +282,6 @@ func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
 	workspace := filepath.Join(tmpdir, "workspace")
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatalf("MkdirAll workspace: %v", err)
-	}
-	if err := os.Mkdir(filepath.Join(workspace, ".git"), 0o755); err != nil {
-		t.Fatalf("Mkdir .git: %v", err)
 	}
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{

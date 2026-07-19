@@ -232,6 +232,9 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) ([]string, error) {
 		}
 		args = append(args, "--bind", root.Root, root.Root)
 		for _, subpath := range root.ReadOnlySubpaths {
+			if !pathExists(subpath) {
+				continue
+			}
 			var err error
 			args, err = appendReadOnlyLinuxPathArgs(args, subpath)
 			if err != nil {
@@ -239,8 +242,12 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) ([]string, error) {
 			}
 		}
 		for _, name := range root.ProtectedMetadataNames {
+			path := filepath.Join(root.Root, name)
+			if !pathExists(path) {
+				continue
+			}
 			var err error
-			args, err = appendReadOnlyLinuxPathArgs(args, filepath.Join(root.Root, name))
+			args, err = appendReadOnlyLinuxPathArgs(args, path)
 			if err != nil {
 				return nil, err
 			}
@@ -254,6 +261,16 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) ([]string, error) {
 		}
 	}
 	for _, path := range fs.DenyRead {
+		var err error
+		args, err = appendUnreadableLinuxPathArgs(args, path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, path := range fs.DenyReadIfExists {
+		if !pathExists(path) {
+			continue
+		}
 		var err error
 		args, err = appendUnreadableLinuxPathArgs(args, path)
 		if err != nil {

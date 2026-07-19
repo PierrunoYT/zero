@@ -354,7 +354,8 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
 		}
 	}
-	fs.DenyRead = dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy, credentialBaseDir, nil)...))
+	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
+	fs.DenyReadIfExists = credentialDenyReadPaths(policy, credentialBaseDir, nil)
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,
@@ -734,7 +735,7 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 }
 
 func denyReadRules(fs FileSystemPolicy) []string {
-	return denySeatbeltPathRules("file-read*", fs.DenyRead)
+	return denySeatbeltPathRules("file-read*", dedupeStrings(append(append([]string{}, fs.DenyRead...), fs.DenyReadIfExists...)))
 }
 
 func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {

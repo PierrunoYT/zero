@@ -561,10 +561,10 @@ func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, worksp
 			filepath.Join(emptyHome, ".config", "zero"),
 		}
 	}
-	if gotDenyRead := jsonStringSlice(fileSystem["denyRead"]); !reflect.DeepEqual(gotDenyRead, wantDenyRead) {
+	if gotDenyRead := jsonStringSlice(fileSystem["denyReadIfExists"]); !reflect.DeepEqual(gotDenyRead, wantDenyRead) {
 		t.Fatalf("manager credential deny baseline = %#v, want %#v", gotDenyRead, wantDenyRead)
 	}
-	delete(fileSystem, "denyRead")
+	delete(fileSystem, "denyReadIfExists")
 	fileSystem["readRoots"] = filterJSONStringRoots(fileSystem["readRoots"], tempRoots)
 	fileSystem["writeRoots"] = filterJSONWriteRoots(fileSystem["writeRoots"], tempRoots)
 	normalized, err := json.MarshalIndent(value, "", "  ")

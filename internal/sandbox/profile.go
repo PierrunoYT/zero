@@ -25,6 +25,7 @@ type FileSystemPolicy struct {
 	ReadRoots            []string             `json:"readRoots,omitempty"`
 	WriteRoots           []WritableRoot       `json:"writeRoots,omitempty"`
 	DenyRead             []string             `json:"denyRead,omitempty"`
+	DenyReadIfExists     []string             `json:"denyReadIfExists,omitempty"`
 	DenyWrite            []string             `json:"denyWrite,omitempty"`
 	IncludePlatformRoots bool                 `json:"includePlatformRoots,omitempty"`
 	AllowTemp            bool                 `json:"allowTemp,omitempty"`
@@ -59,8 +60,8 @@ var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 
 // gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
 // under the OS-level sandbox even though the rest of .git is writable to git
-// subprocesses. Backends must either enforce these paths or fail closed when a
-// missing target cannot be represented safely.
+// subprocesses. Backends enforce paths that exist when the sandbox starts;
+// unlike explicit deny rules, absent baseline metadata must not prevent launch.
 func gitMetadataWriteCarveouts(root string) []string {
 	return []string{
 		filepath.Join(root, ".git", "hooks"),
@@ -108,7 +109,8 @@ func permissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			Kind:                 FileSystemRestricted,
 			ReadRoots:            readRoots,
 			WriteRoots:           writeRoots,
-			DenyRead:             dedupeStrings(append(normalizeProfilePaths(policy.DenyRead), credentialDenyReadPaths(policy, credentialBaseDir, credentialEnv)...)),
+			DenyRead:             normalizeProfilePaths(policy.DenyRead),
+			DenyReadIfExists:     credentialDenyReadPaths(policy, credentialBaseDir, credentialEnv),
 			DenyWrite:            normalizeProfilePaths(policy.DenyWrite),
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
@@ -166,9 +168,9 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 //     once the Windows deny-read model is settled.
 //   - A candidate nested under a user-configured AllowRead entry is dropped,
 //     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
-//   - Candidates are emitted whether or not they currently exist on disk so
-//     backends that support future-path rules can protect stores created later.
-//     Linux fails closed before launching when a missing path cannot be mounted.
+//   - Candidates are emitted whether or not they currently exist on disk.
+//     Backends that support future-path rules enforce them immediately; Linux
+//     enforces the baseline paths that exist without making fresh homes unusable.
 //
 // These are profile-level rules only; they are intentionally NOT merged into
 // Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and
@@ -263,13 +265,20 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		candidates = append(candidates, filepath.Join(configDir, "zero"))
 	}
 	if tokenPath := strings.TrimSpace(options.OAuthTokens); tokenPath != "" {
-		// File and key writes use random atomic-publication siblings. Protecting
-		// the configured parent is the only exact-path rule that covers every
-		// sibling without a race; callers should use a credential-dedicated dir.
-		candidates = append(candidates, filepath.Dir(tokenPath))
+		// OAuth uses fixed same-directory publication paths so exact denies do not
+		// have to hide an arbitrary parent such as the workspace or /tmp.
+		candidates = append(candidates,
+			tokenPath,
+			tokenPath+".tmp",
+			tokenPath+".secret",
+			tokenPath+".secret.tmp",
+		)
 	}
 	if tokenPath := strings.TrimSpace(options.MCPOAuthTokens); tokenPath != "" {
-		candidates = append(candidates, filepath.Dir(tokenPath))
+		candidates = append(candidates,
+			tokenPath,
+			tokenPath+".migrated",
+		)
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates))

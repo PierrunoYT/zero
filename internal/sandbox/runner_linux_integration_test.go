@@ -26,11 +26,6 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".git", "hooks"), 0o755); err != nil {
 		t.Fatalf("Mkdir .git/hooks: %v", err)
 	}
-	for _, name := range []string{".zero", ".agents"} {
-		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
-			t.Fatalf("Mkdir %s: %v", name, err)
-		}
-	}
 	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte("[core]\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile .git/config: %v", err)
 	}
@@ -79,6 +74,21 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		}
 		t.Fatalf("allowed smoke command failed: %v\n%s", runErr, output)
 	}
+
+	t.Run("fresh home and non-git workspace launch", func(t *testing.T) {
+		freshRoot := t.TempDir()
+		freshHome := t.TempDir()
+		freshEngine := NewEngine(EngineOptions{WorkspaceRoot: freshRoot, Policy: DefaultPolicy(), Backend: backend})
+		output, runErr := runLinuxSandboxSmokeCommand(t, freshEngine, CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", "echo ok > launched"},
+			Dir:  freshRoot,
+			Env:  []string{"HOME=" + freshHome, "XDG_CONFIG_HOME=" + filepath.Join(freshHome, ".config")},
+		})
+		if runErr != nil {
+			t.Fatalf("fresh environment failed to launch: %v\n%s", runErr, output)
+		}
+	})
 
 	t.Run("missing protected path fails closed", func(t *testing.T) {
 		missingDenied := fmt.Sprintf("/etc/zero-sandbox-missing-%d-%d/nested", os.Getpid(), time.Now().UnixNano())

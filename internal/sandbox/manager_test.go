@@ -390,6 +390,14 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 	oauthOverride := filepath.Join(oauthDir, "tokens.json")
 	mcpOverride := filepath.Join(mcpDir, "tokens.json")
+	overrideFiles := []string{
+		oauthOverride,
+		oauthOverride + ".tmp",
+		oauthOverride + ".secret",
+		oauthOverride + ".secret.tmp",
+		mcpOverride,
+		mcpOverride + ".migrated",
+	}
 	// The migrated legacy MCP token backup and the atomic-write temp siblings
 	// every store publishes before its rename; none of these are itemized by
 	// name, so they only stay protected if the whole zeroDir is denied.
@@ -407,7 +415,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		filepath.Join(zeroDir, "credentials.enc.9-1.tmp"),
 		filepath.Join(zeroDir, ".zero-config-1.tmp"),
 	}
-	for _, path := range append([]string{keyFile, oauthOverride, oauthOverride + ".secret", mcpOverride, mcpOverride + ".secret"}, zeroFiles...) {
+	for _, path := range append(append([]string{keyFile}, overrideFiles...), zeroFiles...) {
 		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -421,7 +429,7 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 		MCPOAuthTokens:    mcpOverride,
 	}
 	paths := credentialDenyReadPathsIn(options, nil)
-	wantPaths := []string{awsDir, gcloudDir, keyFile, oauthDir, mcpDir, zeroDir}
+	wantPaths := append([]string{awsDir, gcloudDir, keyFile, zeroDir}, overrideFiles...)
 	for _, want := range normalizeProfilePaths(wantPaths) {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want %q included", paths, want)
@@ -497,8 +505,10 @@ func TestCredentialPathOptionsResolveAgainstCommandDirectory(t *testing.T) {
 	}
 	for _, want := range []string{
 		filepath.Join(wantConfig, "zero"),
-		filepath.Join(commandDir, "~"),
-		filepath.Join(commandDir, "mcp"),
+		filepath.Join(commandDir, override),
+		filepath.Join(commandDir, override) + ".tmp",
+		filepath.Join(commandDir, "mcp", "tokens.json"),
+		filepath.Join(commandDir, "mcp", "tokens.json.migrated"),
 	} {
 		if !stringSliceContains(paths, want) {
 			t.Errorf("credential deny paths = %#v, want command-relative root %q", paths, want)
@@ -549,9 +559,12 @@ func TestBuildCommandPlanUsesCommandCredentialContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(plan.Dir, "credentials")
-	if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyRead, want) {
-		t.Fatalf("DenyRead = %#v, want command-relative override parent %q", plan.PermissionProfile.FileSystem.DenyRead, want)
+	want := filepath.Join(plan.Dir, "credentials", "tokens.json")
+	if !stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, want) {
+		t.Fatalf("DenyReadIfExists = %#v, want command-relative override %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, want)
+	}
+	if stringSliceContains(plan.PermissionProfile.FileSystem.DenyReadIfExists, filepath.Dir(want)) {
+		t.Fatalf("DenyReadIfExists = %#v, must not mask override parent %q", plan.PermissionProfile.FileSystem.DenyReadIfExists, filepath.Dir(want))
 	}
 }
 
@@ -571,8 +584,8 @@ func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 	// credentials created later, not just ones present at profile-build time.
 	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
 	want := normalizeProfilePaths([]string{zeroDir})[0]
-	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
-		t.Fatalf("DenyRead = %#v, want Zero config directory %q even before it exists", profile.FileSystem.DenyRead, want)
+	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, want) {
+		t.Fatalf("DenyReadIfExists = %#v, want Zero config directory %q even before it exists", profile.FileSystem.DenyReadIfExists, want)
 	}
 
 	if err := os.MkdirAll(zeroDir, 0o700); err != nil {
@@ -594,7 +607,7 @@ func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 	// against a post-mkdir /private/var form).
 	profile = PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
 	want = normalizeProfilePaths([]string{zeroDir})[0]
-	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
-		t.Fatalf("DenyRead = %#v, want Zero config directory %q", profile.FileSystem.DenyRead, want)
+	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, want) {
+		t.Fatalf("DenyReadIfExists = %#v, want Zero config directory %q", profile.FileSystem.DenyReadIfExists, want)
 	}
 }
