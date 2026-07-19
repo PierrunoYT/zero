@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/fsutil"
 )
 
 type Storage struct {
@@ -90,7 +93,11 @@ func (storage *Storage) Create(input CreateInput) (Manifest, error) {
 	return manifest, nil
 }
 
-func writeSpecialistAtomic(path string, content string) (err error) {
+func writeSpecialistAtomic(path string, content string) error {
+	return writeSpecialistAtomicWith(path, content, nil, syncSpecialistDir)
+}
+
+func writeSpecialistAtomicWith(path string, content string, rename func(string, string) error, syncDir func(string) error) (err error) {
 	temp, err := os.CreateTemp(filepath.Dir(path), ".specialist-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary specialist file: %w", err)
@@ -121,10 +128,28 @@ func writeSpecialistAtomic(path string, content string) (err error) {
 	if err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing to overwrite symlink specialist file: %s", path)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	if err := fsutil.RenameWithRetry(tempPath, path, rename); err != nil {
 		return fmt.Errorf("replace specialist file: %w", err)
 	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync specialist directory: %w", err)
+	}
 	return nil
+}
+
+func syncSpecialistDir(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
 }
 
 func (storage *Storage) Delete(input DeleteInput) (string, error) {

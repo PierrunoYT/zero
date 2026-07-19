@@ -1,10 +1,12 @@
 package specialist
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -124,6 +126,55 @@ func TestStorageCreateForceAtomicallyReplacesFile(t *testing.T) {
 		t.Fatalf("file permissions = %o, want 600", got)
 	}
 	assertNoTemporarySpecialistFiles(t, userDir)
+}
+
+func TestWriteSpecialistAtomicRetriesTransientWindowsRename(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("rename retries are Windows-specific")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "safe.md")
+	if err := os.WriteFile(path, []byte("old content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	err := writeSpecialistAtomicWith(path, "new content", func(src, dst string) error {
+		attempts++
+		if attempts == 1 {
+			return syscall.Errno(32) // ERROR_SHARING_VIOLATION
+		}
+		return os.Rename(src, dst)
+	}, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("writeSpecialistAtomicWith returned error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("rename attempts = %d, want 2", attempts)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "new content" {
+		t.Fatalf("file content = %q, want %q", got, "new content")
+	}
+	assertNoTemporarySpecialistFiles(t, dir)
+}
+
+func TestWriteSpecialistAtomicPropagatesDirectorySyncError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "safe.md")
+	syncErr := errors.New("sync failed")
+	err := writeSpecialistAtomicWith(path, "new content", nil, func(got string) error {
+		if got != dir {
+			t.Fatalf("sync directory = %q, want %q", got, dir)
+		}
+		return syncErr
+	})
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("writeSpecialistAtomicWith error = %v, want %v", err, syncErr)
+	}
+	assertNoTemporarySpecialistFiles(t, dir)
 }
 
 func assertNoTemporarySpecialistFiles(t *testing.T, dir string) {
