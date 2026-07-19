@@ -10,7 +10,7 @@ import (
 
 func TestCommandProcessPreservesSysProcAttr(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0")
-	attr := &syscall.SysProcAttr{Pdeathsig: 0}
+	attr := &syscall.SysProcAttr{}
 	cmd.SysProcAttr = attr
 
 	proc, err := startCommandProcess(cmd)
