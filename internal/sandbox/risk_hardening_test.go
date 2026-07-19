@@ -299,14 +299,17 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 		`git fetch origin && "unterminated`,
 		`git pull origin main && "unterminated`,
 		`git push gitlawb://example.com/repo.git main && "unterminated`,
+		`git -C repo push gitlawb://example.com/repo.git main && "unterminated`,
 	} {
-		risk := classifyCommand(command)
-		if !HasRiskCategory(risk, "unparseable_command") {
-			t.Fatalf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
-		}
-		if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
-			t.Fatalf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
-		}
+		t.Run(command, func(t *testing.T) {
+			risk := classifyCommand(command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+			}
+			if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
+			}
+		})
 	}
 }
 
