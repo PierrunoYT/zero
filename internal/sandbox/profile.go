@@ -21,14 +21,17 @@ type PermissionProfile struct {
 }
 
 type FileSystemPolicy struct {
-	Kind                 FileSystemPolicyKind `json:"kind"`
-	ReadRoots            []string             `json:"readRoots,omitempty"`
-	WriteRoots           []WritableRoot       `json:"writeRoots,omitempty"`
-	DenyRead             []string             `json:"denyRead,omitempty"`
-	DenyReadIfExists     []string             `json:"denyReadIfExists,omitempty"`
-	DenyWrite            []string             `json:"denyWrite,omitempty"`
-	IncludePlatformRoots bool                 `json:"includePlatformRoots,omitempty"`
-	AllowTemp            bool                 `json:"allowTemp,omitempty"`
+	Kind       FileSystemPolicyKind `json:"kind"`
+	ReadRoots  []string             `json:"readRoots,omitempty"`
+	WriteRoots []WritableRoot       `json:"writeRoots,omitempty"`
+	DenyRead   []string             `json:"denyRead,omitempty"`
+	// DenyReadIfExists contains best-effort baseline paths. Backends with
+	// path-based policies can protect future paths; mount-based Linux only
+	// masks entries that exist when the namespace is assembled.
+	DenyReadIfExists     []string `json:"denyReadIfExists,omitempty"`
+	DenyWrite            []string `json:"denyWrite,omitempty"`
+	IncludePlatformRoots bool     `json:"includePlatformRoots,omitempty"`
+	AllowTemp            bool     `json:"allowTemp,omitempty"`
 }
 
 type WritableRoot struct {
@@ -61,7 +64,10 @@ var sandboxFullyProtectedMetadataNames = []string{".zero", ".agents"}
 // gitMetadataWriteCarveouts returns the .git subpaths that stay write-denied
 // under the OS-level sandbox even though the rest of .git is writable to git
 // subprocesses. Backends enforce paths that exist when the sandbox starts;
-// unlike explicit deny rules, absent baseline metadata must not prevent launch.
+// mount-based Linux cannot protect an absent child beneath a writable bind
+// without either creating it on the host or making its parent read-only, so an
+// absent baseline remains an acknowledged backend limitation rather than
+// preventing ordinary non-Git workspaces from launching.
 func gitMetadataWriteCarveouts(root string) []string {
 	return []string{
 		filepath.Join(root, ".git", "hooks"),
@@ -270,16 +276,20 @@ func credentialDenyReadPathsIn(options credentialPathOptions, allowRead []string
 		candidates = append(candidates,
 			tokenPath,
 			tokenPath+".tmp",
+			tokenPath+".lockfile",
 			tokenPath+".secret",
 			tokenPath+".secret.tmp",
+			tokenPath+".secret.lock",
 		)
 	}
 	if tokenPath := strings.TrimSpace(options.MCPOAuthTokens); tokenPath != "" {
 		candidates = append(candidates,
 			tokenPath,
 			tokenPath+".tmp",
+			tokenPath+".lockfile",
 			tokenPath+".secret",
 			tokenPath+".secret.tmp",
+			tokenPath+".secret.lock",
 			tokenPath+".migrated",
 		)
 	}

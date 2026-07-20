@@ -233,6 +233,9 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) ([]string, error) {
 		args = append(args, "--bind", root.Root, root.Root)
 		for _, subpath := range root.ReadOnlySubpaths {
 			if !pathExists(subpath) {
+				// Bubblewrap cannot mount over an absent child after binding a
+				// writable host root without creating that child on the host. Do not
+				// mutate the workspace merely to prepare the mount namespace.
 				continue
 			}
 			var err error
@@ -244,6 +247,8 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) ([]string, error) {
 		for _, name := range root.ProtectedMetadataNames {
 			path := filepath.Join(root.Root, name)
 			if !pathExists(path) {
+				// As above, an absent mount point cannot be represented without
+				// either changing the host or making the writable root read-only.
 				continue
 			}
 			var err error
@@ -269,6 +274,9 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) ([]string, error) {
 	}
 	for _, path := range fs.DenyReadIfExists {
 		if !pathExists(path) {
+			// The read-all profile begins with a read-only host-root bind. Bwrap
+			// cannot create a missing mount destination in that tree, and masking
+			// its nearest existing parent could hide a workspace, HOME, or /tmp.
 			continue
 		}
 		var err error

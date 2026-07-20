@@ -544,8 +544,10 @@ func TestSeatbeltCompatibilityProfileUsesCredentialEnvironment(t *testing.T) {
 	for _, want := range []string{
 		override,
 		override + ".tmp",
+		override + ".lockfile",
 		override + ".secret",
 		override + ".secret.tmp",
+		override + ".secret.lock",
 		override + ".migrated",
 	} {
 		if !stringSliceContains(profile.FileSystem.DenyReadIfExists, normalizeProfilePath(want)) {
