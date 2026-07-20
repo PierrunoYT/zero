@@ -111,7 +111,12 @@ func terminateCommand(cmd *exec.Cmd) error {
 	}
 
 	target := pid
-	if pgid, err := syscall.Getpgid(pid); err == nil {
+	// ConfigureChildProcessGroup records that the child leads a group whose ID
+	// is its PID. Use that launch-time fact directly: on Darwin Getpgid can
+	// return ESRCH once the leader exits even while descendants remain alive.
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		target = -pid
+	} else if pgid, err := syscall.Getpgid(pid); err == nil {
 		if pgid == pid {
 			target = -pid
 		}
