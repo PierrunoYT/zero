@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/background"
 )
 
 // isolateDaemonPaths points DefaultPaths at a temp dir so the test never touches
@@ -142,8 +144,7 @@ func TestWaitForDaemonReadinessChecksTimeoutBoundary(t *testing.T) {
 }
 
 func TestTerminateAndReapDaemonProcess(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=TestDaemonDetachedChildProcess")
-	cmd.Env = append(os.Environ(), "ZERO_TEST_DAEMON_DETACHED_CHILD=hang")
+	cmd := daemonDetachedChildCommand("hang")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper process: %v", err)
 	}
@@ -160,8 +161,7 @@ func TestTerminateAndReapDaemonProcess(t *testing.T) {
 }
 
 func TestStartAndAwaitDaemonProcessTimeoutTerminatesAndReaps(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=TestDaemonDetachedChildProcess")
-	cmd.Env = append(os.Environ(), "ZERO_TEST_DAEMON_DETACHED_CHILD=hang")
+	cmd := daemonDetachedChildCommand("hang")
 	if err := startAndAwaitDaemonProcess(cmd, func() bool { return false }, 0, time.Millisecond); !errors.Is(err, errDaemonStartTimeout) {
 		t.Fatalf("start and await error = %v, want timeout", err)
 	}
@@ -172,11 +172,7 @@ func TestStartAndAwaitDaemonProcessTimeoutTerminatesAndReaps(t *testing.T) {
 
 func TestStartAndAwaitDaemonProcessReleasesReadyChild(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "child-finished")
-	cmd := exec.Command(os.Args[0], "-test.run=TestDaemonDetachedChildProcess")
-	cmd.Env = append(os.Environ(),
-		"ZERO_TEST_DAEMON_DETACHED_CHILD=mark",
-		"ZERO_TEST_DAEMON_CHILD_MARKER="+marker,
-	)
+	cmd := daemonDetachedChildCommand("mark", "ZERO_TEST_DAEMON_CHILD_MARKER="+marker)
 	if err := startAndAwaitDaemonProcess(cmd, func() bool { return true }, time.Second, time.Millisecond); err != nil {
 		t.Fatalf("start and await ready helper: %v", err)
 	}
@@ -189,6 +185,14 @@ func TestStartAndAwaitDaemonProcessReleasesReadyChild(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("released helper process did not remain alive to write its marker")
+}
+
+func daemonDetachedChildCommand(mode string, extraEnv ...string) *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=TestDaemonDetachedChildProcess")
+	cmd.Env = append(os.Environ(), "ZERO_TEST_DAEMON_DETACHED_CHILD="+mode)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	background.ConfigureChildProcessGroup(cmd)
+	return cmd
 }
 
 func TestDaemonDetachedChildProcess(t *testing.T) {

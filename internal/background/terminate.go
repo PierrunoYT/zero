@@ -1,5 +1,7 @@
 package background
 
+import "os/exec"
+
 // TerminateProcess stops a background process by PID — on Windows its process
 // tree; on POSIX its whole process group when the PID leads its own group (the
 // invariant ConfigureChildProcessGroup establishes for processes started through
@@ -11,4 +13,11 @@ package background
 // not be recorded.
 func TerminateProcess(pid int) error {
 	return terminateProcess(pid)
+}
+
+// TerminateCommand stops a started command's process tree/group and reaps the
+// leader. Keeping both operations together lets platform implementations signal
+// the tree before Wait can discard the leader identity needed to find it.
+func TerminateCommand(cmd *exec.Cmd) error {
+	return terminateCommand(cmd)
 }

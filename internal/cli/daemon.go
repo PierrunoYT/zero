@@ -210,16 +210,7 @@ func waitForDaemonReadiness(reachable func() bool, timeout time.Duration, pollIn
 }
 
 func terminateAndReapDaemonProcess(cmd *exec.Cmd) error {
-	killErr := cmd.Process.Kill()
-	waitErr := cmd.Wait()
-	var exitErr *exec.ExitError
-	if waitErr == nil || errors.As(waitErr, &exitErr) {
-		return nil
-	}
-	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-		return fmt.Errorf("terminate daemon process: %w", killErr)
-	}
-	return fmt.Errorf("reap daemon process: %w", waitErr)
+	return background.TerminateCommand(cmd)
 }
 
 func runDaemonStop(args []string, stdout io.Writer, stderr io.Writer) int {

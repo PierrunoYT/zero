@@ -162,3 +162,46 @@ func TestTerminateProcessKillsForkedChildren(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestTerminateCommandKillsChildAfterLeaderExits(t *testing.T) {
+	grace, poll := terminationGracePeriod, terminationPollInterval
+	terminationGracePeriod, terminationPollInterval = 2*time.Second, 20*time.Millisecond
+	t.Cleanup(func() { terminationGracePeriod, terminationPollInterval = grace, poll })
+
+	// The leader exits immediately after launching the child. TerminateCommand
+	// must capture and signal the process group before Wait reaps the leader and
+	// makes its group identity unavailable.
+	cmd := exec.Command("sh", "-c", "sleep 300 & echo $!; exit 0")
+	ConfigureChildProcessGroup(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read forked child pid: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("parse forked child pid %q: %v", line, err)
+	}
+
+	if err := TerminateCommand(cmd); err != nil {
+		t.Fatalf("TerminateCommand: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if errors.Is(syscall.Kill(childPID, syscall.Signal(0)), syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+			t.Fatalf("forked child %d survived TerminateCommand", childPID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
