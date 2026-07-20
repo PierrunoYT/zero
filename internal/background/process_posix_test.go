@@ -147,13 +147,12 @@ func TestTerminateProcessKillsForkedChildren(t *testing.T) {
 		t.Fatalf("terminateProcess: %v", err)
 	}
 
-	// The forked child must be gone too (poll until reaped by init).
+	// The forked child must no longer be running. An orphaned zombie is already
+	// dead but may remain visible briefly until the platform's init reaps it.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		// Only ESRCH proves the child is gone; any other error (e.g. EPERM) would
-		// wrongly pass the test, so treat it as still-present and keep polling.
-		if errors.Is(syscall.Kill(childPID, syscall.Signal(0)), syscall.ESRCH) {
-			break // child no longer exists
+		if processStopped(childPID) {
+			break
 		}
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(childPID, syscall.SIGKILL)
@@ -195,7 +194,7 @@ func TestTerminateCommandKillsChildAfterLeaderExits(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if errors.Is(syscall.Kill(childPID, syscall.Signal(0)), syscall.ESRCH) {
+		if processStopped(childPID) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -204,4 +203,15 @@ func TestTerminateCommandKillsChildAfterLeaderExits(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func processStopped(pid int) bool {
+	if errors.Is(syscall.Kill(pid, syscall.Signal(0)), syscall.ESRCH) {
+		return true
+	}
+	state, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return errors.Is(syscall.Kill(pid, syscall.Signal(0)), syscall.ESRCH)
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
 }
