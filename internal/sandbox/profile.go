@@ -175,8 +175,9 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 //   - A candidate nested under a user-configured AllowRead entry is dropped,
 //     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
 //   - Candidates are emitted whether or not they currently exist on disk.
-//     Backends that support future-path rules enforce them immediately; Linux
-//     enforces the baseline paths that exist without making fresh homes unusable.
+//     Pathname-policy backends such as Seatbelt can enforce future paths;
+//     mount-based Linux masks only baseline paths that exist when the namespace
+//     is assembled so fresh homes remain usable.
 //
 // These are profile-level rules only; they are intentionally NOT merged into
 // Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and

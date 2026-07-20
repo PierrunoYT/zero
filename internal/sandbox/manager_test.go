@@ -452,9 +452,9 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	}
 
 	// A default candidate absent from disk at profile-build time is still
-	// emitted: a rule installed only for what exists now would miss a store
-	// created later in a long-lived sandboxed session (e.g. a concurrent
-	// `zero auth login`, or a token file appearing mid-session).
+	// emitted so pathname-policy backends can reserve it. Mount-based Linux
+	// retains the same profile baseline but can mask only paths that exist when
+	// Bubblewrap assembles the namespace.
 	if !stringSliceContains(paths, filepath.Join(home, ".azure")) {
 		t.Errorf("credential deny paths = %#v, want the not-yet-existing ~/.azure included", paths)
 	}
@@ -582,7 +582,7 @@ func TestBuildCommandPlanUsesCommandCredentialContext(t *testing.T) {
 	}
 }
 
-func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
+func TestPermissionProfileIncludesZeroCredentialPaths(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows credential deny-read is tracked separately")
 	}
@@ -593,9 +593,10 @@ func TestPermissionProfileDeniesZeroCredentialFiles(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	zeroDir := filepath.Join(configHome, "zero")
 
-	// Build the profile BEFORE the store directory exists on disk: a
-	// sandboxed command launched early in a session must still deny reads of
-	// credentials created later, not just ones present at profile-build time.
+	// Build the profile before the store directory exists to verify that profile
+	// derivation retains the baseline candidate. Pathname-policy backends can
+	// reserve it immediately; mount-based Linux applies it only if the path
+	// exists when Bubblewrap assembles the namespace.
 	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
 	want := normalizeProfilePaths([]string{zeroDir})[0]
 	if !stringSliceContains(profile.FileSystem.DenyReadIfExists, want) {
