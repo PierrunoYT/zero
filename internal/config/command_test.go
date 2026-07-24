@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,8 @@ func TestLoadProviderCommandFailureIncludesExitAndRedactsOutput(t *testing.T) {
 }
 
 func TestLoadProviderCommandTimeout(t *testing.T) {
-	command := writeCommand(t, commandScript{SleepSeconds: 10})
+	pidFile := filepath.Join(t.TempDir(), "sleep.pid")
+	command := writeCommand(t, commandScript{SleepSeconds: 10, PidFile: pidFile})
 
 	start := time.Now()
 	_, err := LoadProviderCommand(command)
@@ -85,6 +87,87 @@ func TestLoadProviderCommandTimeout(t *testing.T) {
 	if elapsed > maxElapsed {
 		t.Fatalf("timeout returned after %s, want roughly 5s", elapsed)
 	}
+	assertProcessTerminated(t, pidFile)
+}
+
+// TestLoadProviderCommandTerminatesBackgroundChild covers a command that
+// exits immediately but leaves a detached child holding the inherited
+// stdout/stderr pipes open (e.g. `sleep 600 & exit`). cmd.Wait() only
+// unblocks once WaitDelay elapses, and that path must still terminate the
+// leftover child instead of just returning and leaking it.
+func TestLoadProviderCommandTerminatesBackgroundChild(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "bg.pid")
+	command := writeCommand(t, commandScript{
+		Stdout:                 `{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}`,
+		BackgroundSleepSeconds: 10,
+		BackgroundPidFile:      pidFile,
+	})
+
+	start := time.Now()
+	_, err := LoadProviderCommand(command)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("LoadProviderCommand() error = nil, want error from WaitDelay-bounded wait")
+	}
+	if !strings.Contains(err.Error(), "timed out after 5s") {
+		t.Fatalf("error = %q, want timeout", err.Error())
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("returned after %s, want well under the 5s provider-command timeout since WaitDelay (1s) should trigger termination", elapsed)
+	}
+	assertProcessTerminated(t, pidFile)
+}
+
+// TestLoadProviderCommandTerminatesBackgroundChildOnFailure covers the same
+// leaked-descendant scenario as TestLoadProviderCommandTerminatesBackgroundChild,
+// but with a shell that exits nonzero. Go's exec.Cmd.Wait only returns
+// exec.ErrWaitDelay when the command itself exited successfully; a nonzero
+// exit yields the bare *ExitError instead, so the leftover child must still
+// be terminated on that path.
+func TestLoadProviderCommandTerminatesBackgroundChildOnFailure(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "bg-fail.pid")
+	command := writeCommand(t, commandScript{
+		Stderr:                 "boom",
+		ExitCode:               7,
+		BackgroundSleepSeconds: 10,
+		BackgroundPidFile:      pidFile,
+	})
+
+	start := time.Now()
+	_, err := LoadProviderCommand(command)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("LoadProviderCommand() error = nil, want failure from nonzero exit")
+	}
+	if !strings.Contains(err.Error(), "exit status") {
+		t.Fatalf("error = %q, want exit status failure", err.Error())
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("returned after %s, want well under the 5s provider-command timeout since WaitDelay (1s) should trigger termination", elapsed)
+	}
+	assertProcessTerminated(t, pidFile)
+}
+
+func assertProcessTerminated(t *testing.T, pidFile string) {
+	t.Helper()
+
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read sleeper pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse sleeper pid %q: %v", data, err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("sleeper process %d still alive after timeout", pid)
 }
 
 func TestLoadProviderCommandInvalidJSON(t *testing.T) {
@@ -118,6 +201,14 @@ type commandScript struct {
 	Stderr       string
 	ExitCode     int
 	SleepSeconds int
+	PidFile      string
+
+	// BackgroundSleepSeconds, if set, spawns a detached child that keeps the
+	// inherited stdout/stderr handles open well after the script itself
+	// exits, simulating a `sleep 600 & exit` style command. BackgroundPidFile
+	// records the detached child's PID.
+	BackgroundSleepSeconds int
+	BackgroundPidFile      string
 }
 
 func writeCommand(t *testing.T, script commandScript) string {
@@ -128,13 +219,26 @@ func writeCommand(t *testing.T, script commandScript) string {
 		path := filepath.Join(dir, "provider.cmd")
 		lines := []string{"@echo off"}
 		if script.SleepSeconds > 0 {
-			lines = append(lines, "powershell -NoProfile -Command \"Start-Sleep -Seconds "+itoa(script.SleepSeconds)+"\"")
+			sleep := "Start-Sleep -Seconds " + itoa(script.SleepSeconds)
+			if script.PidFile != "" {
+				sleep = "Set-Content -Path '" + psSingleQuote(script.PidFile) + "' -Value $PID -Encoding Ascii; " + sleep
+			}
+			lines = append(lines, "powershell -NoProfile -Command \""+sleep+"\"")
 		}
 		if script.Stdout != "" {
 			lines = append(lines, "echo "+script.Stdout)
 		}
 		if script.Stderr != "" {
 			lines = append(lines, "echo "+script.Stderr+" 1>&2")
+		}
+		if script.BackgroundSleepSeconds > 0 {
+			readyFile := script.BackgroundPidFile + ".ready"
+			bgSleep := "Set-Content -LiteralPath '" + psSingleQuote(script.BackgroundPidFile) + "' -Value $PID -Encoding Ascii; " +
+				"Set-Content -LiteralPath '" + psSingleQuote(readyFile) + "' -Value ready -Encoding Ascii; " +
+				"Start-Sleep -Seconds " + itoa(script.BackgroundSleepSeconds)
+			lines = append(lines, "start /B powershell -NoProfile -Command \""+bgSleep+"\"")
+			waitForReady := "while (-not (Test-Path -LiteralPath '" + psSingleQuote(readyFile) + "')) { Start-Sleep -Milliseconds 10 }"
+			lines = append(lines, "powershell -NoProfile -Command \""+waitForReady+"\"")
 		}
 		lines = append(lines, "exit /b "+itoa(script.ExitCode))
 		if err := os.WriteFile(path, []byte(strings.Join(lines, "\r\n")), 0o700); err != nil {
@@ -146,6 +250,9 @@ func writeCommand(t *testing.T, script commandScript) string {
 	path := filepath.Join(dir, "provider.sh")
 	lines := []string{"#!/bin/sh"}
 	if script.SleepSeconds > 0 {
+		if script.PidFile != "" {
+			lines = append(lines, "echo $$ > '"+shSingleQuote(script.PidFile)+"'")
+		}
 		lines = append(lines, "sleep "+itoa(script.SleepSeconds))
 	}
 	if script.Stdout != "" {
@@ -154,11 +261,28 @@ func writeCommand(t *testing.T, script commandScript) string {
 	if script.Stderr != "" {
 		lines = append(lines, "printf '%s\\n' '"+script.Stderr+"' >&2")
 	}
+	if script.BackgroundSleepSeconds > 0 {
+		lines = append(lines, "sleep "+itoa(script.BackgroundSleepSeconds)+" &")
+		lines = append(lines, "echo $! > '"+shSingleQuote(script.BackgroundPidFile)+"'")
+	}
 	lines = append(lines, "exit "+itoa(script.ExitCode))
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o700); err != nil {
 		t.Fatalf("write command: %v", err)
 	}
 	return path
+}
+
+// psSingleQuote escapes a value for interpolation inside a PowerShell
+// single-quoted string literal, where a literal quote is doubled.
+func psSingleQuote(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
+}
+
+// shSingleQuote escapes a value for interpolation inside a POSIX shell
+// single-quoted string literal, where a literal quote must close the
+// quoted section, emit an escaped quote, then reopen it.
+func shSingleQuote(value string) string {
+	return strings.ReplaceAll(value, "'", `'\''`)
 }
 
 func itoa(value int) string {
