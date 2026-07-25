@@ -41,6 +41,62 @@ func resolvePolicyPath(entry string) (string, bool) {
 	return resolved, true
 }
 
+// daemonRemoteTokenFileEnv names the file holding the remote bridge's bearer
+// token. It is duplicated from internal/daemon/remote (which cannot be imported
+// here) exactly like the copy scrubSensitiveEnv keeps.
+const daemonRemoteTokenFileEnv = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+
+// protectedCredentialPaths returns credential files that Zero's own in-process
+// file tools must never read or modify, independent of Policy.
+//
+// This is deliberately separate from credentialDenyReadPaths, which only shapes
+// the OS sandbox profile for wrapped shell commands: read_file resolves scoped
+// paths itself, and grep/glob build their exclusions from the policy, so a
+// profile-only rule leaves the in-process tool boundary open. It is also
+// separate from Policy.DenyRead, whose emptiness gates escalated (unsandboxed)
+// execution and must keep reflecting user configuration alone.
+//
+// Entries here are NOT re-includable through AllowRead/AllowWrite or a
+// session/turn permission profile: the bridge bearer token grants control of
+// this daemon, so a remote-controlled agent must not be able to read it, nor
+// replace it to hijack the next bridge start, even when the file sits inside
+// its own session workspace. Unlike the profile list this applies on Windows
+// too, where filesystem deny-read has no sandbox representation (#662).
+//
+// Both the configured pathname and the target it currently resolves to are
+// protected: `zero daemon serve-remote` canonicalizes the value it selects (see
+// remote.CanonicalizeTokenFileEnv), but a stale symlinked value inherited from
+// elsewhere must not leave the link replaceable.
+func protectedCredentialPaths() []string {
+	// os.ReadFile — the daemon's own reader — treats the value literally, so a
+	// relative path resolves against the working directory and a leading "~" is
+	// NOT expanded. resolvePolicyPath would expand it and protect the wrong file.
+	configured := strings.TrimSpace(os.Getenv(daemonRemoteTokenFileEnv))
+	if configured == "" {
+		return nil
+	}
+	absolute, err := filepath.Abs(configured)
+	if err != nil {
+		return nil
+	}
+	paths := []string{absolute}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil && resolved != absolute {
+		paths = append(paths, resolved)
+	}
+	return dedupeStrings(paths)
+}
+
+// protectedPathDenied reports whether path targets one of the protected
+// credential files. There is no allow-list consultation by design.
+func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
+	for _, entry := range protected {
+		if pathUnderPolicyRoot(path, entry, workspaceRoot) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolvePolicyPaths resolves and de-duplicates a list of policy path entries,
 // dropping blanks and non-existent entries. Files and directories are both kept
 // (a DenyRead/DenyWrite entry may target a single sensitive file).
@@ -151,19 +207,27 @@ type ReadExclusions struct {
 	workspaceRoot string
 	denyRoots     []string
 	allowRoots    []string
+	// protectedRoots are the automatic credential exclusions
+	// (protectedCredentialPaths); AllowRead never re-includes them.
+	protectedRoots []string
 }
 
-// Active reports whether any DenyRead root is configured. When false the
-// exclusions are a no-op and the search behaves exactly as before.
+// Active reports whether anything is excluded: a configured DenyRead root or an
+// automatic protected credential path. When false the exclusions are a no-op and
+// the search behaves exactly as before.
 func (rx *ReadExclusions) Active() bool {
-	return rx != nil && len(rx.denyRoots) > 0
+	return rx != nil && (len(rx.denyRoots) > 0 || len(rx.protectedRoots) > 0)
 }
 
 // PathExcluded reports whether reading path is excluded by DenyRead, honoring a
-// more-specific AllowRead re-inclusion. It is the per-file predicate for a walk.
+// more-specific AllowRead re-inclusion, or by an automatic credential exclusion,
+// which no allow entry re-includes. It is the per-file predicate for a walk.
 func (rx *ReadExclusions) PathExcluded(path string) bool {
 	if !rx.Active() {
 		return false
+	}
+	if protectedPathDenied(rx.protectedRoots, rx.workspaceRoot, path) {
+		return true
 	}
 	return readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path)
 }
@@ -175,6 +239,11 @@ func (rx *ReadExclusions) PathExcluded(path string) bool {
 func (rx *ReadExclusions) DirExcluded(path string) bool {
 	if !rx.Active() {
 		return false
+	}
+	// A protected credential entry is a file, so it only prunes a directory when
+	// the directory IS that entry; PathExcluded still filters it during the walk.
+	if protectedPathDenied(rx.protectedRoots, rx.workspaceRoot, path) {
+		return true
 	}
 	if !readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path) {
 		return false
@@ -212,6 +281,16 @@ func allowWriteScope(policy Policy) *Scope {
 // enforceWorkspace; the workspace boundary itself applies only when
 // enforceWorkspace. It never bypasses the symlink/out-of-workspace guards.
 func validateWritePath(scope *Scope, policy Policy, enforceWorkspace bool, workspaceRoot, path string) *pathBlock {
+	// The protected credential files outrank every allow: overwriting or
+	// truncating the bridge token denies service, and replacing it hands the next
+	// bridge start an attacker-chosen secret.
+	if protectedPathDenied(protectedCredentialPaths(), workspaceRoot, path) {
+		return &pathBlock{
+			Code:   BlockDenied,
+			Path:   path,
+			Reason: path + " holds the remote bridge token and is never writable",
+		}
+	}
 	// DenyWrite wins regardless of workspace enforcement.
 	for _, deny := range resolvePolicyPaths(policy.DenyWrite) {
 		if pathUnderPolicyRoot(path, deny, workspaceRoot) {
@@ -252,7 +331,9 @@ func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, 
 	// when there is anything to enforce; otherwise it is a no-op (unchanged from the
 	// pre-path-list behavior, where an empty workspace root skipped validation).
 	if workspaceRoot == "" && !filepath.IsAbs(path) {
-		if enforceWorkspace || policyHasPathLists(policy) {
+		// A configured bridge token counts as something to enforce: the relative
+		// path cannot be anchored, so it cannot be proven to miss the token file.
+		if enforceWorkspace || policyHasPathLists(policy) || len(protectedCredentialPaths()) > 0 {
 			return &pathBlock{
 				Code:   BlockOutsideWorkspace,
 				Path:   path,
@@ -263,6 +344,13 @@ func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, 
 	}
 	switch sideEffect {
 	case SideEffectRead:
+		if protectedPathDenied(protectedCredentialPaths(), workspaceRoot, path) {
+			return &pathBlock{
+				Code:   BlockDenied,
+				Path:   path,
+				Reason: path + " holds the remote bridge token and is never readable",
+			}
+		}
 		if readDenied(policy, workspaceRoot, path) {
 			return &pathBlock{
 				Code:   BlockDenied,
@@ -325,7 +413,9 @@ func workspaceRelGlob(workspaceRoot, target string) (string, bool) {
 // consumer. Empty when DenyRead is unset (the default), so search behavior is
 // unchanged.
 func ReadExclusionGlobs(policy Policy, scope *Scope) []string {
-	denyRoots := resolvePolicyPaths(policy.DenyRead)
+	// The automatic credential exclusions ride along so an rg-based consumer never
+	// walks the bridge token when it happens to live inside the workspace.
+	denyRoots := dedupeStrings(append(resolvePolicyPaths(policy.DenyRead), protectedCredentialPaths()...))
 	if len(denyRoots) == 0 || scope == nil {
 		return nil
 	}

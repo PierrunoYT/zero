@@ -1,0 +1,210 @@
+package sandbox
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+// protectedTokenFixture writes a bridge token inside the workspace and points
+// ZERO_DAEMON_REMOTE_TOKEN_FILE at it.
+func protectedTokenFixture(t *testing.T) (string, string) {
+	t.Helper()
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(ws, "bridge-token")
+	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+	return ws, token
+}
+
+func TestProtectedCredentialPathsResolveLikeTheDaemonReader(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(base, "token")
+	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	t.Run("absent variable protects nothing", func(t *testing.T) {
+		t.Setenv(daemonRemoteTokenFileEnv, "")
+		if got := protectedCredentialPaths(); len(got) != 0 {
+			t.Fatalf("protected paths = %#v, want none", got)
+		}
+	})
+
+	t.Run("relative value resolves against the working directory", func(t *testing.T) {
+		// os.ReadFile — what the daemon uses — resolves a relative value against the
+		// working directory, so the protected path must do the same.
+		t.Chdir(base)
+		t.Setenv(daemonRemoteTokenFileEnv, "token")
+		if got := protectedCredentialPaths(); !stringSliceContains(got, token) {
+			t.Fatalf("protected paths = %#v, want %q", got, token)
+		}
+	})
+
+	t.Run("a literal tilde is not home-expanded", func(t *testing.T) {
+		// os.ReadFile treats "~" as an ordinary directory name; expanding it here
+		// would protect a path the daemon never reads.
+		t.Chdir(base)
+		t.Setenv(daemonRemoteTokenFileEnv, filepath.Join("~", "token"))
+		want := filepath.Join(base, "~", "token")
+		got := protectedCredentialPaths()
+		if !stringSliceContains(got, want) {
+			t.Fatalf("protected paths = %#v, want literal %q", got, want)
+		}
+		home, err := os.UserHomeDir()
+		if err == nil && stringSliceContains(got, filepath.Join(home, "token")) {
+			t.Fatalf("protected paths = %#v, must not home-expand the value", got)
+		}
+	})
+
+	t.Run("a symlinked pathname protects the link and its target", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink creation needs elevation on Windows")
+		}
+		link := filepath.Join(base, "token-link")
+		if err := os.Symlink(token, link); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		t.Setenv(daemonRemoteTokenFileEnv, link)
+		got := protectedCredentialPaths()
+		for _, want := range []string{link, token} {
+			if !stringSliceContains(got, want) {
+				t.Fatalf("protected paths = %#v, want %q", got, want)
+			}
+		}
+	})
+}
+
+// TestProtectedCredentialsSurviveAllowRead locks in the non-opt-out guarantee:
+// the bridge token grants control of the daemon, so neither AllowRead, an
+// AllowWrite root, nor a granted permission may re-include it.
+func TestProtectedCredentialsSurviveAllowRead(t *testing.T) {
+	ws, token := protectedTokenFixture(t)
+	policy := Policy{
+		Mode:             ModeEnforce,
+		EnforceWorkspace: true,
+		AllowRead:        []string{ws, token},
+		AllowWrite:       []string{ws},
+	}
+	scope, err := NewScope(ws, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+
+	for _, sideEffect := range []SideEffect{SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace} {
+		block := validatePathWithPolicy(scope, policy, sideEffect, true, ws, token)
+		if block == nil || !strings.Contains(block.Reason, "remote bridge token") {
+			t.Fatalf("%s on the bridge token: block = %#v, want a bridge-token deny", sideEffect, block)
+		}
+	}
+
+	// The search-walk matcher enforces the same exclusion without consulting
+	// AllowRead, and it is active even though DenyRead is empty.
+	engine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: policy, Scope: scope})
+	rx := engine.ReadExclusions()
+	if !rx.Active() {
+		t.Fatal("read exclusions must be active for the automatic credential deny")
+	}
+	if !rx.PathExcluded(token) {
+		t.Fatalf("read exclusions must exclude the bridge token %q", token)
+	}
+	if rx.PathExcluded(filepath.Join(ws, "main.go")) {
+		t.Fatal("read exclusions must not exclude ordinary workspace files")
+	}
+	if globs := ReadExclusionGlobs(policy, scope); !stringSliceContains(globs, "!bridge-token") {
+		t.Fatalf("read exclusion globs = %#v, want the bridge token excluded", globs)
+	}
+}
+
+// TestProtectedCredentialsRejectSessionPermissionProfile covers the other
+// re-inclusion route: a session/turn permission profile that asks for the token
+// path must not be auto-applicable.
+func TestProtectedCredentialsRejectSessionPermissionProfile(t *testing.T) {
+	ws, token := protectedTokenFixture(t)
+	scope, err := NewScope(ws, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: ws,
+		Policy:        Policy{Mode: ModeEnforce, EnforceWorkspace: true},
+		Scope:         scope,
+	})
+	if engine.CoversRequestPermissions(RequestPermissionProfile{
+		FileSystem: &FileSystemPermissions{Read: []string{token}},
+	}) {
+		t.Fatal("a permission request covering the bridge token must not read as already-granted")
+	}
+	if !engine.CoversRequestPermissions(RequestPermissionProfile{
+		FileSystem: &FileSystemPermissions{Read: []string{filepath.Join(ws, "main.go")}},
+	}) {
+		t.Fatal("an ordinary workspace read request must stay covered by policy")
+	}
+}
+
+// TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile covers the macOS
+// backend: a token under a writable root was read-denied but still truncatable
+// through the broad write allow.
+func TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile(t *testing.T) {
+	token := "/private/tmp/zero-bridge-token"
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:       FileSystemRestricted,
+			ReadRoots:  []string{string(filepath.Separator)},
+			WriteRoots: []WritableRoot{{Root: "/repo"}},
+			DenyRead:   []string{token},
+			AllowTemp:  true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	escaped := sandboxProfileString(normalizeProfilePath(token))
+	denyRead := `(deny file-read* (literal "` + escaped + `"))`
+	denyWrite := `(deny file-write* (literal "` + escaped + `"))`
+	for _, want := range []string{denyRead, denyWrite} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
+		}
+	}
+	// Seatbelt is last-match-wins, so both denials must follow the broad allow.
+	if allow := strings.Index(sbpl, "(allow file-write*"); allow < 0 || strings.Index(sbpl, denyWrite) < allow {
+		t.Fatalf("the write denial must follow the broad write allow:\n%s", sbpl)
+	}
+}
+
+// TestProtectedCredentialsDoNotBlockUnrelatedRequests keeps the exclusion inert
+// for everyone who does not run the remote bridge.
+func TestProtectedCredentialsDoNotBlockUnrelatedRequests(t *testing.T) {
+	t.Setenv(daemonRemoteTokenFileEnv, "")
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: ws,
+		Policy:        Policy{Mode: ModeEnforce, EnforceWorkspace: true},
+	})
+	if rx := engine.ReadExclusions(); rx.Active() {
+		t.Fatal("read exclusions must stay inactive without a configured token file")
+	}
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:      "read_file",
+		WorkspaceRoot: ws,
+		SideEffect:    SideEffectRead,
+		Args:          map[string]any{"path": filepath.Join(ws, "main.go")},
+	})
+	if decision.Action == ActionDeny {
+		t.Fatalf("ordinary workspace read was denied: %q", decision.Reason)
+	}
+}

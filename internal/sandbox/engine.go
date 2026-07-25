@@ -154,9 +154,10 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 		return nil
 	}
 	return &ReadExclusions{
-		workspaceRoot: engine.workspaceRoot,
-		denyRoots:     resolvePolicyPaths(policy.DenyRead),
-		allowRoots:    resolvePolicyPaths(policy.AllowRead),
+		workspaceRoot:  engine.workspaceRoot,
+		denyRoots:      resolvePolicyPaths(policy.DenyRead),
+		allowRoots:     resolvePolicyPaths(policy.AllowRead),
+		protectedRoots: protectedCredentialPaths(),
 	}
 }
 

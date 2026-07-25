@@ -484,7 +484,11 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	normalizedSecretRead := sandboxProfileString(normalizeProfilePath("/repo/secret-read"))
 	normalizedSecretWrite := sandboxProfileString(normalizeProfilePath("/repo/secret-write"))
 	denySecretReadRule := `(deny file-read* (subpath "` + normalizedSecretRead + `"))`
-	denySecretReadUnlinkRule := `(deny file-write-unlink (subpath "` + normalizedSecretRead + `"))`
+	// A read-denied path must also be write-denied: the broad write allow above
+	// covers every workspace and temp root, so a credential file under one of them
+	// would otherwise stay truncatable and replaceable. file-write* subsumes the
+	// file-write-unlink denial this used to assert on its own.
+	denySecretReadWriteRule := `(deny file-write* (subpath "` + normalizedSecretRead + `"))`
 	denySecretWriteRule := `(deny file-write* (subpath "` + normalizedSecretWrite + `"))`
 	for _, want := range []string{
 		`(deny file-write* (literal "/repo/vendor"))`,
@@ -492,7 +496,7 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 		`(deny file-write* (regex #"^/repo/\.git(/.*)?$"))`,
 		`(deny file-write* (regex #"^/repo/\.zero(/.*)?$"))`,
 		denySecretReadRule,
-		denySecretReadUnlinkRule,
+		denySecretReadWriteRule,
 		denySecretWriteRule,
 	} {
 		if !strings.Contains(sbpl, want) {

@@ -839,7 +839,13 @@ func denySeatbeltPathRules(action string, paths []string) []string {
 		for _, filter := range filters {
 			out = append(out, "(deny "+action+" "+filter+")")
 			if action == "file-read*" {
-				out = append(out, "(deny file-write-unlink "+filter+")")
+				// Denying reads does not imply denying writes, and the broad
+				// (allow file-write* ...) emitted above covers every workspace root
+				// plus the default temp roots. A credential file under one of those
+				// stayed truncatable and replaceable — enough to deny service, or to
+				// swap the secret a later process reads. file-write* subsumes the
+				// unlink denial this previously emitted on its own.
+				out = append(out, "(deny file-write* "+filter+")")
 			}
 		}
 	}

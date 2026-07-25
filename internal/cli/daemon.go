@@ -477,6 +477,12 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	// Pin the token file to the path this process reads BEFORE any worker
+	// inherits the variable, so a relative or symlinked value cannot make a
+	// session's sandbox profile protect a different path than the live bearer file.
+	if err := remote.CanonicalizeTokenFileEnv(); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	token, err := remote.TokenFromEnv()
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)

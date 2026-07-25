@@ -57,6 +57,87 @@ func TestTokenFromEnv(t *testing.T) {
 	}
 }
 
+// TestCanonicalizeTokenFileEnv pins the value every child process (and the
+// sandbox profile derived for it) inherits to the file this process reads.
+func TestCanonicalizeTokenFileEnv(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(base, "tok")
+	if err := os.WriteFile(token, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	t.Run("relative value becomes absolute", func(t *testing.T) {
+		// A worker resolves the inherited value against its own session directory,
+		// so a relative value must not survive the daemon boundary.
+		t.Chdir(base)
+		t.Setenv(EnvToken, "")
+		t.Setenv(EnvTokenFile, "tok")
+		if err := CanonicalizeTokenFileEnv(); err != nil {
+			t.Fatalf("CanonicalizeTokenFileEnv: %v", err)
+		}
+		if got := os.Getenv(EnvTokenFile); got != token {
+			t.Fatalf("%s = %q, want %q", EnvTokenFile, got, token)
+		}
+		if tok, err := TokenFromEnv(); err != nil || tok != "from-file" {
+			t.Fatalf("TokenFromEnv after canonicalization = %q, %v", tok, err)
+		}
+	})
+
+	t.Run("symlinked pathname is resolved", func(t *testing.T) {
+		link := filepath.Join(base, "tok-link")
+		if err := os.Symlink(token, link); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		t.Setenv(EnvToken, "")
+		t.Setenv(EnvTokenFile, link)
+		if err := CanonicalizeTokenFileEnv(); err != nil {
+			t.Fatalf("CanonicalizeTokenFileEnv: %v", err)
+		}
+		if got := os.Getenv(EnvTokenFile); got != token {
+			t.Fatalf("%s = %q, want the resolved target %q", EnvTokenFile, got, token)
+		}
+	})
+
+	t.Run("an inline token keeps precedence over a dangling pointer", func(t *testing.T) {
+		// TokenFromEnv prefers EnvToken, so an unused (even dangling) file pointer
+		// must neither fail the start nor be rewritten.
+		dangling := filepath.Join(base, "missing", "tok")
+		t.Setenv(EnvToken, "from-env")
+		t.Setenv(EnvTokenFile, dangling)
+		if err := CanonicalizeTokenFileEnv(); err != nil {
+			t.Fatalf("CanonicalizeTokenFileEnv with an inline token: %v", err)
+		}
+		if got := os.Getenv(EnvTokenFile); got != dangling {
+			t.Fatalf("%s = %q, want it left alone", EnvTokenFile, got)
+		}
+		if tok, err := TokenFromEnv(); err != nil || tok != "from-env" {
+			t.Fatalf("TokenFromEnv = %q, %v, want the inline token", tok, err)
+		}
+	})
+
+	t.Run("a selected but unreadable pointer fails closed", func(t *testing.T) {
+		t.Setenv(EnvToken, "")
+		t.Setenv(EnvTokenFile, filepath.Join(base, "missing", "tok"))
+		if err := CanonicalizeTokenFileEnv(); err == nil {
+			t.Fatal("a selected token file that cannot be resolved must error")
+		}
+	})
+
+	t.Run("no pointer is a no-op", func(t *testing.T) {
+		t.Setenv(EnvToken, "")
+		t.Setenv(EnvTokenFile, "")
+		if err := CanonicalizeTokenFileEnv(); err != nil {
+			t.Fatalf("CanonicalizeTokenFileEnv without a pointer: %v", err)
+		}
+		if got := os.Getenv(EnvTokenFile); got != "" {
+			t.Fatalf("%s = %q, want empty", EnvTokenFile, got)
+		}
+	})
+}
+
 func TestServerTLSConfigRequiresCertKey(t *testing.T) {
 	if _, err := ServerTLSConfig("", ""); err == nil {
 		t.Fatal("ServerTLSConfig must require a cert and key (TLS mandatory)")
