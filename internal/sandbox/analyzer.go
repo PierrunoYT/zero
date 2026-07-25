@@ -65,6 +65,76 @@ func AnalyzeCommand(script string) AnalysisResult {
 	return result
 }
 
+// astCommandFields parses command with the shell parser and returns each simple
+// command as its literal field slice (program + args as text), resolving the
+// real command positions across quoting, command substitution, subshells, and
+// newline separators — the constructs the hand-written splitter in
+// safe_command.go mis-handles (issue #473). It returns nil when the command
+// cannot be parsed (e.g. a Windows cmd.exe string), so callers fall through to
+// the regex path rather than hard-blocking.
+func astCommandFields(command string) [][]string {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil
+	}
+	var commands [][]string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		// EVERY word must be a static literal, not just the program name.
+		// wordText keeps only the literal/quoted parts of a word and silently
+		// drops expansions, so a dynamic word anywhere in the call reconstructs
+		// to something the shell will never run: `$(printf foo)vim` (runs as
+		// `foovim`) collapses to "vim", and `git $(printf foo)rebase -i` (runs
+		// as `git foorebase -i`, non-interactive) collapses to `git rebase -i`
+		// and fabricates an interactive match. Since the runtime value of an
+		// expansion is unknowable here, skip the whole call rather than classify
+		// a lossy reconstruction. Skipping is the safe direction: the
+		// hand-written passes above already ran, and a missed detection falls
+		// through to the normal permission prompt instead of hard-blocking a
+		// command the user never wrote.
+		for _, word := range call.Args {
+			if !isLiteralWord(word) {
+				return true
+			}
+		}
+		fields := make([]string, 0, len(call.Args))
+		for _, word := range call.Args {
+			fields = append(fields, wordText(word))
+		}
+		commands = append(commands, fields)
+		return true
+	})
+	return commands
+}
+
+// isLiteralWord reports whether every part of word is a static literal (bare or
+// quoted). A word containing a command substitution, parameter/arithmetic
+// expansion, process substitution, etc. is dynamic — its runtime value is
+// unknown, so its wordText (a partial literal) must not be trusted as a program
+// name.
+func isLiteralWord(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, inner := range typed.Parts {
+				if _, ok := inner.(*syntax.Lit); !ok {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // analyzeInto parses script and folds its interactive/destructive/network usage
 // into result, sharing seen so program names are de-duplicated across recursion.
 func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, depth int) {
@@ -150,12 +220,7 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 	case "go":
 		return firstSubcommand(words, nil) == "get"
 	case "git":
-		switch firstSubcommand(words, nil) {
-		case "clone", "fetch", "pull", "push":
-			return true
-		default:
-			return false
-		}
+		return gitUsesNetwork(words)
 	case "gh":
 		return ghUsesNetwork(words)
 	default:
@@ -164,9 +229,15 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 }
 
 func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
+	if packageManagerOffline(words) {
+		return false
+	}
 	first := firstSubcommand(words, aliases)
 	switch first {
-	case "install", "add", "publish", "login":
+	case "install", "add", "ci", "create", "dlx", "publish", "unpublish",
+		"login", "logout", "adduser", "whoami", "ping", "audit", "outdated",
+		"update", "upgrade", "search", "view", "info", "show", "dist-tag",
+		"deprecate", "owner", "org", "team", "token", "profile", "access":
 		return true
 	case "start", "serve", "dev", "preview":
 		return true
@@ -174,17 +245,71 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 		second := secondSubcommand(words)
 		return second == "start" || second == "serve" || second == "dev" || second == "preview"
 	case "exec":
-		for _, word := range words {
-			if word == "" || strings.HasPrefix(word, "-") || isNumericToken(word) {
-				continue
-			}
-			if word == "exec" || word == "x" || word == "dlx" {
-				continue
-			}
-			return localServerPrograms[word]
+		// Package-manager exec commands may resolve and download a missing
+		// package before launching it. An explicit offline flag keeps this path
+		// inside the isolated namespace; otherwise request egress up front.
+		return true
+	}
+	return false
+}
+
+func packageManagerOffline(words []string) bool {
+	for _, word := range words {
+		switch word {
+		case "--offline", "--no-network":
+			return true
 		}
 	}
 	return false
+}
+
+func gitUsesNetwork(words []string) bool {
+	switch gitSubcommand(words) {
+	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
+		return true
+	default:
+		return false
+	}
+}
+
+// gitSubcommand resolves the subcommand past git's GLOBAL options. The generic
+// firstSubcommand cannot: git's value-taking globals put their value in the next
+// token, so scanning for the first non-dash token returns that value instead —
+// `git -C repo push origin main` looked like the subcommand "repo" and so
+// classified as no-network, dropping the proactive network prompt for the most
+// common form of the command. internal/agent/command_prefix.go resolves the same
+// option set for its own prefix matching.
+func gitSubcommand(words []string) string {
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		if word == "" {
+			continue
+		}
+		if strings.HasPrefix(word, "-") {
+			// A joined value (--git-dir=/x, -C/x) is one token and needs no skip;
+			// a separated one puts its value in the next token.
+			if gitGlobalOptionConsumesValue(word) {
+				index++
+			}
+			continue
+		}
+		if isNumericToken(word) {
+			continue
+		}
+		return word
+	}
+	return ""
+}
+
+// gitGlobalOptionConsumesValue lists git's global options whose value is a
+// SEPARATE token (mirrors gitOptionConsumesValue in internal/agent).
+func gitGlobalOptionConsumesValue(option string) bool {
+	switch option {
+	case "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
+		return true
+	default:
+		return false
+	}
 }
 
 func npxUsesNetwork(_ []string) bool {
@@ -314,7 +439,7 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 		if isNumericToken(text) {
 			continue
 		}
-		token := normalizeProgramToken(text)
+		token := trimWindowsExecutableExtension(normalizeProgramToken(text))
 		if wrapperPrograms[token] {
 			wrapper = token
 			continue
@@ -322,6 +447,18 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 		return token, args[index+1:]
 	}
 	return "", nil
+}
+
+// trimWindowsExecutableExtension maps git.exe to git, curl.exe to curl, and so
+// on, so a Windows spelling reaches the same classification as the bare name.
+// Only ".exe" is trimmed: a .bat/.cmd of the same stem is a separate script, not
+// the program it is named after, so classifying it as that program would be a
+// guess. normalizeProgramToken has already lowercased the token.
+func trimWindowsExecutableExtension(token string) string {
+	if trimmed := strings.TrimSuffix(token, ".exe"); trimmed != "" {
+		return trimmed
+	}
+	return token
 }
 
 // dashCPayload returns the literal text of the word following `-c` in an AST arg

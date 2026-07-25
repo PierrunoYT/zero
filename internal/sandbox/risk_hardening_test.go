@@ -284,6 +284,46 @@ func TestClassifyASTCatchesNetworkProgramsRegexMisses(t *testing.T) {
 	}
 }
 
+// TestClassifyParseableGitNetworkCommandsUseASTPath covers the git forms that
+// PARSE cleanly, so the unparseable-command regex fallback is never consulted and
+// the AST classifier is the only thing standing between these commands and
+// unprompted egress. `git -C <dir> <verb>` is the canonical way to operate on a
+// repo without cd, and its value used to be read as the subcommand.
+func TestClassifyParseableGitNetworkCommandsUseASTPath(t *testing.T) {
+	for _, command := range []string{
+		"git -C repo push origin main",
+		"git -c http.sslVerify=false push origin main",
+		"git --git-dir /repo/.git fetch origin",
+		"git --work-tree /repo pull origin main",
+		"git --namespace ns push origin main",
+		"git.exe push origin main",
+		"git.exe -C repo push gitlawb://example.com/repo.git main",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) reported TooComplex; this case must exercise the AST path", command)
+			}
+			risk := classifyCommand(command)
+			if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
+			}
+		})
+	}
+
+	// Local git work through the same global options stays off the network path.
+	for _, command := range []string{
+		`git -C repo commit -m "local change"`,
+		"git -C repo status",
+		`git.exe commit -m "local change"`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if risk := classifyCommand(command); HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = categories %v; want no network category", command, risk.Categories)
+			}
+		})
+	}
+}
+
 func TestClassifyFlagsUnparseableCommand(t *testing.T) {
 	// An unparseable (e.g. obfuscated) script can't be analyzed statically; the
 	// AST analyzer reports TooComplex so the classifier elevates it to High.

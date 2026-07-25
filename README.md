@@ -195,7 +195,7 @@ Useful controls:
 | `Ctrl+P` / `Ctrl+N` | previous / next item in menus (arrows still work) |
 | `Shift+Tab` | cycle permission mode |
 | `Ctrl+B` | show/hide the sidebar |
-| `Ctrl+C` | cancel or exit |
+| `Ctrl+C` | cancel, exit, or return from a `/btw` conversation |
 
 Common slash commands:
 
@@ -205,6 +205,7 @@ Common slash commands:
 | `/spec`, `/plan` | draft and review a plan before building |
 | `/image` | attach an image for vision-capable models |
 | `/resume`, `/rewind` | continue or roll back local sessions |
+| `/btw [question]` | ask in an isolated fork without adding the side conversation to the main session |
 | `/loop` | repeat a prompt or custom `/command` on an interval (`/loop 5m /babysit-prs`) or self-paced |
 | `/compact`, `/context` | manage context usage |
 | `/permissions`, `/tools` | inspect available tools and policy |
@@ -383,6 +384,15 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
 ```
 
+The installed binaries land in `$GOBIN` when it is set, otherwise in
+`$GOPATH/bin` (default `~/go/bin`). That directory must be on your `PATH` to
+run them directly. If it isn't, add it:
+
+```bash
+gobin="$(go env GOBIN)"; [ -z "$gobin" ] && gobin="$(go env GOPATH)/bin"
+case ":$PATH:" in *":$gobin:"*) ;; *) export PATH="$PATH:$gobin" ;; esac
+```
+
 ### Cross-Compile Examples
 
 ```bash
@@ -401,6 +411,24 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 - [Benchmarks](docs/BENCHMARK.md)
 - [Performance](docs/PERFORMANCE.md)
 - [Agent evals](docs/AGENT_EVALS.md)
+
+## Community
+
+Questions, setup help, ideas, and sharing all live in
+[GitHub Discussions](https://github.com/Gitlawb/zero/discussions):
+
+| Category | Use it for |
+|---|---|
+| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | Setup help, provider/model configuration, "how do I" questions |
+| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | Feature proposals and design discussion before any PR |
+| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | Your skills, plugins, MCP setups, themes, and workflows |
+| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | Releases and project news from the maintainers |
+
+For a good Q&A answer fast, include `zero --version`, your OS and install
+method, the provider/model in use, and `zero doctor` output. See
+[SUPPORT.md](SUPPORT.md). Bugs belong in
+[issues](https://github.com/Gitlawb/zero/issues/new/choose); security reports
+follow [SECURITY.md](SECURITY.md), never a public thread.
 
 ## Contributing
 

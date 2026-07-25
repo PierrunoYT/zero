@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execprofile"
 	"github.com/Gitlawb/zero/internal/trace"
 )
 
@@ -40,7 +41,25 @@ import (
 // prevents a v2→v2 cross-version comparison from misreading the jump as a model
 // improvement. New counts: correctness 34 (edit 10 + fix 8 + nav 10 + refactor
 // 6), build 0, latency 14 (longproc 4 + longctx 4 + parallel 6).
-const TurnSchemaVersion = 3
+//
+// v4 adds tasksErrored: the number of tasks whose every iteration produced no
+// accepted benchmark sample. That covers pre-run failures (missing binary,
+// spawn error, process crash) and harness errors after a successful agent run
+// (e.g. oracle stamping failed) alike — in every case the iteration yields no
+// usable measurement. Errored tasks were previously visible only in warnings,
+// so a run where nothing was actually measured still printed a clean-looking
+// 0% pass summary and exited 0. tasksErrored makes that state first-class:
+// the summary surfaces it, and the turn command exits nonzero when every
+// attempted task errored. Accounting: an errored oracle task stays in its
+// tier denominator as a failure; an errored latency-only task counts in
+// latencyOnlyTasks and, as always, in no pass rate.
+//
+// v5 is ADDITIVE ONLY: execProfile records the execution profile the run was
+// benchmarked under (omitted when none was selected), so profile A/B captures
+// are self-describing and two reports can't be compared without noticing they
+// ran different postures. No existing field changed shape or meaning; a v4
+// consumer reading a v5 report misses only the new field.
+const TurnSchemaVersion = 5
 
 // TurnRunner runs one benchmark task and reports its outcome plus the captured
 // per-turn trace. A non-nil Err means the run failed to execute (process crash);
@@ -67,6 +86,10 @@ type TurnBenchConfig struct {
 	Model       string
 	Mode        string
 	SelfCorrect bool
+	// ExecProfile, when non-empty, runs every task under the named execution
+	// profile (zero exec --exec-profile) and stamps it into the result so the
+	// report is self-describing for profile A/B comparisons.
+	ExecProfile string
 	Version     string
 	Commit      string
 	// Iterations is how many times each task is run. The per-process `zero exec`
@@ -139,11 +162,13 @@ type TurnBenchResult struct {
 	Suite               string                  `json:"suite"`
 	Model               string                  `json:"model"`
 	Mode                string                  `json:"mode,omitempty"`
+	ExecProfile         string                  `json:"execProfile,omitempty"`
 	SelfCorrect         bool                    `json:"selfCorrect"`
 	Version             string                  `json:"version,omitempty"`
 	Commit              string                  `json:"commit,omitempty"`
 	Date                string                  `json:"date"`
 	TasksAttempted      int                     `json:"tasksAttempted"`
+	TasksErrored        int                     `json:"tasksErrored"`
 	TasksVerified       int                     `json:"tasksVerified"`
 	TasksPassed         int                     `json:"tasksPassed"`
 	LatencyOnlyTasks    int                     `json:"latencyOnlyTasks"`
@@ -189,6 +214,19 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 	if cfg.Runner == nil {
 		return TurnBenchResult{}, errors.New("turn benchmark requires a runner")
 	}
+	// Canonicalize the profile once at the boundary so every consumer — the
+	// child exec args, the stamped result, the summary — carries the same
+	// catalog name regardless of the caller's casing/whitespace, and a direct
+	// library caller cannot slip an unknown name into a report the way the CLI
+	// (which validates at parse time) cannot.
+	benchProfile := strings.TrimSpace(cfg.ExecProfile)
+	if benchProfile != "" {
+		profile, ok := execprofile.Lookup(benchProfile)
+		if !ok {
+			return TurnBenchResult{}, fmt.Errorf("unknown execution profile %q (valid: %s)", cfg.ExecProfile, strings.Join(execprofile.Names(), ", "))
+		}
+		benchProfile = profile.Name
+	}
 	iterations := cfg.Iterations
 	if iterations < 1 {
 		iterations = 1
@@ -197,7 +235,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 	if now == nil {
 		now = time.Now
 	}
-	rc := RunContext{Model: cfg.Model, Mode: cfg.Mode, SelfCorrect: cfg.SelfCorrect}
+	rc := RunContext{Model: cfg.Model, Mode: cfg.Mode, SelfCorrect: cfg.SelfCorrect, ExecProfile: benchProfile}
 
 	perSpanSamples := map[string][]float64{}
 	classWalls := map[string][]float64{}
@@ -227,6 +265,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 		Suite:         strings.TrimSpace(set.ID),
 		Model:         strings.TrimSpace(cfg.Model),
 		Mode:          strings.TrimSpace(cfg.Mode),
+		ExecProfile:   benchProfile,
 		SelfCorrect:   cfg.SelfCorrect,
 		Version:       strings.TrimSpace(cfg.Version),
 		Commit:        strings.TrimSpace(cfg.Commit),
@@ -249,6 +288,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 		// runner is cold-start, so a flaky pass on one iteration and a fail on
 		// another is a real regression signal, not noise to average away.
 		passedForTask := true
+		erroredIterations := 0
 		for iter := 0; iter < iterations; iter++ {
 			outcome := cfg.Runner(ctx, task, rc)
 			if outcome.TraceIssue != "" {
@@ -266,6 +306,7 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 					Message: fmt.Sprintf("task %s: %v", task.ID, outcome.Err),
 				})
 				passedForTask = false
+				erroredIterations++
 				continue
 			}
 			if !outcome.Passed {
@@ -306,6 +347,14 @@ func RunTurnBench(ctx context.Context, set TaskSet, cfg TurnBenchConfig) (TurnBe
 		// counters. A latency-only task (no verificationCommand) is never counted
 		// in any pass rate even when the runner reports Passed — an exit-0
 		// read-only run proves the turn ran, not that the answer was right.
+		if erroredIterations == iterations {
+			// Every iteration produced no accepted sample (spawn failure or a
+			// harness error after the run). The task still counts in its tier
+			// below — an oracle task as a failure, a latency-only task in no
+			// pass rate as always — but the errored state is first-class so a
+			// broken run can never print a clean-looking summary.
+			result.TasksErrored++
+		}
 		hasOracle := len(task.VerificationCommand) > 0
 		switch {
 		case !hasOracle:
@@ -456,8 +505,25 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 			result.BuildPassedTasks, result.BuildCheckedTasks, result.BuildPassRate*100,
 			result.LatencyOnlyTasks, result.Iterations),
 	}
+	if result.TasksErrored > 0 {
+		lines = append(lines, fmt.Sprintf("ERRORED: %d task(s) produced no accepted benchmark sample (spawn/crash or harness error) — errored oracle tasks count as failures in their tier's pass rate; latency-only tasks stay out of pass rates as always", result.TasksErrored))
+		shown := 0
+		for _, warning := range result.Warnings {
+			if warning.Metric != "run" {
+				continue
+			}
+			lines = append(lines, "  "+warning.Message)
+			shown++
+			if shown == 3 {
+				break
+			}
+		}
+	}
 	if result.Mode != "" {
 		lines = append(lines, "mode: "+result.Mode)
+	}
+	if result.ExecProfile != "" {
+		lines = append(lines, "exec-profile: "+result.ExecProfile)
 	}
 	if len(result.TopLatency) > 0 {
 		lines = append(lines, "top latency sources:")
@@ -512,28 +578,54 @@ func WriteTurnBenchJSON(w io.Writer, result TurnBenchResult) error {
 	return encoder.Encode(result)
 }
 
+// execExitIncomplete mirrors internal/cli.exitIncomplete (the `zero exec` exit
+// code, 4) for a headless run the completion gate marked INCOMPLETE: the run
+// stopped without a completion signal (e.g. it couldn't self-verify because its
+// sandboxed shell was unavailable under --auto member), which is distinct from a
+// crash (1), usage error (2), provider failure (3), or interruption (130). It is
+// the ONLY nonzero exit an oracle-bearing task may defer to the oracle for; every
+// other nonzero exit stays authoritative. Kept as a local literal so perfbench
+// doesn't import the cli package; must stay in sync with that constant.
+const execExitIncomplete = 4
+
 // NewTurnExecRunner builds the production turn-benchmark runner: it invokes
 // headless `zero exec` with stream-json output AND `--trace <tmpfile>`, then
 // parses the emitted NDJSON trace into a *trace.TurnTrace. binary is the path to
 // the `zero` binary; extraArgs are appended to every invocation. Pass/fail is
-// decided from the stream-json run_end exit code (and the task's
-// VerificationCommand when present), exactly like NewExecRunner.
+// decided by the task's oracle when it has one. The oracle that gates the verdict
+// is the VerificationCommand (which compiles and runs the stamped OracleTest via
+// `go test`, plus any greps against the fixture); it is ground truth, so an
+// oracle-bearing task that applied the right edit but exited INCOMPLETE (exit 4,
+// its sandboxed self-verification couldn't run) still passes. Any OTHER nonzero
+// exit (crash/usage/provider/interrupt) stays authoritative and fails even an
+// oracle-bearing task. A latency-only task has no VerificationCommand, so any
+// nonzero exit is its only signal and fails it.
 func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 	return func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
+		// buildTurnExecArgs grants the write + sandboxed-shell tool set to EVERY
+		// invocation, so a task MUST run inside an isolated fixture copy — never the
+		// caller's cwd. The grant is unconditional, so the isolation can't be
+		// optional: a fixtureless task would turn an agent with write/shell tools
+		// loose in the caller's working directory (their real repo). Enforce the
+		// invariant instead of trusting it — reject a fixtureless task up front,
+		// before anything is launched, so the grant and the guard can't drift apart.
+		// Every shipped task declares a fixture, so this only fires on a malformed or
+		// newly added task, and it fails loudly rather than silently.
+		if strings.TrimSpace(task.WorkspaceFixture) == "" {
+			return TurnTaskOutcome{Err: errors.New("benchmark task has no workspaceFixture: the run grants write/shell tools and must execute in an isolated fixture copy, not the caller's cwd")}
+		}
 		// Isolate the workspace: copy the fixture into a fresh temp dir so a
 		// mutating task (edit/fix/refactor) can't dirty the shared, checked-in
-		// fixture or bleed into a later iteration of the same task. When no
-		// fixture is configured the agent runs in the caller's cwd as before.
-		if fixture := strings.TrimSpace(task.WorkspaceFixture); fixture != "" {
-			copyDir, parent, cerr := copyFixture(fixture)
-			if cerr != nil {
-				return TurnTaskOutcome{Err: fmt.Errorf("isolate fixture: %w", cerr)}
-			}
-			// Clean the whole unique parent (which owns copyDir) so the
-			// per-invocation scratch dir never leaks.
-			defer os.RemoveAll(parent)
-			task.WorkspaceFixture = copyDir
+		// fixture or bleed into a later iteration of the same task. The guard above
+		// guarantees WorkspaceFixture is set, so this always runs.
+		copyDir, parent, cerr := copyFixture(strings.TrimSpace(task.WorkspaceFixture))
+		if cerr != nil {
+			return TurnTaskOutcome{Err: fmt.Errorf("isolate fixture: %w", cerr)}
 		}
+		// Clean the whole unique parent (which owns copyDir) so the per-invocation
+		// scratch dir never leaks.
+		defer os.RemoveAll(parent)
+		task.WorkspaceFixture = copyDir
 
 		traceFile, err := os.CreateTemp("", "zero-turn-trace-*.ndjson")
 		if err != nil {
@@ -590,10 +682,23 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 			}
 		}
 
-		// A nonzero agent exit already decided failure; don't run verification or
-		// mark the task passed.
+		// Decide what a nonzero exit means. We defer to the oracle for exactly ONE
+		// case: an oracle-bearing task that exited INCOMPLETE (exit 4). That is the
+		// completion gate downgrading a run whose edits may be correct but that
+		// couldn't emit a completion signal (e.g. its sandboxed self-verify couldn't
+		// run under --auto member) — the oracle below (the compiled test / grep run
+		// against the actual fixture files) is ground truth, so if the edit really
+		// landed it passes, and if the run abandoned the task the oracle fails it.
+		// Every OTHER nonzero exit stays authoritative: a crash (1), usage error
+		// (2), provider failure (3), or interruption (130) is a genuine failure, so
+		// a partial edit that happens to satisfy the oracle can't launder it into a
+		// pass. A latency-only task has no oracle to defer to, so any nonzero exit
+		// fails it.
 		if outcome.VerifyErr != "" {
-			return outcome
+			if len(task.VerificationCommand) == 0 || exitCode != execExitIncomplete {
+				return outcome
+			}
+			outcome.VerifyErr = ""
 		}
 		// Stamp the compiler-backed oracle and capture the agent's final answer
 		// BEFORE running the verification command. Both write into the fixture
@@ -724,7 +829,23 @@ func stampOracleAndAnswer(task BenchTask, outBuf []byte) error {
 }
 
 func buildTurnExecArgs(task BenchTask, rc RunContext, tracePath string, extraArgs []string) []string {
-	args := []string{"exec", "--output-format", "stream-json", "--trace", tracePath}
+	// --auto member is REQUIRED, not optional: without a permission grant `zero
+	// exec` runs in its default read-only posture, which exposes no write or shell
+	// tools (no edit_file/apply_patch/write_file/exec_command/bash). The mutating
+	// task classes (edit/fix/refactor) then cannot apply any change, so every run
+	// grinds to the turn ceiling or reports a no-tool blocker, and the only tasks
+	// that "pass" are ones whose oracle grep matches the stamped answer text rather
+	// than a real edit. member-auto grants the write + sandboxed-shell tools the
+	// benchmark needs while keeping the workspace/network/destructive safeguards, so
+	// it is preferred over the broader --skip-permissions-unsafe (which also drops
+	// those guards and auto-retries blocked commands unsandboxed). Note the shell it
+	// grants is sandboxed: on a host without sandbox setup the agent's own
+	// self-verification (go test/build) can't run and the turn exits INCOMPLETE even
+	// after a correct edit — the runner treats the stamped oracle, not that exit
+	// code, as ground truth for oracle-bearing tasks (see NewTurnExecRunner), so a
+	// correct edit still passes. Each task also runs in an isolated, throwaway
+	// fixture copy, so the granted tools have nothing outside the task to harm.
+	args := []string{"exec", "--auto", "member", "--output-format", "stream-json", "--trace", tracePath}
 	if model := strings.TrimSpace(rc.Model); model != "" {
 		args = append(args, "--model", model)
 	}
@@ -733,6 +854,9 @@ func buildTurnExecArgs(task BenchTask, rc RunContext, tracePath string, extraArg
 	}
 	if rc.SelfCorrect {
 		args = append(args, "--self-correct")
+	}
+	if profile := strings.TrimSpace(rc.ExecProfile); profile != "" {
+		args = append(args, "--exec-profile", profile)
 	}
 	args = append(args, extraArgs...)
 	args = append(args, task.Prompt)
@@ -747,7 +871,15 @@ func ResolveBinary(explicit string) (string, error) {
 		if _, err := os.Stat(v); err != nil {
 			return "", fmt.Errorf("trace binary not found: %w", err)
 		}
-		return v, nil
+		// Pin the explicit path to an absolute one: the turn runner sets each
+		// child's cmd.Dir to a per-task fixture copy, so a relative path
+		// (./zero, the Makefile default) that stats fine here would fail to
+		// spawn from inside every fixture dir, silently erroring all tasks.
+		absolute, err := filepath.Abs(v)
+		if err != nil {
+			return "", fmt.Errorf("resolve trace binary path: %w", err)
+		}
+		return absolute, nil
 	}
 	if path, err := exec.LookPath("zero"); err == nil {
 		return path, nil
