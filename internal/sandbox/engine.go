@@ -144,14 +144,22 @@ func (engine *Engine) LookupCommandPrefixForSession(toolName string, command []s
 // don't re-run Abs/EvalSymlinks per visited path. Returns nil for a nil engine
 // (the matcher's methods treat nil as "exclude nothing").
 func (engine *Engine) ReadExclusions() *ReadExclusions {
-	// A disabled policy enforces nothing, so it must not filter search results
-	// either (Evaluate already allows every request under ModeDisabled).
+	// A disabled policy enforces nothing the USER configured, so it must not
+	// filter search results by DenyRead either (Evaluate likewise allows every
+	// request under ModeDisabled). The automatic credential exclusion is not
+	// policy-derived and survives: the bridge token authenticates the channel
+	// driving these tools, so turning the sandbox off must not hand a remote
+	// caller its own credential.
 	if engine == nil {
 		return nil
 	}
 	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == ModeDisabled {
-		return nil
+		protected := protectedCredentialPaths()
+		if len(protected) == 0 {
+			return nil
+		}
+		return &ReadExclusions{workspaceRoot: engine.workspaceRoot, protectedRoots: protected}
 	}
 	return &ReadExclusions{
 		workspaceRoot:  engine.workspaceRoot,
@@ -165,13 +173,14 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 // engine's policy + scope (see the package-level ReadExclusionGlobs). Empty when
 // DenyRead is unset or the engine has no scope.
 func (engine *Engine) ReadExclusionGlobs() []string {
-	// A disabled policy filters nothing (parity with ReadExclusions / Evaluate).
+	// A disabled policy filters nothing the user configured, but keeps the
+	// automatic credential exclusion (parity with ReadExclusions / Evaluate).
 	if engine == nil {
 		return nil
 	}
 	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == ModeDisabled {
-		return nil
+		return ReadExclusionGlobs(Policy{}, engine.scope)
 	}
 	return ReadExclusionGlobs(policy, engine.scope)
 }
@@ -319,6 +328,13 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	risk := classifyWithScope(request, scope)
 
 	if policy.Mode == ModeDisabled {
+		// Disabling the sandbox drops every user-configured restriction, but not the
+		// automatic credential exclusion: the remote bridge token authenticates the
+		// caller driving these tools, so it stays unreadable and unwritable through
+		// them (a shell command is a separate, OS-level boundary).
+		if block := protectedCredentialPathBlock(request, request.WorkspaceRoot); block != nil {
+			return deny(request, risk, block.Code, block.Path, block.Reason, false)
+		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "sandbox disabled"}
 	}
 	if request.Permission == PermissionDeny {

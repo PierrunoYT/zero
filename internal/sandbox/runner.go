@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -661,6 +662,7 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 		writeRule,
 	}
 	rules = append(rules, denyReadRules(profile.FileSystem)...)
+	rules = append(rules, credentialDenyWriteRules(profile.FileSystem, policy)...)
 	rules = append(rules, writeRootCarveoutDenyRules(profile.FileSystem)...)
 	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
@@ -823,6 +825,33 @@ func denyWriteRulesFromPaths(paths []string) []string {
 	return denySeatbeltPathRules("file-write*", paths)
 }
 
+// credentialDenyWriteRules write-denies the AUTOMATIC credential entries of
+// DenyRead — the cloud credential stores and the remote bridge token file.
+// Denying reads does not imply denying writes, and the broad
+// (allow file-write* ...) above covers every workspace root plus the default
+// temp roots, so a credential file under one of those stayed truncatable and
+// replaceable: enough to deny service, or to swap the secret the next process
+// reads. denySeatbeltPathRules keeps emitting read + unlink denials for the
+// whole DenyRead list, so a user-configured read-denied path that their build
+// legitimately writes (a cache or generated directory) stays writable — only
+// Zero's own credential entries lose the write direction.
+func credentialDenyWriteRules(fs FileSystemPolicy, policy Policy) []string {
+	automatic := normalizeProfilePaths(append(credentialDenyReadPaths(policy), protectedCredentialPaths()...))
+	if len(automatic) == 0 {
+		return nil
+	}
+	denied := normalizeProfilePaths(fs.DenyRead)
+	paths := make([]string, 0, len(automatic))
+	for _, path := range automatic {
+		// Only paths the profile actually read-denies: credentialDenyReadPaths
+		// already drops AllowRead opt-outs, and this keeps the two lists in step.
+		if slices.Contains(denied, path) {
+			paths = append(paths, path)
+		}
+	}
+	return denyWriteRulesFromPaths(dedupeStrings(paths))
+}
+
 func denySeatbeltPathRules(action string, paths []string) []string {
 	resolved := normalizeProfilePaths(paths)
 	if len(resolved) == 0 {
@@ -839,13 +868,7 @@ func denySeatbeltPathRules(action string, paths []string) []string {
 		for _, filter := range filters {
 			out = append(out, "(deny "+action+" "+filter+")")
 			if action == "file-read*" {
-				// Denying reads does not imply denying writes, and the broad
-				// (allow file-write* ...) emitted above covers every workspace root
-				// plus the default temp roots. A credential file under one of those
-				// stayed truncatable and replaceable — enough to deny service, or to
-				// swap the secret a later process reads. file-write* subsumes the
-				// unlink denial this previously emitted on its own.
-				out = append(out, "(deny file-write* "+filter+")")
+				out = append(out, "(deny file-write-unlink "+filter+")")
 			}
 		}
 	}

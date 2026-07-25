@@ -100,6 +100,7 @@ func TestEngineDeniesDaemonTokenFileTools(t *testing.T) {
 		{name: "read_file", toolName: "read_file", sideEffect: sandbox.SideEffectRead},
 		{name: "write_file", toolName: "write_file", sideEffect: sandbox.SideEffectWrite},
 		{name: "edit_file", toolName: "edit_file", sideEffect: sandbox.SideEffectWrite},
+		{name: "apply_patch", toolName: "apply_patch", sideEffect: sandbox.SideEffectWrite},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decision := engine.Evaluate(context.Background(), sandbox.Request{

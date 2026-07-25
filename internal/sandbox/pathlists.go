@@ -86,6 +86,36 @@ func protectedCredentialPaths() []string {
 	return dedupeStrings(paths)
 }
 
+// protectedCredentialPathBlock returns the block for the first requested path
+// that targets a protected credential file, or nil. It exists for the callers
+// that bypass validatePathWithPolicy — currently the ModeDisabled short-circuit,
+// where the exclusion still applies because it is not policy-derived.
+func protectedCredentialPathBlock(request Request, workspaceRoot string) *pathBlock {
+	switch request.SideEffect {
+	case SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace:
+	default:
+		return nil
+	}
+	protected := protectedCredentialPaths()
+	if len(protected) == 0 {
+		return nil
+	}
+	verb := "readable"
+	if request.SideEffect != SideEffectRead {
+		verb = "writable"
+	}
+	for _, path := range requestPaths(request) {
+		if protectedPathDenied(protected, workspaceRoot, path) {
+			return &pathBlock{
+				Code:   BlockDenied,
+				Path:   path,
+				Reason: path + " holds the remote bridge token and is never " + verb,
+			}
+		}
+	}
+	return nil
+}
+
 // protectedPathDenied reports whether path targets one of the protected
 // credential files. There is no allow-list consultation by design.
 func protectedPathDenied(protected []string, workspaceRoot, path string) bool {

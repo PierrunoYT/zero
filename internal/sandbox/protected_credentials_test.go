@@ -155,20 +155,22 @@ func TestProtectedCredentialsRejectSessionPermissionProfile(t *testing.T) {
 
 // TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile covers the macOS
 // backend: a token under a writable root was read-denied but still truncatable
-// through the broad write allow.
+// through the broad write allow. A user-configured DenyRead entry keeps the write
+// direction (see TestSeatbeltProfileProtectsMetadataAndDenyOrdering).
 func TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile(t *testing.T) {
-	token := "/private/tmp/zero-bridge-token"
+	ws, token := protectedTokenFixture(t)
+	userDenied := filepath.Join(ws, "generated")
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:       FileSystemRestricted,
 			ReadRoots:  []string{string(filepath.Separator)},
-			WriteRoots: []WritableRoot{{Root: "/repo"}},
-			DenyRead:   []string{token},
+			WriteRoots: []WritableRoot{{Root: ws}},
+			DenyRead:   []string{token, userDenied},
 			AllowTemp:  true,
 		},
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
-	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce, DenyRead: []string{userDenied}}, "")
 	escaped := sandboxProfileString(normalizeProfilePath(token))
 	denyRead := `(deny file-read* (literal "` + escaped + `"))`
 	denyWrite := `(deny file-write* (literal "` + escaped + `"))`
@@ -177,9 +179,51 @@ func TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile(t *testing.T) {
 			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
 		}
 	}
-	// Seatbelt is last-match-wins, so both denials must follow the broad allow.
+	if strings.Contains(sbpl, `(deny file-write* (literal "`+sandboxProfileString(normalizeProfilePath(userDenied))+`"))`) {
+		t.Fatalf("a user-configured DenyRead path must stay writable:\n%s", sbpl)
+	}
+	// Seatbelt is last-match-wins, so the denial must follow the broad allow.
 	if allow := strings.Index(sbpl, "(allow file-write*"); allow < 0 || strings.Index(sbpl, denyWrite) < allow {
 		t.Fatalf("the write denial must follow the broad write allow:\n%s", sbpl)
+	}
+}
+
+// TestProtectedCredentialsSurviveDisabledPolicy covers the one route that skips
+// validatePathWithPolicy entirely: ModeDisabled drops every user-configured
+// restriction, but the bridge token authenticates the caller driving these tools.
+func TestProtectedCredentialsSurviveDisabledPolicy(t *testing.T) {
+	ws, token := protectedTokenFixture(t)
+	engine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: Policy{Mode: ModeDisabled}})
+
+	for _, sideEffect := range []SideEffect{SideEffectRead, SideEffectWrite} {
+		decision := engine.Evaluate(context.Background(), Request{
+			ToolName:      "read_file",
+			WorkspaceRoot: ws,
+			SideEffect:    sideEffect,
+			Args:          map[string]any{"path": token},
+		})
+		if decision.Action != ActionDeny || !strings.Contains(decision.Reason, "remote bridge token") {
+			t.Fatalf("%s under a disabled policy: action = %q reason = %q, want a bridge-token deny", sideEffect, decision.Action, decision.Reason)
+		}
+	}
+
+	// Everything else stays allowed: a disabled sandbox is still disabled.
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:      "read_file",
+		WorkspaceRoot: ws,
+		SideEffect:    SideEffectRead,
+		Args:          map[string]any{"path": filepath.Join(ws, "main.go")},
+	})
+	if decision.Action != ActionAllow {
+		t.Fatalf("ordinary read under a disabled policy: action = %q reason = %q, want allow", decision.Action, decision.Reason)
+	}
+
+	rx := engine.ReadExclusions()
+	if !rx.Active() || !rx.PathExcluded(token) {
+		t.Fatalf("read exclusions under a disabled policy must still exclude %q", token)
+	}
+	if rx.PathExcluded(filepath.Join(ws, "main.go")) {
+		t.Fatal("read exclusions under a disabled policy must not exclude ordinary files")
 	}
 }
 
