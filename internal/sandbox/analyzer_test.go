@@ -74,6 +74,7 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "git -c config push", script: "git -c http.sslVerify=false push origin main", network: true},
 		{name: "git --git-dir fetch", script: "git --git-dir /repo/.git fetch origin", network: true},
 		{name: "git --work-tree pull", script: "git --work-tree /repo pull origin main", network: true},
+		{name: "git --attr-source push", script: "git --attr-source HEAD push origin main", network: true},
 		{name: "git -C local commit", script: `git -C repo commit -m "local change"`, network: false},
 		{name: "git.exe push", script: "git.exe push origin main", network: true},
 		{name: "git.exe local commit", script: `git.exe commit -m "local change"`, network: false},

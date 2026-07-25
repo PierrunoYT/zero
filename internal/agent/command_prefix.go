@@ -414,7 +414,7 @@ func gitSubcommand(command []string) (int, string, bool) {
 
 func gitOptionConsumesValue(arg string) bool {
 	switch arg {
-	case "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
+	case "-C", "-c", "--attr-source", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
 		return true
 	default:
 		return false
@@ -422,7 +422,8 @@ func gitOptionConsumesValue(arg string) bool {
 }
 
 func gitOptionHasInlineValue(arg string) bool {
-	return strings.HasPrefix(arg, "--config-env=") ||
+	return strings.HasPrefix(arg, "--attr-source=") ||
+		strings.HasPrefix(arg, "--config-env=") ||
 		strings.HasPrefix(arg, "--exec-path=") ||
 		strings.HasPrefix(arg, "--git-dir=") ||
 		strings.HasPrefix(arg, "--namespace=") ||

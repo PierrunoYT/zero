@@ -340,6 +340,14 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 		`git pull origin main && "unterminated`,
 		`git push gitlawb://example.com/repo.git main && "unterminated`,
 		`git -C repo push gitlawb://example.com/repo.git main && "unterminated`,
+		// git.exe runs under cmd.exe, which has no notion of a trailing single
+		// quote — this parses fine there but fails the POSIX shell parser used
+		// by AnalyzeCommand, so it must still be caught by the regex fallback.
+		`git.exe push origin main & rem '`,
+		// More value-taking global options than the fallback regex used to cap
+		// its generic-token scan at (formerly {0,8}) — every option here still
+		// precedes the actual subcommand.
+		`git -c a=1 -c b=2 -c c=3 -c d=4 -c e=5 push gitlawb://example.com/repo.git main && "unterminated`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			risk := classifyCommand(command)

@@ -305,7 +305,7 @@ func gitSubcommand(words []string) string {
 // SEPARATE token (mirrors gitOptionConsumesValue in internal/agent).
 func gitGlobalOptionConsumesValue(option string) bool {
 	switch option {
-	case "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
+	case "-C", "-c", "--attr-source", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
 		return true
 	default:
 		return false
