@@ -151,7 +151,13 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	providers := make([]providerCLISummary, 0, len(summary.Providers))
 	for _, provider := range summary.Providers {
-		_, selectable := userProviderNames[strings.ToLower(strings.TrimSpace(provider.Name))]
+		// Resolution merges provider names case-sensitively (a project config
+		// or provider command can add a "WORK" entry alongside a persisted
+		// "work"), and `providers use` only ever matches config.json rows by
+		// their exact stored casing (see config.SetActiveProvider's Resolve()
+		// path). Folding case here would label a case-variant resolved entry
+		// selectable even though `providers use` cannot actually select it.
+		_, selectable := userProviderNames[strings.TrimSpace(provider.Name)]
 		source := providerSourceResolved
 		if selectable {
 			source = providerSourceUserConfig
@@ -208,7 +214,7 @@ func loadUserProviderNames(deps appDeps) (map[string]struct{}, error) {
 		return nil, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 	for _, provider := range cfg.Providers {
-		names[strings.ToLower(strings.TrimSpace(provider.Name))] = struct{}{}
+		names[strings.TrimSpace(provider.Name)] = struct{}{}
 	}
 	return names, nil
 }

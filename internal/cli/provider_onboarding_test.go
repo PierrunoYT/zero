@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -103,6 +104,32 @@ func providersUseOverrideConfig(t *testing.T) string {
 	return configPath
 }
 
+// providersUseOverrideConfigAtDefaultUserPath is providersUseOverrideConfig,
+// but written to the exact path config.DefaultUserConfigPath() resolves to
+// (via a redirected APPDATA/XDG_CONFIG_HOME). activeProviderEnvOverrideResolves
+// proves an override by running the resolver, which loads
+// config.DefaultUserConfigPath() directly rather than deps.userConfigPath, so a
+// test asserting a real override actually resolves needs the two to agree —
+// otherwise the resolver silently reads a different (likely nonexistent) file.
+func providersUseOverrideConfigAtDefaultUserPath(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", root)
+	} else {
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+	configPath := filepath.Join(root, "zero", "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, BaseURL: config.OpenAIBaseURL, Model: "gpt-4.1"},
+			{Name: "fast", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
+		},
+	})
+	return configPath
+}
+
 // The write to config.json still succeeds, but when ZERO_PROVIDER names a
 // different provider the saved selection is NOT effective, so the command must
 // warn instead of reporting a silent success (issue #721).
@@ -136,7 +163,14 @@ func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
 
 func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	deps := providerSetupDeps(providersUseOverrideConfig(t))
+	// activeProviderEnvOverrideResolves runs the resolver to prove the override
+	// is genuinely effective, and the resolver reads the real process
+	// environment (config.Resolve falls back to os.Getenv when no Env map is
+	// injected) — so the override must be set for real, not just mocked via
+	// deps.getenv, which only feeds the separate "is this an override at all"
+	// check.
+	t.Setenv(config.ActiveProviderEnv, "work")
+	deps := providerSetupDeps(providersUseOverrideConfigAtDefaultUserPath(t))
 	deps.getenv = func(key string) string {
 		if key == config.ActiveProviderEnv {
 			return "work"
@@ -208,6 +242,60 @@ func TestRunProvidersUseFlagsUnresolvableEnvOverride(t *testing.T) {
 	}
 	if resolves, ok := payload["envProviderResolves"].(bool); !ok || resolves {
 		t.Fatalf("envProviderResolves = %#v, want false", payload["envProviderResolves"])
+	}
+}
+
+// A ZERO_PROVIDER override that names a persisted profile is still not proof
+// the next resolution succeeds: an OpenAI-compatible profile saved without a
+// model fails normalization (config.Resolve requires one), so the override
+// must not be reported as effective just because a config.json row exists.
+func TestRunProvidersUseFlagsBrokenPersistedEnvOverride(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", root)
+	} else {
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+	configPath := filepath.Join(root, "zero", "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, BaseURL: config.OpenAIBaseURL, Model: "gpt-4.1"},
+			{Name: "fast", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
+			{Name: "broken", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://api.example.com/v1"},
+		},
+	})
+	t.Setenv(config.ActiveProviderEnv, "broken")
+	deps := providerSetupDeps(configPath)
+	deps.getenv = func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "broken"
+		}
+		return ""
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if _, reported := payload["effectiveProvider"]; reported {
+		t.Fatalf("a persisted-but-unresolvable override must not be reported as effective: %#v", payload)
+	}
+	if resolves, ok := payload["envProviderResolves"].(bool); !ok || resolves {
+		t.Fatalf("envProviderResolves = %#v, want false", payload["envProviderResolves"])
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "stays the active provider") {
+		t.Fatalf("a persisted-but-unresolvable override must not be called the active provider: %q", stderr.String())
 	}
 }
 

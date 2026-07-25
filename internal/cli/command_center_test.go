@@ -229,6 +229,58 @@ func TestRunProvidersListMarksUserAndRuntimeProfiles(t *testing.T) {
 	}
 }
 
+// Resolution merges provider names case-sensitively (internal/config/resolver.go
+// mergeProvider), so a project config or provider command can add a "WORK" entry
+// alongside a persisted "work" as two distinct resolved profiles. `providers use`
+// only ever matches config.json rows by their exact stored casing, so it can
+// select "work" but has no way to select the case-variant "WORK" entry. Folding
+// case when deriving selectable/source would mislabel "WORK" as selectable too.
+func TestRunProvidersListDoesNotFoldCaseForSelectability(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "work"}}})
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profiles := []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, Model: "other-model"},
+		}
+		return config.ResolvedConfig{ActiveProvider: "work", Provider: profiles[0], Providers: profiles}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name       string `json:"name"`
+			Selectable bool   `json:"selectable"`
+			Source     string `json:"source"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Providers) != 2 {
+		t.Fatalf("unexpected providers: %#v", payload.Providers)
+	}
+	for _, provider := range payload.Providers {
+		switch provider.Name {
+		case "work":
+			if !provider.Selectable || provider.Source != providerSourceUserConfig {
+				t.Fatalf("exact-case persisted entry should be selectable: %#v", provider)
+			}
+		case "WORK":
+			if provider.Selectable || provider.Source != providerSourceResolved {
+				t.Fatalf("case-variant resolved entry must not be marked selectable: %#v", provider)
+			}
+		default:
+			t.Fatalf("unexpected provider name: %#v", provider)
+		}
+	}
+}
+
 func TestRunProvidersCatalogListsDescriptors(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

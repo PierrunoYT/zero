@@ -79,7 +79,7 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
 	// An override only becomes the effective provider if Zero can actually
 	// resolve it; a stale value names nothing and fails the next resolution.
-	overrideResolves := override != "" && activeProviderEnvOverrideResolves(deps, configPath, override)
+	overrideResolves := override != "" && activeProviderEnvOverrideResolves(deps, override)
 	if options.json {
 		payload := map[string]any{
 			"activeProvider": cfg.ActiveProvider,
@@ -135,25 +135,23 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 }
 
 // activeProviderEnvOverrideResolves reports whether the ZERO_PROVIDER value
-// names a provider Zero can resolve — a profile saved in the config file this
-// command just wrote, or one Resolve() synthesizes from an ambient env var. A
-// stale value (a renamed or removed profile) resolves to nothing, so calling it
-// the effective provider would point the user at a provider that does not exist
-// while the next resolution fails first.
-//
-// The saved-profile check comes first and reads the same configPath the command
-// wrote, so it does not depend on the ambient environment; the resolver pass only
-// adds the env-derived profiles. Neither failure is surfaced: `providers use`
-// already succeeded, and this only decides which note to print.
-func activeProviderEnvOverrideResolves(deps appDeps, configPath string, override string) bool {
-	if persisted, err := config.ProviderPersisted(configPath, override); err == nil && persisted {
-		return true
-	}
+// is the provider a subsequent invocation will actually use. A row in
+// config.json (or one Resolve() synthesizes from an ambient env var) is not
+// enough proof: that profile can still fail normalization — e.g. an
+// OpenAI-compatible entry saved without a model — which fails resolution
+// before the caller ever gets to use it, or another config layer can leave a
+// same-named profile in the list while a different one ends up active. Only
+// running the resolver and checking which provider it actually picked proves
+// the override works, so this runs the same resolution a following command
+// would and compares its ActiveProvider against override. Failure is not
+// surfaced: `providers use` already succeeded, and this only decides which
+// note to print.
+func activeProviderEnvOverrideResolves(deps appDeps, override string) bool {
 	resolved, exitCode := resolveCommandCenterConfig(io.Discard, deps)
 	if exitCode != exitSuccess {
 		return false
 	}
-	return providerResolvedByName(resolved.Providers, override)
+	return strings.EqualFold(strings.TrimSpace(resolved.ActiveProvider), override)
 }
 
 func runProvidersSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
