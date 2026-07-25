@@ -76,55 +76,6 @@ func TestRunProvidersUseJSONIncludesActiveProviderAndConfigPath(t *testing.T) {
 	}
 }
 
-func TestRunProvidersUseReportsZERO_PROVIDEROverride(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{
-		{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
-	}})
-	t.Setenv(config.ActiveProviderEnv, "runtime")
-
-	for _, jsonOutput := range []bool{false, true} {
-		var stdout, stderr bytes.Buffer
-		args := []string{"providers", "use", "saved"}
-		if jsonOutput {
-			args = append(args, "--json")
-		}
-		if code := runWithDeps(args, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
-			t.Fatalf("json=%t: code=%d stderr=%s", jsonOutput, code, stderr.String())
-		}
-		for _, want := range []string{"saved", "runtime", config.ActiveProviderEnv} {
-			if !strings.Contains(stdout.String(), want) {
-				t.Fatalf("json=%t: output missing %q: %s", jsonOutput, want, stdout.String())
-			}
-		}
-		if !jsonOutput && !strings.Contains(stdout.String(), "zero providers check runtime") {
-			t.Fatalf("follow-up check did not target effective provider: %s", stdout.String())
-		}
-		if jsonOutput {
-			var payload map[string]any
-			if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-				t.Fatal(err)
-			}
-			if payload["activeProvider"] != "saved" || payload["effectiveProvider"] != "runtime" || payload["overriddenBy"] != config.ActiveProviderEnv {
-				t.Fatalf("unexpected payload: %#v", payload)
-			}
-		}
-	}
-}
-
-func TestRunProvidersUseMatchingZERO_PROVIDERKeepsNormalOutput(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}}})
-	t.Setenv(config.ActiveProviderEnv, "saved")
-	var stdout, stderr bytes.Buffer
-	if code := runWithDeps([]string{"providers", "use", "saved"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Active provider set to saved") || strings.Contains(stdout.String(), "overrides") {
-		t.Fatalf("unexpected matching-env output: %s", stdout.String())
-	}
-}
-
 func TestRunProvidersUseExplainsRuntimeOnlyProfilesAreNotSelectable(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}}})
@@ -136,6 +87,258 @@ func TestRunProvidersUseExplainsRuntimeOnlyProfilesAreNotSelectable(t *testing.T
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("error missing %q: %s", want, stderr.String())
 		}
+	}
+}
+
+func providersUseOverrideConfig(t *testing.T) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, BaseURL: config.OpenAIBaseURL, Model: "gpt-4.1"},
+			{Name: "fast", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
+		},
+	})
+	return configPath
+}
+
+// The write to config.json still succeeds, but when ZERO_PROVIDER names a
+// different provider the saved selection is NOT effective, so the command must
+// warn instead of reporting a silent success (issue #721).
+func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := providersUseOverrideConfig(t)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "work" // ZERO_PROVIDER=work overrides the switch to fast
+		}
+		return ""
+	}
+
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	if cfg := readFileConfig(t, configPath); cfg.ActiveProvider != "fast" {
+		t.Fatalf("ActiveProvider = %q, want fast (the write still lands)", cfg.ActiveProvider)
+	}
+	if !strings.Contains(stdout.String(), "Active provider set to fast") {
+		t.Fatalf("stdout missing the success line: %q", stdout.String())
+	}
+	note := stderr.String()
+	for _, want := range []string{config.ActiveProviderEnv, "overrides config.json", "work"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("override note missing %q, got %q", want, note)
+		}
+	}
+}
+
+func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	deps := providerSetupDeps(providersUseOverrideConfig(t))
+	deps.getenv = func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "work"
+		}
+		return ""
+	}
+
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		ActiveProvider    string `json:"activeProvider"`
+		EffectiveProvider string `json:"effectiveProvider"`
+		OverriddenByEnv   string `json:"overriddenByEnv"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if payload.ActiveProvider != "fast" || payload.EffectiveProvider != "work" || payload.OverriddenByEnv != config.ActiveProviderEnv {
+		t.Fatalf("JSON must flag the env override, got %#v", payload)
+	}
+}
+
+// A ZERO_PROVIDER value that names nothing resolvable must not be reported as
+// the effective provider: the next resolution fails on it, so the note has to say
+// the override is broken rather than send the user to check a provider that does
+// not exist.
+func TestRunProvidersUseFlagsUnresolvableEnvOverride(t *testing.T) {
+	configPath := providersUseOverrideConfig(t)
+	getenv := func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "removed-profile"
+		}
+		return ""
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := providerSetupDeps(configPath)
+	deps.getenv = getenv
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	note := stderr.String()
+	for _, want := range []string{config.ActiveProviderEnv, "removed-profile", "can be resolved"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("unresolvable-override note missing %q, got %q", want, note)
+		}
+	}
+	if strings.Contains(note, "stays the active provider") {
+		t.Fatalf("an unresolvable override must not be called the active provider: %q", note)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	jsonDeps := providerSetupDeps(configPath)
+	jsonDeps.getenv = getenv
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, jsonDeps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if _, reported := payload["effectiveProvider"]; reported {
+		t.Fatalf("an unresolvable override must not be reported as effective: %#v", payload)
+	}
+	if payload["envProvider"] != "removed-profile" || payload["overriddenByEnv"] != config.ActiveProviderEnv {
+		t.Fatalf("JSON must still name the override, got %#v", payload)
+	}
+	if resolves, ok := payload["envProviderResolves"].(bool); !ok || resolves {
+		t.Fatalf("envProviderResolves = %#v, want false", payload["envProviderResolves"])
+	}
+}
+
+// No override note when ZERO_PROVIDER is unset or already names the selection.
+func TestRunProvidersUseNoWarnWithoutEnvOverride(t *testing.T) {
+	cases := map[string]func(string) string{
+		"env unset": func(string) string { return "" },
+		"env matches fast": func(key string) string {
+			if key == config.ActiveProviderEnv {
+				return "fast"
+			}
+			return ""
+		},
+	}
+	for name, getenv := range cases {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			deps := providerSetupDeps(providersUseOverrideConfig(t))
+			deps.getenv = getenv
+			if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+				t.Fatalf("exit = %d: %s", code, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected no override note, got %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+
+	exitCode := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitCrash {
+		t.Fatalf("exit code = %d, want %d", exitCode, exitCrash)
+	}
+	if !strings.Contains(stderr.String(), "invalid config JSON") {
+		t.Fatalf("stderr = %q, want malformed-config error", stderr.String())
+	}
+}
+
+func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+
+	exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		ConfigPath string `json:"configPath"`
+		Persisted  bool   `json:"persisted"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.ConfigPath != configPath || payload.Persisted {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+
+	exitCode := runWithDeps([]string{"providers", "remove", "openai", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Removed    string `json:"removed"`
+		KeyRemoved bool   `json:"keyRemoved"`
+		Persisted  bool   `json:"persisted"`
+		ConfigPath string `json:"configPath"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Removed != "" || payload.KeyRemoved || payload.Persisted || payload.ConfigPath != configPath {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+
+	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "no saved profile to rename") {
+		t.Fatalf("stdout = %q, want unpersisted explanation", stdout.String())
+	}
+}
+
+func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	var stdout, stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+
+	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Renamed    *struct{} `json:"renamed"`
+		ConfigPath string    `json:"configPath"`
+		Persisted  bool      `json:"persisted"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Renamed != nil || payload.ConfigPath != configPath || payload.Persisted {
+		t.Fatalf("unexpected payload: %+v", payload)
 	}
 }
 

@@ -27,6 +27,18 @@ type providerSummary = zerocommands.ProviderSnapshot
 type modelSummary = zerocommands.ModelSnapshot
 type providerCatalogSummary = zerocommands.ProviderCatalogSnapshot
 
+// providerSourceUserConfig marks a profile saved in the user config file — the
+// only place `zero providers use` can switch, since it writes that file.
+// providerSourceResolved covers every other way a profile reaches the resolved
+// config: project config, a provider command, or a profile synthesized from an
+// ambient env var. Those are deliberately NOT called "runtime": some of them are
+// persisted, just not where `providers use` writes, so the only guarantee the
+// label carries is that the entry cannot be selected with that command.
+const (
+	providerSourceUserConfig = "user-config"
+	providerSourceResolved   = "resolved"
+)
+
 type providerCLISummary struct {
 	providerSummary
 	Selectable bool   `json:"selectable"`
@@ -140,9 +152,9 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	providers := make([]providerCLISummary, 0, len(summary.Providers))
 	for _, provider := range summary.Providers {
 		_, selectable := userProviderNames[strings.ToLower(strings.TrimSpace(provider.Name))]
-		source := "runtime"
+		source := providerSourceResolved
 		if selectable {
-			source = "user-config"
+			source = providerSourceUserConfig
 		}
 		providers = append(providers, providerCLISummary{providerSummary: provider, Selectable: selectable, Source: source})
 	}
@@ -369,10 +381,13 @@ func formatConfigSummary(summary configSummary) string {
 	return strings.Join(lines, "\n")
 }
 
+// formatProviderSummaries renders a list whose selectability was not computed
+// (the `zero config` summary and tests), so every entry reads as an ordinary
+// saved profile and no misleading marker appears.
 func formatProviderSummaries(command string, providers []providerSummary) string {
 	cliProviders := make([]providerCLISummary, 0, len(providers))
 	for _, provider := range providers {
-		cliProviders = append(cliProviders, providerCLISummary{providerSummary: provider, Selectable: true, Source: "user-config"})
+		cliProviders = append(cliProviders, providerCLISummary{providerSummary: provider, Selectable: true, Source: providerSourceUserConfig})
 	}
 	return formatProviderCLISummaries(command, cliProviders)
 }
@@ -409,7 +424,7 @@ func formatProviderCLISummaries(command string, providers []providerCLISummary) 
 }
 
 func formatProviderLine(provider providerSummary) string {
-	return formatProviderCLILine(providerCLISummary{providerSummary: provider, Selectable: true, Source: "user-config"})
+	return formatProviderCLILine(providerCLISummary{providerSummary: provider, Selectable: true, Source: providerSourceUserConfig})
 }
 
 func formatProviderCLILine(provider providerCLISummary) string {

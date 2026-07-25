@@ -215,7 +215,7 @@ func TestRunProvidersListMarksUserAndRuntimeProfiles(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Providers) != 2 || payload.Providers[0].Name != "runtime" || payload.Providers[0].Selectable || payload.Providers[0].Source != "runtime" || !payload.Providers[1].Selectable || payload.Providers[1].Source != "user-config" {
+	if len(payload.Providers) != 2 || payload.Providers[0].Name != "runtime" || payload.Providers[0].Selectable || payload.Providers[0].Source != providerSourceResolved || !payload.Providers[1].Selectable || payload.Providers[1].Source != providerSourceUserConfig {
 		t.Fatalf("unexpected providers: %#v", payload.Providers)
 	}
 

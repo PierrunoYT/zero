@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -530,14 +532,17 @@ func TestRunTurnBenchBuildOnlyMechanism(t *testing.T) {
 	}
 }
 
-// TestTurnSchemaVersion3 pins the schema bump. v3 records the tier
-// reclassification (refactor structural-positive and nav answer-oracles moved
-// into correctnessPassRate), so a v2->v3 cross-version comparison cannot
-// silently misread the jump as a model improvement — exactly the misread the
-// tier system exists to prevent.
-func TestTurnSchemaVersion3(t *testing.T) {
-	if TurnSchemaVersion != 3 {
-		t.Fatalf("TurnSchemaVersion = %d, want 3", TurnSchemaVersion)
+// TestTurnSchemaVersion pins the schema bump so a shape change is a conscious
+// decision. v3 recorded the tier reclassification (refactor structural-positive
+// and nav answer-oracles moved into correctnessPassRate). v4 adds tasksErrored:
+// tasks whose every iteration died before the agent produced a run are now
+// first-class in the report instead of visible only in warnings, so a
+// spawn-broken run cannot print a clean-looking summary or exit 0. v5 is
+// additive only: execProfile stamps the execution profile the run was
+// benchmarked under so profile A/B reports are self-describing.
+func TestTurnSchemaVersion(t *testing.T) {
+	if TurnSchemaVersion != 5 {
+		t.Fatalf("TurnSchemaVersion = %d, want 5", TurnSchemaVersion)
 	}
 }
 
@@ -743,6 +748,92 @@ echo '{"type":"run_end","exitCode":0}'
 	}
 	if !outcome.Passed {
 		t.Fatalf("edit-01 oracle must not false-fail a correct rename that leaves the doc comment: %+v", outcome)
+	}
+}
+
+// TestOracleAuthoritativeOnIncompleteExit is the companion to the --auto member
+// switch: under member-auto the agent's shell is sandboxed, so on a host without
+// sandbox setup its self-verification (go test/build) can't run and the turn
+// exits INCOMPLETE (exit 4) even after a correct edit. For an ORACLE-bearing task
+// the runner must treat the stamped oracle — not that INCOMPLETE exit — as ground
+// truth: here the stub applies the real edit-01 rename but reports exitCode 4, and
+// the task must still pass because the fixture is correct. This defers ONLY for
+// exit 4; TestNonIncompleteExitStaysAuthoritative pins the other side.
+func TestOracleAuthoritativeOnIncompleteExit(t *testing.T) {
+	task := loadBaselineTask(t, "edit-01")
+	outcome := runTurnStub(t, task, `sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":4}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("incomplete-exit with a correct edit should pass, got harness error: %v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("a correct edit that exited INCOMPLETE (exit 4) must still pass its oracle: %+v", outcome)
+	}
+	if strings.TrimSpace(outcome.VerifyErr) != "" {
+		t.Fatalf("a passing oracle must clear the exit-code VerifyErr, got %q", outcome.VerifyErr)
+	}
+}
+
+// TestNonIncompleteExitStaysAuthoritative is the guard the oracle-authoritative
+// change MUST NOT weaken: only INCOMPLETE (exit 4) defers to the oracle. A crash
+// (1), provider failure (3), or interruption (130) is a genuine failure, so it
+// stays authoritative even for an oracle-bearing task — otherwise a partial edit
+// that happens to satisfy the oracle would launder a crashed or interrupted run
+// into a pass. Each case applies the CORRECT edit-01 rename (so the oracle WOULD
+// pass) but reports the failing exit code; the task must still fail, and the
+// failure must be attributed to the exit code, not the oracle.
+func TestNonIncompleteExitStaysAuthoritative(t *testing.T) {
+	for _, code := range []int{1, 3, 130} {
+		t.Run(fmt.Sprintf("exit%d", code), func(t *testing.T) {
+			task := loadBaselineTask(t, "edit-01")
+			outcome := runTurnStub(t, task, fmt.Sprintf(`sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
+echo '{"type":"run_end","exitCode":%d}'
+`, code))
+			if outcome.Err != nil {
+				t.Fatalf("a nonzero exit should be a task fail, not a harness error: %v", outcome.Err)
+			}
+			if outcome.Passed {
+				t.Fatalf("a run that exited %d must not pass even when the edit satisfies the oracle: %+v", code, outcome)
+			}
+			if want := fmt.Sprintf("exit code %d", code); !strings.Contains(outcome.VerifyErr, want) {
+				t.Fatalf("a non-INCOMPLETE nonzero exit must stay authoritative and surface its code, got VerifyErr=%q", outcome.VerifyErr)
+			}
+		})
+	}
+}
+
+// TestIncompleteExitStillFailsWhenOracleFails pins the OTHER half of the exit-4
+// deferral: deferring to the oracle on INCOMPLETE must still MEAN the oracle is
+// consulted, not a blanket pass. Here the stub does no real work and exits
+// INCOMPLETE (4); the edit-01 rename never happened, so the oracle fails and the
+// task fails. Without this, a regression that turned exit 4 into an unconditional
+// pass would slip through, because its sibling TestOracleAuthoritativeOnIncomplete-
+// Exit applies a CORRECT edit and would pass either way.
+func TestIncompleteExitStillFailsWhenOracleFails(t *testing.T) {
+	task := loadBaselineTask(t, "edit-01")
+	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":4}'
+`)
+	assertVerifyFailed(t, "incomplete exit with no edit applied", outcome)
+}
+
+// TestNonzeroExitStillFailsLatencyOnly is the guard on the other side of that
+// change: a latency-only task has no oracle to appeal to, so the exit code is
+// the ONLY correctness signal and a nonzero exit must still fail it. Without
+// this, dropping the exit-code gate for oracle tasks could be misread as
+// dropping it everywhere.
+func TestNonzeroExitStillFailsLatencyOnly(t *testing.T) {
+	task := loadBaselineTask(t, "longproc-01")
+	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":4}'
+`)
+	if outcome.Err != nil {
+		t.Fatalf("latency-only nonzero exit should be a verify fail, not a harness error: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatalf("a latency-only task that exited nonzero must not pass: %+v", outcome)
+	}
+	if strings.TrimSpace(outcome.VerifyErr) == "" {
+		t.Fatalf("a latency-only nonzero exit must surface a VerifyErr, got none: %+v", outcome)
 	}
 }
 
@@ -1066,4 +1157,239 @@ func TestNav08CountOracleRejectsFmtOnlyNoTesting(t *testing.T) {
 printf '%s\n' '{"type":"run_end","exitCode":0}'
 `)
 	assertVerifyFailed(t, "nav-08 fmt-only-no-testing", outcome)
+}
+
+func TestResolveBinaryAbsolutizesExplicitPath(t *testing.T) {
+	dir := t.TempDir()
+	name := "zero-probe.exe"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	resolved, err := ResolveBinary("./" + name)
+	if err != nil {
+		t.Fatalf("ResolveBinary: %v", err)
+	}
+	if !filepath.IsAbs(resolved) {
+		t.Fatalf("ResolveBinary returned relative path %q; the turn runner sets cmd.Dir per task, so a relative binary fails to spawn from every fixture copy", resolved)
+	}
+}
+
+func TestRunTurnBenchCountsErroredTasks(t *testing.T) {
+	set := TaskSet{
+		ID: "errored-suite",
+		Tasks: []BenchTask{
+			{ID: "t1", Class: "nav", Prompt: "p1", VerificationCommand: []string{"true"}},
+			{ID: "t2", Class: "longproc", Prompt: "p2"},
+		},
+	}
+	cfg := TurnBenchConfig{
+		Model:      "fake-model",
+		Iterations: 1,
+		Runner: func(context.Context, BenchTask, RunContext) TurnTaskOutcome {
+			return TurnTaskOutcome{Err: errors.New("fork/exec ./zero: file does not exist")}
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.TasksErrored != 2 {
+		t.Fatalf("TasksErrored=%d, want 2 (every iteration of both tasks errored)", result.TasksErrored)
+	}
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings=%d, want 2 run warnings", len(result.Warnings))
+	}
+	summary := FormatTurnBenchSummary(result)
+	if !strings.Contains(summary, "ERRORED: 2 task(s)") {
+		t.Fatalf("summary does not surface the errored tasks:\n%s", summary)
+	}
+	if !strings.Contains(summary, "fork/exec ./zero") {
+		t.Fatalf("summary does not echo the underlying run error:\n%s", summary)
+	}
+}
+
+func TestRunTurnBenchPartialErrorStillCounts(t *testing.T) {
+	set := TaskSet{
+		ID: "partial-suite",
+		Tasks: []BenchTask{
+			{ID: "ok", Class: "nav", Prompt: "p", VerificationCommand: []string{"true"}},
+			{ID: "dead", Class: "nav", Prompt: "p", VerificationCommand: []string{"true"}},
+		},
+	}
+	canned := map[string]*trace.TurnTrace{"ok": cannedTrace(100, 10, 1000)}
+	inner := fakeTurnRunner(canned)
+	cfg := TurnBenchConfig{
+		Model:      "fake-model",
+		Iterations: 1,
+		Runner: func(ctx context.Context, task BenchTask, rc RunContext) TurnTaskOutcome {
+			if task.ID == "dead" {
+				return TurnTaskOutcome{Err: errors.New("spawn failed")}
+			}
+			return inner(ctx, task, rc)
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if result.TasksErrored != 1 {
+		t.Fatalf("TasksErrored=%d, want 1", result.TasksErrored)
+	}
+	if result.TasksAttempted != 2 {
+		t.Fatalf("TasksAttempted=%d, want 2", result.TasksAttempted)
+	}
+}
+
+// The exec-profile passthrough: the profile must reach every task's zero exec
+// invocation as --exec-profile (with the prompt staying last) and stay out of
+// the args entirely when unset.
+func TestBuildTurnExecArgsIncludesExecProfile(t *testing.T) {
+	task := BenchTask{ID: "t", Prompt: "do the thing"}
+	args := buildTurnExecArgs(task, RunContext{Model: "m", ExecProfile: "fast"}, "trace.ndjson", nil)
+	found := false
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--exec-profile" && args[i+1] == "fast" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("args must carry --exec-profile fast, got %v", args)
+	}
+	if args[len(args)-1] != "do the thing" {
+		t.Fatalf("prompt must stay the last argument, got %v", args)
+	}
+
+	args = buildTurnExecArgs(task, RunContext{Model: "m"}, "trace.ndjson", nil)
+	for _, arg := range args {
+		if arg == "--exec-profile" {
+			t.Fatalf("no profile configured, but args carry --exec-profile: %v", args)
+		}
+	}
+}
+
+// Every benchmark invocation MUST grant the write/shell tool set via --auto
+// member. Without a permission grant the agent runs read-only and cannot apply
+// any edit, so the mutating classes measure nothing but oracle/answer
+// contamination. member-auto is the RIGHT grant: it exposes the write +
+// sandboxed-shell tools the benchmark needs while keeping the workspace/network/
+// destructive safeguards, so the args must NOT reach for the broader
+// --skip-permissions-unsafe (which drops those guards). This is a correctness
+// contract, not a preference.
+func TestBuildTurnExecArgsGrantsWriteTools(t *testing.T) {
+	args := buildTurnExecArgs(BenchTask{ID: "t", Prompt: "edit the file"}, RunContext{Model: "m"}, "trace.ndjson", nil)
+	autoMember := false
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--auto" && args[i+1] == "member" {
+			autoMember = true
+			break
+		}
+	}
+	if !autoMember {
+		t.Fatalf("benchmark exec args must include --auto member so the agent can apply edits, got %v", args)
+	}
+	for _, arg := range args {
+		if arg == "--skip-permissions-unsafe" {
+			t.Fatalf("benchmark exec args must NOT use --skip-permissions-unsafe (member-auto keeps the sandbox/network guards), got %v", args)
+		}
+	}
+	if args[len(args)-1] != "edit the file" {
+		t.Fatalf("prompt must stay the last argument, got %v", args)
+	}
+}
+
+// TestTurnRunnerRejectsFixturelessTask is the other half of the write-tools
+// contract: because buildTurnExecArgs grants the write + sandboxed-shell tool
+// set to every invocation, a task with no fixture would run an agent with those
+// tools in the caller's cwd. The runner must reject such a task BEFORE launching
+// zero exec. Passing a binary path that does not exist proves the rejection is
+// pre-launch — the outcome carries the fixture error, not a spawn error — so this
+// runs on every OS (it never reaches the POSIX-only exec stub).
+func TestTurnRunnerRejectsFixturelessTask(t *testing.T) {
+	task := BenchTask{ID: "no-fixture", Prompt: "do a thing"} // no WorkspaceFixture set
+	outcome := NewTurnExecRunner(filepath.Join(t.TempDir(), "does-not-exist-zero"))(context.Background(), task, RunContext{Model: "m"})
+	if outcome.Err == nil {
+		t.Fatalf("a fixtureless task must be rejected before launch, got %+v", outcome)
+	}
+	if !strings.Contains(outcome.Err.Error(), "workspaceFixture") {
+		t.Fatalf("rejection must name the missing workspaceFixture, got: %v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatalf("a rejected task must not pass, got %+v", outcome)
+	}
+}
+
+// The configured profile must reach the runner's RunContext and be stamped
+// into the result, so a profile A/B report is self-describing. The boundary
+// canonicalizes (case/whitespace) so equivalent postures always carry the same
+// label, and rejects unknown names so a direct library caller cannot slip an
+// unvalidated profile into a report the way the CLI (parse-time check) cannot.
+func TestRunTurnBenchStampsExecProfile(t *testing.T) {
+	set := TaskSet{
+		ID:    "profile-suite",
+		Tasks: []BenchTask{{ID: "t1", Class: "longproc", Prompt: "p"}},
+	}
+	var gotProfile string
+	cfg := TurnBenchConfig{
+		Model:       "fake-model",
+		ExecProfile: " FAST ",
+		Iterations:  1,
+		Runner: func(_ context.Context, _ BenchTask, rc RunContext) TurnTaskOutcome {
+			gotProfile = rc.ExecProfile
+			return TurnTaskOutcome{Passed: true, WallMs: 10, Trace: cannedTrace(10, 1, 100)}
+		},
+		Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	result, err := RunTurnBench(context.Background(), set, cfg)
+	if err != nil {
+		t.Fatalf("RunTurnBench: %v", err)
+	}
+	if gotProfile != "fast" {
+		t.Fatalf("runner RunContext.ExecProfile = %q, want the canonical fast", gotProfile)
+	}
+	if result.ExecProfile != "fast" {
+		t.Fatalf("result.ExecProfile = %q, want the canonical fast", result.ExecProfile)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	if !strings.Contains(string(raw), `"execProfile":"fast"`) {
+		t.Fatal("published JSON must carry execProfile")
+	}
+}
+
+func TestRunTurnBenchRejectsUnknownExecProfile(t *testing.T) {
+	set := TaskSet{
+		ID:    "profile-suite",
+		Tasks: []BenchTask{{ID: "t1", Class: "longproc", Prompt: "p"}},
+	}
+	ran := false
+	cfg := TurnBenchConfig{
+		Model:       "fake-model",
+		ExecProfile: "blanced",
+		Iterations:  1,
+		Runner: func(context.Context, BenchTask, RunContext) TurnTaskOutcome {
+			ran = true
+			return TurnTaskOutcome{Passed: true, WallMs: 10, Trace: cannedTrace(10, 1, 100)}
+		},
+	}
+	_, err := RunTurnBench(context.Background(), set, cfg)
+	if err == nil || !strings.Contains(err.Error(), "unknown execution profile") {
+		t.Fatalf("err = %v, want an unknown-profile rejection", err)
+	}
+	if ran {
+		t.Fatal("nothing may run under an unknown profile")
+	}
 }
