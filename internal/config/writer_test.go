@@ -205,7 +205,7 @@ func TestSetProviderModelUpdatesConfiguredProvider(t *testing.T) {
 		},
 	}, 0o600)
 
-	cfg, err := SetProviderModel(path, " OpenAI ", " gpt-4.1-mini ")
+	cfg, err := SetProviderModel(path, " openai ", " gpt-4.1-mini ")
 	if err != nil {
 		t.Fatalf("SetProviderModel() error = %v", err)
 	}
@@ -249,6 +249,30 @@ func TestSetProviderModelRejectsUnknownProviderWithoutRewriting(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("config was rewritten for unknown provider\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// Same scenario as RemoveProvider/RenameProvider: two rows differing only by
+// case must not let SetProviderModel update the wrong one.
+func TestSetProviderModelRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, Model: "m1"},
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, Model: "m2"},
+		},
+	}, 0o600)
+
+	cfg, err := SetProviderModel(path, "WORK", "m2-updated")
+	if err != nil {
+		t.Fatalf("SetProviderModel() error = %v", err)
+	}
+	if cfg.Providers[0].Model != "m1" {
+		t.Fatalf("unrelated 'work' row changed: %+v", cfg.Providers[0])
+	}
+	if cfg.Providers[1].Model != "m2-updated" {
+		t.Fatalf("targeted 'WORK' row not updated: %+v", cfg.Providers[1])
 	}
 }
 
@@ -629,7 +653,7 @@ func TestRemoveProviderDeletesAndHandsOffActive(t *testing.T) {
 		},
 	}, 0o600)
 
-	cfg, err := RemoveProvider(path, " BETA ")
+	cfg, err := RemoveProvider(path, " beta ")
 	if err != nil {
 		t.Fatalf("RemoveProvider() error = %v", err)
 	}
@@ -671,6 +695,34 @@ func TestRemoveProviderKeepsActiveWhenOtherRemoved(t *testing.T) {
 	}
 	if cfg.ActiveProvider != "alpha" {
 		t.Fatalf("active provider must be untouched, got %q", cfg.ActiveProvider)
+	}
+}
+
+// UpsertProvider merges by exact name, so a config file can end up with two
+// rows that differ only by case (e.g. one saved as "work", another later
+// saved as "WORK"). RemoveProvider must delete the exact row the caller
+// named, not whichever case-variant sorts first.
+func TestRemoveProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	cfg, err := RemoveProvider(path, "WORK")
+	if err != nil {
+		t.Fatalf("RemoveProvider() error = %v", err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" {
+		t.Fatalf("expected only the untouched 'work' row to remain, got %+v", cfg.Providers)
+	}
+	// "work" is still active and untouched, so the active pointer must not
+	// hand off to another provider.
+	if cfg.ActiveProvider != "work" {
+		t.Fatalf("active provider changed to %q, want unchanged 'work'", cfg.ActiveProvider)
 	}
 }
 
@@ -759,6 +811,35 @@ func TestRenameProviderRejectsCollisionAndUnknown(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("config was rewritten by a rejected rename")
+	}
+}
+
+// Same scenario as RemoveProvider: two rows differing only by case must not
+// let RenameProvider act on the wrong one.
+func TestRenameProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://b.example.com/v1", Model: "m2"},
+		},
+	}, 0o600)
+
+	cfg, err := RenameProvider(path, "WORK", "renamed")
+	if err != nil {
+		t.Fatalf("RenameProvider() error = %v", err)
+	}
+	names := map[string]bool{}
+	for _, provider := range cfg.Providers {
+		names[provider.Name] = true
+	}
+	if !names["work"] || !names["renamed"] || names["WORK"] {
+		t.Fatalf("expected 'work' untouched and 'WORK' renamed to 'renamed', got %+v", cfg.Providers)
+	}
+	// The active provider is the untouched "work" row, not the renamed one.
+	if cfg.ActiveProvider != "work" {
+		t.Fatalf("active provider changed to %q, want unchanged 'work'", cfg.ActiveProvider)
 	}
 }
 

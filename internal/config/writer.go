@@ -229,9 +229,13 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 
+	// Exact match, like ProviderPersisted/SetActiveProvider: two rows can
+	// coexist that differ only by case (UpsertProvider merges by exact name),
+	// so folding case here would delete whichever row happens to sort first
+	// instead of the one the caller actually asked for.
 	index := -1
 	for i, provider := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+		if strings.TrimSpace(provider.Name) == name {
 			index = i
 			break
 		}
@@ -241,7 +245,7 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 	}
 	removed := cfg.Providers[index]
 	cfg.Providers = append(cfg.Providers[:index], cfg.Providers[index+1:]...)
-	if strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(removed.Name)) {
+	if strings.TrimSpace(cfg.ActiveProvider) == strings.TrimSpace(removed.Name) {
 		cfg.ActiveProvider = ""
 		if len(cfg.Providers) > 0 {
 			cfg.ActiveProvider = cfg.Providers[0].Name
@@ -281,10 +285,17 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 
+	// oldName is matched exactly, like ProviderPersisted/SetActiveProvider:
+	// two rows can coexist that differ only by case (UpsertProvider merges by
+	// exact name), so folding case here would rename whichever row happens to
+	// sort first instead of the one the caller actually asked for. newName
+	// still collides case-insensitively: the credential store normalizes
+	// names, so renaming into an existing row's case variant would silently
+	// share (and corrupt) that row's stored key.
 	index := -1
 	for i, provider := range cfg.Providers {
 		providerName := strings.TrimSpace(provider.Name)
-		if strings.EqualFold(providerName, oldName) {
+		if providerName == oldName {
 			index = i
 			continue
 		}
@@ -307,7 +318,7 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 		}
 		keyMigrated = true
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(previousName)) {
+	if strings.TrimSpace(cfg.ActiveProvider) == strings.TrimSpace(previousName) {
 		cfg.ActiveProvider = newName
 	}
 	cfg.Providers[index].Name = newName
@@ -485,8 +496,12 @@ func SetProviderModel(path string, name string, model string) (FileConfig, error
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 
+	// Exact match, like ProviderPersisted/SetActiveProvider: two rows can
+	// coexist that differ only by case (UpsertProvider merges by exact name),
+	// so folding case here would update whichever row happens to sort first
+	// instead of the one the caller actually asked for.
 	for index := range cfg.Providers {
-		if strings.EqualFold(cfg.Providers[index].Name, name) {
+		if strings.TrimSpace(cfg.Providers[index].Name) == name {
 			cfg.Providers[index].Model = model
 			if err := writeConfigFile(path, cfg); err != nil {
 				return FileConfig{}, err
