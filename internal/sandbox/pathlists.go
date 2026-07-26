@@ -42,10 +42,23 @@ func resolvePolicyPath(entry string) (string, bool) {
 	return resolved, true
 }
 
-// daemonRemoteTokenFileEnv names the file holding the remote bridge's bearer
-// token. It is duplicated from internal/daemon/remote (which cannot be imported
-// here) exactly like the copy scrubSensitiveEnv keeps.
-const daemonRemoteTokenFileEnv = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+// These name the alternative sources of the remote bridge's bearer token. They
+// are duplicated from internal/daemon/remote (which cannot be imported here)
+// exactly like the copies scrubSensitiveEnv keeps.
+const (
+	daemonRemoteTokenEnv     = "ZERO_DAEMON_REMOTE_TOKEN"
+	daemonRemoteTokenFileEnv = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
+)
+
+// selectedDaemonRemoteTokenFile returns the token-file pointer only when the
+// daemon would use it. TokenFromEnv gives the inline token precedence, so an
+// inherited file pointer is not a credential when both variables are set.
+func selectedDaemonRemoteTokenFile() string {
+	if strings.TrimSpace(os.Getenv(daemonRemoteTokenEnv)) != "" {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(daemonRemoteTokenFileEnv))
+}
 
 // protectedCredentialPaths returns credential files that Zero's own in-process
 // file tools must never read or modify, independent of Policy.
@@ -64,15 +77,15 @@ const daemonRemoteTokenFileEnv = "ZERO_DAEMON_REMOTE_TOKEN_FILE"
 // its own session workspace. Unlike the profile list this applies on Windows
 // too, where filesystem deny-read has no sandbox representation (#662).
 //
-// Both the configured pathname and the target it currently resolves to are
+// Both the selected pathname and the target it currently resolves to are
 // protected: `zero daemon serve-remote` canonicalizes the value it selects (see
-// remote.CanonicalizeTokenFileEnv), but a stale symlinked value inherited from
-// elsewhere must not leave the link replaceable.
+// remote.CanonicalizeTokenFileEnv), but a symlinked selected value inherited
+// from elsewhere must not leave the link replaceable.
 func protectedCredentialPaths() []string {
 	// os.ReadFile — the daemon's own reader — treats the value literally, so a
 	// relative path resolves against the working directory and a leading "~" is
 	// NOT expanded. resolvePolicyPath would expand it and protect the wrong file.
-	configured := strings.TrimSpace(os.Getenv(daemonRemoteTokenFileEnv))
+	configured := selectedDaemonRemoteTokenFile()
 	if configured == "" {
 		return nil
 	}

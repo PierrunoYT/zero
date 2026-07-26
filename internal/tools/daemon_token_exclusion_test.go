@@ -29,6 +29,7 @@ func daemonTokenFixture(t *testing.T) (string, string, *sandbox.Engine) {
 	if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
 		t.Fatalf("write token: %v", err)
 	}
+	t.Setenv(remote.EnvToken, "")
 	t.Setenv(remote.EnvTokenFile, token)
 
 	scope, err := sandbox.NewScope(ws, nil)

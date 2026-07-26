@@ -174,7 +174,7 @@ func credentialDenyReadPaths(policy Policy) []string {
 	return credentialDenyReadPathsIn(
 		home,
 		os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
-		os.Getenv("ZERO_DAEMON_REMOTE_TOKEN_FILE"),
+		selectedDaemonRemoteTokenFile(),
 		policy.AllowRead,
 	)
 }

@@ -21,6 +21,7 @@ func protectedTokenFixture(t *testing.T) (string, string) {
 	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
 		t.Fatalf("write token: %v", err)
 	}
+	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, token)
 	return ws, token
 }
@@ -36,9 +37,18 @@ func TestProtectedCredentialPathsResolveLikeTheDaemonReader(t *testing.T) {
 	}
 
 	t.Run("absent variable protects nothing", func(t *testing.T) {
+		t.Setenv(daemonRemoteTokenEnv, "")
 		t.Setenv(daemonRemoteTokenFileEnv, "")
 		if got := protectedCredentialPaths(); len(got) != 0 {
 			t.Fatalf("protected paths = %#v, want none", got)
+		}
+	})
+
+	t.Run("inline token leaves the unused file pointer unprotected", func(t *testing.T) {
+		t.Setenv(daemonRemoteTokenEnv, "from-env")
+		t.Setenv(daemonRemoteTokenFileEnv, token)
+		if got := protectedCredentialPaths(); len(got) != 0 {
+			t.Fatalf("protected paths = %#v, want none when the inline token takes precedence", got)
 		}
 	})
 
@@ -46,6 +56,7 @@ func TestProtectedCredentialPathsResolveLikeTheDaemonReader(t *testing.T) {
 		// os.ReadFile — what the daemon uses — resolves a relative value against the
 		// working directory, so the protected path must do the same.
 		t.Chdir(base)
+		t.Setenv(daemonRemoteTokenEnv, "")
 		t.Setenv(daemonRemoteTokenFileEnv, "token")
 		if got := protectedCredentialPaths(); !stringSliceContains(got, token) {
 			t.Fatalf("protected paths = %#v, want %q", got, token)
@@ -56,6 +67,7 @@ func TestProtectedCredentialPathsResolveLikeTheDaemonReader(t *testing.T) {
 		// os.ReadFile treats "~" as an ordinary directory name; expanding it here
 		// would protect a path the daemon never reads.
 		t.Chdir(base)
+		t.Setenv(daemonRemoteTokenEnv, "")
 		t.Setenv(daemonRemoteTokenFileEnv, filepath.Join("~", "token"))
 		want := filepath.Join(base, "~", "token")
 		got := protectedCredentialPaths()
@@ -76,6 +88,7 @@ func TestProtectedCredentialPathsResolveLikeTheDaemonReader(t *testing.T) {
 		if err := os.Symlink(token, link); err != nil {
 			t.Skipf("symlink unsupported: %v", err)
 		}
+		t.Setenv(daemonRemoteTokenEnv, "")
 		t.Setenv(daemonRemoteTokenFileEnv, link)
 		got := protectedCredentialPaths()
 		for _, want := range []string{link, token} {
@@ -267,6 +280,7 @@ func TestProtectedCredentialsMatchCaseVariantOnCaseInsensitiveFilesystems(t *tes
 // TestProtectedCredentialsDoNotBlockUnrelatedRequests keeps the exclusion inert
 // for everyone who does not run the remote bridge.
 func TestProtectedCredentialsDoNotBlockUnrelatedRequests(t *testing.T) {
+	t.Setenv(daemonRemoteTokenEnv, "")
 	t.Setenv(daemonRemoteTokenFileEnv, "")
 	ws, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

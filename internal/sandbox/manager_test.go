@@ -441,11 +441,20 @@ func TestPermissionProfileDeniesDaemonTokenFile(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", tokenFile)
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, tokenFile)
 
 	profile := PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
 	want := normalizeProfilePaths([]string{tokenFile})[0]
 	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
 		t.Fatalf("DenyRead = %#v, want daemon token file %q", profile.FileSystem.DenyRead, want)
+	}
+
+	// TokenFromEnv selects the inline token when both variables are set, so the
+	// unused file pointer must not become an automatic OS-sandbox deny.
+	t.Setenv(daemonRemoteTokenEnv, "from-env")
+	profile = PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
+	if stringSliceContains(profile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, must not protect unused token file %q when the inline token takes precedence", profile.FileSystem.DenyRead, want)
 	}
 }
