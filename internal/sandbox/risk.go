@@ -39,15 +39,17 @@ var (
 	// git's own global options — mirroring gitGlobalOptionConsumesValue in
 	// analyzer.go: a recognized value-taking option (-C, -c, --attr-source,
 	// --config-env, --exec-path, --git-dir, --namespace, --super-prefix,
-	// --work-tree) consumes one following token as its value, and any other
-	// dash-prefixed token (including a joined `--git-dir=/x` form) is skipped
-	// on its own. This span is unbounded — Go's regexp is RE2-backed (linear
-	// time, no backtracking blowup) — so a git invocation with any number of
-	// global options still reaches its subcommand. Critically, a bare
-	// non-option token (e.g. the "status" in `git status push`, where "push"
-	// is only a pathspec) does NOT match either alternative, so the scan stops
-	// and the command is correctly left unclassified as network.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|\bgo\s+get\b|\bgit(?:\.exe)?(?:\s+(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)\s+[^\s;&|]+|\s+-[^\s;&|]+)*\s+(clone|fetch|pull|push)\b|\bpython(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
+	// --work-tree) consumes one following token as its value, including a
+	// single- or double-quoted value, and any other dash-prefixed token
+	// (including a joined `--git-dir=/x` form) is skipped on its own. The
+	// subcommand may also be quoted, as cmd.exe permits `git "push" ...`.
+	// This span is unbounded — Go's regexp is RE2-backed (linear time, no
+	// backtracking blowup) — so a git invocation with any number of global
+	// options still reaches its subcommand. Critically, a bare non-option token
+	// (e.g. the "status" in `git status push`, where "push" is only a pathspec)
+	// does NOT match either alternative, so the scan stops and the command is
+	// correctly left unclassified as network.
+	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|\bgo\s+get\b|\bgit(?:\.exe)?(?:\s+(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)|\s+-[^\s;&|]+)*\s+(?:"(?:clone|fetch|pull|push)"|'(?:clone|fetch|pull|push)'|(clone|fetch|pull|push)\b)|\bpython(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.

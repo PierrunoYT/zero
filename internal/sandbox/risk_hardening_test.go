@@ -344,6 +344,10 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 		// quote — this parses fine there but fails the POSIX shell parser used
 		// by AnalyzeCommand, so it must still be caught by the regex fallback.
 		`git.exe push origin main & rem '`,
+		// cmd.exe accepts quoted option values and verbs. Preserve those token
+		// boundaries when the trailing REM quote forces the fallback path.
+		`git.exe -C "C:\Program Files\repo" push origin main & rem '`,
+		`git.exe -C "C:\Program Files\repo" "push" origin main & rem '`,
 		// More value-taking global options than the fallback regex used to cap
 		// its generic-token scan at (formerly {0,8}) — every option here still
 		// precedes the actual subcommand.
