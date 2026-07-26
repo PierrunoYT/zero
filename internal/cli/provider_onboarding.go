@@ -79,7 +79,10 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
 	// An override only becomes the effective provider if Zero can actually
 	// resolve it; a stale value names nothing and fails the next resolution.
-	overrideResolves := override != "" && activeProviderEnvOverrideResolves(deps, override)
+	overrideResolution := activeProviderOverrideAbsent
+	if override != "" {
+		overrideResolution = activeProviderEnvOverrideResolution(deps, configPath, override)
+	}
 	if options.json {
 		payload := map[string]any{
 			"activeProvider": cfg.ActiveProvider,
@@ -89,8 +92,11 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 			// A JSON consumer must not read this as an effective switch either.
 			payload["overriddenByEnv"] = config.ActiveProviderEnv
 			payload["envProvider"] = override
-			payload["envProviderResolves"] = overrideResolves
-			if overrideResolves {
+			payload["envProviderResolves"] = overrideResolution.resolves()
+			if overrideResolution == activeProviderOverrideDeferred {
+				payload["envProviderResolution"] = "deferred"
+			}
+			if overrideResolution == activeProviderOverrideResolved {
 				payload["effectiveProvider"] = override
 			}
 		}
@@ -104,7 +110,9 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 	if override != "" {
 		note := fmt.Sprintf("Note: %s=%s is set and overrides config.json, so %s stays the active provider until you unset %s.\n", config.ActiveProviderEnv, override, override, config.ActiveProviderEnv)
-		if !overrideResolves {
+		if overrideResolution == activeProviderOverrideDeferred {
+			note = fmt.Sprintf("Note: %s=%s is set and overrides config.json; %s is also set, so the effective provider will be determined when Zero next resolves configuration.\n", config.ActiveProviderEnv, override, config.ProviderCommandEnv)
+		} else if overrideResolution != activeProviderOverrideResolved {
 			// Naming it "effective" would be wrong: nothing resolves under that
 			// name, so the next command fails rather than using it.
 			note = fmt.Sprintf("Note: %s=%s is set and overrides config.json, but no provider named %s can be resolved, so Zero cannot start until you unset %s or point it at a saved provider.\n", config.ActiveProviderEnv, override, override, config.ActiveProviderEnv)
@@ -114,6 +122,26 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 		}
 	}
 	return exitSuccess
+}
+
+type activeProviderOverrideResolution uint8
+
+const (
+	activeProviderOverrideAbsent activeProviderOverrideResolution = iota
+	activeProviderOverrideResolved
+	activeProviderOverrideUnresolved
+	activeProviderOverrideDeferred
+)
+
+func (resolution activeProviderOverrideResolution) resolves() any {
+	switch resolution {
+	case activeProviderOverrideResolved:
+		return true
+	case activeProviderOverrideUnresolved:
+		return false
+	default:
+		return nil
+	}
 }
 
 // activeProviderEnvOverride returns the ZERO_PROVIDER value when it is set and
@@ -128,30 +156,36 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 		return ""
 	}
 	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
-	if override == "" || strings.EqualFold(override, strings.TrimSpace(selected)) {
+	if override == "" || override == strings.TrimSpace(selected) {
 		return ""
 	}
 	return override
 }
 
-// activeProviderEnvOverrideResolves reports whether the ZERO_PROVIDER value
-// is the provider a subsequent invocation will actually use. A row in
-// config.json (or one Resolve() synthesizes from an ambient env var) is not
-// enough proof: that profile can still fail normalization — e.g. an
-// OpenAI-compatible entry saved without a model — which fails resolution
-// before the caller ever gets to use it, or another config layer can leave a
-// same-named profile in the list while a different one ends up active. Only
-// running the resolver and checking which provider it actually picked proves
-// the override works, so this runs the same resolution a following command
-// would and compares its ActiveProvider against override. Failure is not
-// surfaced: `providers use` already succeeded, and this only decides which
-// note to print.
-func activeProviderEnvOverrideResolves(deps appDeps, override string) bool {
-	resolved, exitCode := resolveCommandCenterConfig(io.Discard, deps)
-	if exitCode != exitSuccess {
-		return false
+// activeProviderEnvOverrideResolution checks whether ZERO_PROVIDER resolves
+// without running ZERO_PROVIDER_COMMAND. Provider commands are arbitrary
+// external programs and `providers use` must remain a config-only operation;
+// when one is configured, the final provider is therefore explicitly deferred
+// until the next normal resolution instead of being guessed here.
+func activeProviderEnvOverrideResolution(deps appDeps, configPath string, override string) activeProviderOverrideResolution {
+	if deps.getenv != nil && strings.TrimSpace(deps.getenv(config.ProviderCommandEnv)) != "" {
+		return activeProviderOverrideDeferred
 	}
-	return strings.EqualFold(strings.TrimSpace(resolved.ActiveProvider), override)
+	workspaceRoot, err := resolveWorkspaceRoot("", deps)
+	if err != nil {
+		return activeProviderOverrideUnresolved
+	}
+	options, err := config.DefaultResolveOptions(workspaceRoot)
+	if err != nil {
+		return activeProviderOverrideUnresolved
+	}
+	options.UserConfigPath = configPath
+	options.ProviderCommand = ""
+	resolved, err := config.Resolve(options)
+	if err != nil || strings.TrimSpace(resolved.ActiveProvider) != override {
+		return activeProviderOverrideUnresolved
+	}
+	return activeProviderOverrideResolved
 }
 
 func runProvidersSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -561,7 +595,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 func providerResolvedByName(providers []config.ProviderProfile, name string) bool {
 	name = strings.TrimSpace(name)
 	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+		if strings.TrimSpace(provider.Name) == name {
 			return true
 		}
 	}

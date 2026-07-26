@@ -165,7 +165,7 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 	}
 
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(provider.Name, name) {
+		if strings.TrimSpace(provider.Name) == name {
 			cfg.ActiveProvider = provider.Name
 			if err := writeConfigFile(path, cfg); err != nil {
 				return FileConfig{}, err
@@ -197,7 +197,7 @@ func ProviderPersisted(path string, name string) (bool, error) {
 		return false, err
 	}
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+		if strings.TrimSpace(provider.Name) == name {
 			return true, nil
 		}
 	}

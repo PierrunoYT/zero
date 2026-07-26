@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -91,6 +92,32 @@ func TestRunProvidersUseExplainsRuntimeOnlyProfilesAreNotSelectable(t *testing.T
 	}
 }
 
+func TestRunProvidersUseRejectsCaseVariantOfPersistedProvider(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "saved",
+		Providers: []config.ProviderProfile{
+			{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	})
+
+	var stdout, stderr bytes.Buffer
+	deps := providerSetupDeps(configPath)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}
+		return config.ResolvedConfig{ActiveProvider: "saved", Provider: profile, Providers: []config.ProviderProfile{profile}}, nil
+	}
+	if code := runWithDeps([]string{"providers", "use", "SAVED"}, &stdout, &stderr, deps); code != exitCrash {
+		t.Fatalf("exit = %d, want %d", code, exitCrash)
+	}
+	if !strings.Contains(stderr.String(), "only providers saved in user config are selectable") {
+		t.Fatalf("case-variant error did not explain selectability: %q", stderr.String())
+	}
+	if cfg := readFileConfig(t, configPath); cfg.ActiveProvider != "saved" {
+		t.Fatalf("ActiveProvider = %q, want saved", cfg.ActiveProvider)
+	}
+}
+
 func providersUseOverrideConfig(t *testing.T) string {
 	t.Helper()
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -105,12 +132,8 @@ func providersUseOverrideConfig(t *testing.T) string {
 }
 
 // providersUseOverrideConfigAtDefaultUserPath is providersUseOverrideConfig,
-// but written to the exact path config.DefaultUserConfigPath() resolves to
-// (via a redirected APPDATA/XDG_CONFIG_HOME). activeProviderEnvOverrideResolves
-// proves an override by running the resolver, which loads
-// config.DefaultUserConfigPath() directly rather than deps.userConfigPath, so a
-// test asserting a real override actually resolves needs the two to agree —
-// otherwise the resolver silently reads a different (likely nonexistent) file.
+// but written to the exact path config.DefaultUserConfigPath() resolves to via
+// a redirected APPDATA/XDG_CONFIG_HOME.
 func providersUseOverrideConfigAtDefaultUserPath(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -163,7 +186,7 @@ func TestRunProvidersUseWarnsWhenEnvOverrides(t *testing.T) {
 
 func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	// activeProviderEnvOverrideResolves runs the resolver to prove the override
+	// activeProviderEnvOverrideResolution runs the resolver to prove the override
 	// is genuinely effective, and the resolver reads the real process
 	// environment (config.Resolve falls back to os.Getenv when no Env map is
 	// injected) — so the override must be set for real, not just mocked via
@@ -299,6 +322,65 @@ func TestRunProvidersUseFlagsBrokenPersistedEnvOverride(t *testing.T) {
 	}
 }
 
+func TestRunProvidersUseDefersOverrideResolutionWhenProviderCommandIsSet(t *testing.T) {
+	configPath := providersUseOverrideConfig(t)
+	marker := filepath.Join(t.TempDir(), "provider-command-ran")
+	t.Setenv(config.ActiveProviderEnv, "work")
+	t.Setenv("ZERO_TEST_PROVIDER_COMMAND_MARKER", marker)
+	providerCommand := strconv.Quote(os.Args[0]) + " -test.run=^TestProviderCommandSentinel$"
+	t.Setenv(config.ProviderCommandEnv, providerCommand)
+	deps := providerSetupDeps(configPath)
+	deps.getenv = func(key string) string {
+		switch key {
+		case config.ActiveProviderEnv:
+			return "work"
+		case config.ProviderCommandEnv:
+			return providerCommand
+		default:
+			return ""
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if payload["envProviderResolution"] != "deferred" || payload["envProviderResolves"] != nil {
+		t.Fatalf("provider-command override resolution must be deferred: %#v", payload)
+	}
+	if _, reported := payload["effectiveProvider"]; reported {
+		t.Fatalf("deferred override must not be reported as effective: %#v", payload)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("provider command ran during override reporting: stat error = %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	for _, want := range []string{config.ProviderCommandEnv, "determined", "next resolves configuration"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("deferred override note missing %q: %q", want, stderr.String())
+		}
+	}
+}
+
+func TestProviderCommandSentinel(t *testing.T) {
+	marker := os.Getenv("ZERO_TEST_PROVIDER_COMMAND_MARKER")
+	if marker == "" {
+		return
+	}
+	if err := os.WriteFile(marker, []byte("ran"), 0o600); err != nil {
+		t.Fatalf("write provider-command marker: %v", err)
+	}
+}
+
 // No override note when ZERO_PROVIDER is unset or already names the selection.
 func TestRunProvidersUseNoWarnWithoutEnvOverride(t *testing.T) {
 	cases := map[string]func(string) string{
@@ -322,6 +404,18 @@ func TestRunProvidersUseNoWarnWithoutEnvOverride(t *testing.T) {
 				t.Fatalf("expected no override note, got %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestActiveProviderEnvOverrideTreatsCaseVariantAsDistinct(t *testing.T) {
+	getenv := func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "WORK"
+		}
+		return ""
+	}
+	if override := activeProviderEnvOverride(getenv, "work"); override != "WORK" {
+		t.Fatalf("activeProviderEnvOverride() = %q, want WORK", override)
 	}
 }
 

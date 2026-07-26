@@ -215,7 +215,7 @@ func TestRunProvidersListMarksUserAndRuntimeProfiles(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Providers) != 2 || payload.Providers[0].Name != "runtime" || payload.Providers[0].Selectable || payload.Providers[0].Source != providerSourceResolved || !payload.Providers[1].Selectable || payload.Providers[1].Source != providerSourceUserConfig {
+	if len(payload.Providers) != 2 || payload.Providers[0].Name != "runtime" || payload.Providers[0].Selectable || payload.Providers[0].Source != "resolved" || !payload.Providers[1].Selectable || payload.Providers[1].Source != "user-config" {
 		t.Fatalf("unexpected providers: %#v", payload.Providers)
 	}
 
@@ -268,11 +268,11 @@ func TestRunProvidersListDoesNotFoldCaseForSelectability(t *testing.T) {
 	for _, provider := range payload.Providers {
 		switch provider.Name {
 		case "work":
-			if !provider.Selectable || provider.Source != providerSourceUserConfig {
+			if !provider.Selectable || provider.Source != "user-config" {
 				t.Fatalf("exact-case persisted entry should be selectable: %#v", provider)
 			}
 		case "WORK":
-			if provider.Selectable || provider.Source != providerSourceResolved {
+			if provider.Selectable || provider.Source != "resolved" {
 				t.Fatalf("case-variant resolved entry must not be marked selectable: %#v", provider)
 			}
 		default:

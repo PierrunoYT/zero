@@ -31,7 +31,7 @@ func TestSetActiveProviderSwitchesConfiguredProvider(t *testing.T) {
 		},
 	}, 0o600)
 
-	cfg, err := SetActiveProvider(path, "  anthropic  ")
+	cfg, err := SetActiveProvider(path, "  Anthropic  ")
 	if err != nil {
 		t.Fatalf("SetActiveProvider() error = %v", err)
 	}
@@ -43,6 +43,41 @@ func TestSetActiveProviderSwitchesConfiguredProvider(t *testing.T) {
 	persisted := readConfigFixture(t, path)
 	if persisted.ActiveProvider != "Anthropic" {
 		t.Fatalf("persisted ActiveProvider = %q, want Anthropic", persisted.ActiveProvider)
+	}
+}
+
+func TestSetActiveProviderRequiresExactProviderIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "work", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	_, err := SetActiveProvider(path, "WORK")
+	if err == nil || !strings.Contains(err.Error(), `provider "WORK" not found`) {
+		t.Fatalf("SetActiveProvider() error = %v, want exact-case not-found error", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read config: %v", readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten for case-variant provider\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestProviderPersistedRequiresExactProviderIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}}}, 0o600)
+
+	persisted, err := ProviderPersisted(path, "WORK")
+	if err != nil {
+		t.Fatalf("ProviderPersisted() error = %v", err)
+	}
+	if persisted {
+		t.Fatal("ProviderPersisted() = true for case-variant identity, want false")
 	}
 }
 
