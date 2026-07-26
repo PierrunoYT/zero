@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -120,11 +121,48 @@ func protectedCredentialPathBlock(request Request, workspaceRoot string) *pathBl
 // credential files. There is no allow-list consultation by design.
 func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
 	for _, entry := range protected {
-		if pathUnderPolicyRoot(path, entry, workspaceRoot) {
+		if pathUnderProtectedRoot(path, entry, workspaceRoot) {
 			return true
 		}
 	}
 	return false
+}
+
+// protectedPathFoldsCase reports whether a case-variant spelling of a path opens
+// the SAME file on this platform, so the protected-credential comparison must
+// fold case to stay closed.
+//
+// pathWithinRoot ends in filepath.Rel, which ALREADY folds case on Windows
+// (path_windows.go's sameWord uses strings.EqualFold) but never on Unix. macOS
+// volumes are case-insensitive by default (APFS), so without folding a request
+// for `.../Bridge-Token` misses a protected `.../bridge-token` while the OS
+// opens the very same bearer-token file. Windows is listed too so the guarantee
+// does not silently depend on a filepath.Rel implementation detail.
+//
+// Case-sensitive outliers (a case-sensitive APFS volume) only make this
+// over-deny a genuinely different file that happens to differ by case alone,
+// which is the safe direction for a credential the sandbox must never expose.
+func protectedPathFoldsCase() bool {
+	return runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+}
+
+// pathUnderProtectedRoot is pathUnderPolicyRoot for the automatic credential
+// exclusions: identical anchoring and symlink normalization, plus the platform's
+// filesystem case semantics. Only the final containment comparison folds — the
+// normalization above it keeps operating on the path as spelled, so symlink
+// resolution is unaffected.
+func pathUnderProtectedRoot(requestedPath, root, workspaceRoot string) bool {
+	normalized, ok := normalizePathForPolicyRoot(requestedPath, root, workspaceRoot)
+	if !ok {
+		return false
+	}
+	if pathWithinRoot(root, normalized) {
+		return true
+	}
+	if !protectedPathFoldsCase() {
+		return false
+	}
+	return pathWithinRoot(strings.ToLower(root), strings.ToLower(normalized))
 }
 
 // resolvePolicyPaths resolves and de-duplicates a list of policy path entries,
@@ -178,18 +216,29 @@ func resolveWriteRootPaths(entries []string) []string {
 // symlink prefix cannot evade the match. root must be an already-resolved
 // absolute path.
 func pathUnderPolicyRoot(requestedPath, root, workspaceRoot string) bool {
-	if root == "" {
+	normalized, ok := normalizePathForPolicyRoot(requestedPath, root, workspaceRoot)
+	if !ok {
 		return false
+	}
+	return pathWithinRoot(root, normalized)
+}
+
+// normalizePathForPolicyRoot anchors requestedPath (a relative one against
+// workspaceRoot) and symlink-normalizes the portion outside root, yielding the
+// path pathUnderPolicyRoot compares. ok is false when there is nothing to
+// compare against: a blank root, or a relative path with no workspace root.
+func normalizePathForPolicyRoot(requestedPath, root, workspaceRoot string) (string, bool) {
+	if root == "" {
+		return "", false
 	}
 	abs := requestedPath
 	if !filepath.IsAbs(abs) {
 		if workspaceRoot == "" {
-			return false
+			return "", false
 		}
 		abs = filepath.Join(workspaceRoot, abs)
 	}
-	normalized := NormalizePrefixForRoot(abs, root)
-	return pathWithinRoot(root, normalized)
+	return NormalizePrefixForRoot(abs, root), true
 }
 
 // readDenied reports whether path is excluded by the DenyRead list with no

@@ -227,6 +227,43 @@ func TestProtectedCredentialsSurviveDisabledPolicy(t *testing.T) {
 	}
 }
 
+// TestProtectedCredentialsMatchCaseVariantOnCaseInsensitiveFilesystems covers the
+// bypass a case-variant spelling opened: pathWithinRoot ends in filepath.Rel,
+// which folds case on Windows but NOT on darwin, whose default APFS volume is
+// case-insensitive — so `.../BRIDGE-TOKEN` missed the protected `.../bridge-token`
+// while the OS opened the same bearer-token file. On a case-sensitive filesystem
+// the variant is a genuinely different file and must stay unblocked.
+func TestProtectedCredentialsMatchCaseVariantOnCaseInsensitiveFilesystems(t *testing.T) {
+	ws, token := protectedTokenFixture(t)
+	variant := filepath.Join(filepath.Dir(token), strings.ToUpper(filepath.Base(token)))
+	if variant == token {
+		t.Fatalf("fixture token %q has no case variant", token)
+	}
+	scope, err := NewScope(ws, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	policy := Policy{Mode: ModeEnforce, EnforceWorkspace: true, AllowRead: []string{ws}, AllowWrite: []string{ws}}
+	wantDenied := protectedPathFoldsCase()
+
+	for _, sideEffect := range []SideEffect{SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace} {
+		block := validatePathWithPolicy(scope, policy, sideEffect, true, ws, variant)
+		denied := block != nil && strings.Contains(block.Reason, "remote bridge token")
+		if denied != wantDenied {
+			t.Fatalf("%s on case variant %q: denied = %t, want %t (block = %#v)", sideEffect, variant, denied, wantDenied, block)
+		}
+	}
+
+	engine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: policy, Scope: scope})
+	if excluded := engine.ReadExclusions().PathExcluded(variant); excluded != wantDenied {
+		t.Fatalf("read exclusions on case variant %q: excluded = %t, want %t", variant, excluded, wantDenied)
+	}
+	// The exact spelling is denied on every platform regardless.
+	if block := validatePathWithPolicy(scope, policy, SideEffectRead, true, ws, token); block == nil {
+		t.Fatalf("the configured token path %q must always be denied", token)
+	}
+}
+
 // TestProtectedCredentialsDoNotBlockUnrelatedRequests keeps the exclusion inert
 // for everyone who does not run the remote bridge.
 func TestProtectedCredentialsDoNotBlockUnrelatedRequests(t *testing.T) {

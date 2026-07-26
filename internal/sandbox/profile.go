@@ -155,7 +155,11 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 //     WRITE_RESTRICTED token, which the unelevated tier depends on. Revisit
 //     once the Windows deny-read model is settled.
 //   - A candidate nested under a user-configured AllowRead entry is dropped,
-//     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
+//     so `allowRead: ["~/.aws"]` remains an explicit opt-out. The bridge bearer
+//     token is the one exception: the in-process tool boundary
+//     (protectedCredentialPaths) treats it as non-overrideable, and the
+//     guarantee must not depend on whether a wrapped shell command or a built-in
+//     tool does the reading.
 //
 // These are profile-level rules only; they are intentionally NOT merged into
 // Policy.DenyRead, whose emptiness gates escalated (unsandboxed) execution and
@@ -189,11 +193,15 @@ func credentialDenyReadPathsIn(home string, googleCredentials string, daemonToke
 	if target := strings.TrimSpace(googleCredentials); target != "" {
 		candidates = append(candidates, target)
 	}
+	// The bridge bearer token grants control of this daemon, so unlike the
+	// opt-outable credential stores above it stays denied even when AllowRead
+	// covers it — matching protectedCredentialPaths at the in-process boundary.
+	var mandatory []string
 	if target := strings.TrimSpace(daemonTokenFile); target != "" {
-		candidates = append(candidates, target)
+		mandatory = normalizeProfilePaths([]string{target})
 	}
 	allowRoots := normalizeProfilePaths(allowRead)
-	out := make([]string, 0, len(candidates))
+	out := make([]string, 0, len(candidates)+len(mandatory))
 	for _, path := range normalizeProfilePaths(candidates) {
 		// Only stores that actually exist on this host need a deny rule.
 		if _, err := os.Stat(path); err != nil {
@@ -210,7 +218,15 @@ func credentialDenyReadPathsIn(home string, googleCredentials string, daemonToke
 			out = append(out, path)
 		}
 	}
-	return out
+	for _, path := range mandatory {
+		// Existence filtering still applies: a deny rule for a path that is not
+		// there protects nothing, and Bubblewrap cannot bind a missing target.
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		out = append(out, path)
+	}
+	return dedupeStrings(out)
 }
 
 // userGitConfigReadPaths returns the user's global git config FILES so a

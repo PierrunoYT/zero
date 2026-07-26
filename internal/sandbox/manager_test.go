@@ -410,8 +410,12 @@ func TestCredentialDenyReadPathsIn(t *testing.T) {
 	if !stringSliceContains(optedOut, normalizeProfilePaths([]string{keyFile})[0]) {
 		t.Errorf("credential deny paths = %#v, want unrelated entries kept after opt-out", optedOut)
 	}
-	if stringSliceContains(optedOut, normalizeProfilePaths([]string{daemonTokenFile})[0]) {
-		t.Errorf("credential deny paths = %#v, want AllowRead opt-out to drop daemon token file", optedOut)
+	// The bridge bearer token is the exception: the in-process tool boundary
+	// (protectedCredentialPaths) refuses to re-include it through AllowRead, so
+	// the OS-sandbox profile must not either — otherwise the guarantee would
+	// depend on whether a wrapped shell command or a built-in tool reads it.
+	if !stringSliceContains(optedOut, normalizeProfilePaths([]string{daemonTokenFile})[0]) {
+		t.Errorf("credential deny paths = %#v, want the daemon token file denied despite AllowRead", optedOut)
 	}
 
 	if got := credentialDenyReadPathsIn("  ", "", "", nil); len(got) != 0 {
