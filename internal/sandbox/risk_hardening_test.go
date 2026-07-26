@@ -361,6 +361,28 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 	}
 }
 
+// TestClassifyUnparseableNonGitOptionTokenStaysNonNetwork guards against the
+// fallback regex treating an arbitrary bare token before a network verb as if
+// it were a git global option. `status` in `git status push` is a pathspec
+// argument to `git status`, not a value-taking global option, so `push` here
+// is not the git subcommand and must not be classified as network — even
+// though the trailing unmatched quote (a cmd.exe REM comment, invalid under
+// the POSIX parser AnalyzeCommand uses) still forces the unparseable-command
+// fallback path.
+func TestClassifyUnparseableNonGitOptionTokenStaysNonNetwork(t *testing.T) {
+	command := `git status push & rem '`
+	risk := classifyCommand(command)
+	if !HasRiskCategory(risk, "unparseable_command") {
+		t.Fatalf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+	}
+	if HasRiskCategory(risk, "network") {
+		t.Fatalf("Classify(%q) = level %s, categories %v; want no network category", command, risk.Level, risk.Categories)
+	}
+	if risk.Level != RiskHigh {
+		t.Fatalf("Classify(%q) = level %s; want high (unparseable_command only)", command, risk.Level)
+	}
+}
+
 func TestClassifyASTDoesNotFlagQuotedProgramName(t *testing.T) {
 	// A program name inside a quoted argument is not a command, so the AST
 	// analyzer must not flag it (documenting a destructive command in an echo).
