@@ -336,7 +336,7 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 
 // ProviderEdit is a field-level edit of one saved provider, applied by
 // EditProvider in a single atomic write. Name is the CURRENT profile name
-// (matched case-insensitively); NewName renames (case-only renames included).
+// (matched exactly); NewName renames (case-only renames included).
 // Empty BaseURL/Model/APIKey mean "leave unchanged"; Description is applied
 // VERBATIM (the editor always knows the full desired text, so clearing works).
 type ProviderEdit struct {
@@ -355,8 +355,7 @@ type ProviderEdit struct {
 // verbatim description. A single write keeps the operation atomic — the
 // previous rename+upsert+describe sequence could fail halfway and leave
 // config.json renamed while every in-memory consumer still held the old name —
-// and, unlike UpsertProvider's exact-name merge, the case-insensitive match
-// here makes a case-only rename (groq -> Groq) an in-place update instead of
+// and a case-only rename (groq -> Groq) remains an in-place update instead of
 // an appended duplicate profile.
 func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 	path = strings.TrimSpace(path)
@@ -384,7 +383,7 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 	index := -1
 	for i, provider := range cfg.Providers {
 		providerName := strings.TrimSpace(provider.Name)
-		if strings.EqualFold(providerName, oldName) {
+		if providerName == oldName {
 			index = i
 			continue
 		}
@@ -411,7 +410,7 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 		}
 		keyMigrated = true
 	}
-	if renamed && strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(previousName)) {
+	if renamed && strings.TrimSpace(cfg.ActiveProvider) == strings.TrimSpace(previousName) {
 		cfg.ActiveProvider = newName
 	}
 

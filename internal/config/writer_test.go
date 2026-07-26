@@ -1031,11 +1031,36 @@ func TestEditProviderAppliesRenameFieldsAndDescriptionAtomically(t *testing.T) {
 	}
 }
 
+func TestEditProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers: []ProviderProfile{
+			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://upper.example.com/v1", Model: "upper"},
+			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://lower.example.com/v1", Model: "lower"},
+		},
+	}, 0o600)
+
+	cfg, err := EditProvider(path, ProviderEdit{Name: "WORK", NewName: "renamed", Model: "updated"})
+	if err != nil {
+		t.Fatalf("EditProvider() error = %v", err)
+	}
+	if cfg.Providers[0].Name != "renamed" || cfg.Providers[0].Model != "updated" {
+		t.Fatalf("exact-case target was not edited: %+v", cfg.Providers[0])
+	}
+	if cfg.Providers[1].Name != "work" || cfg.Providers[1].Model != "lower" {
+		t.Fatalf("case-variant provider changed: %+v", cfg.Providers[1])
+	}
+	if cfg.ActiveProvider != "work" {
+		t.Fatalf("case-variant active provider changed to %q", cfg.ActiveProvider)
+	}
+}
+
 // TestEditProviderCaseOnlyRenameUpdatesInPlace: the manager previously skipped
 // RenameProvider on case-insensitively-equal names and fell into UpsertProvider,
-// whose case-SENSITIVE merge appended a duplicate profile. EditProvider matches
-// case-insensitively, so a case-only rename is an in-place update and the store
-// entry (case-normalized) survives.
+// whose case-SENSITIVE merge appended a duplicate profile. EditProvider applies
+// NewName to the exact current profile, so a case-only rename is an in-place
+// update and the store entry (case-normalized) survives.
 func TestEditProviderCaseOnlyRenameUpdatesInPlace(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
