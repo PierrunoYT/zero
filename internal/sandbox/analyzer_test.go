@@ -86,6 +86,8 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "git fetch", script: "git fetch origin", network: true},
 		{name: "git pull", script: "git pull origin main", network: true},
 		{name: "git push custom transport", script: "git push gitlawb://example.com/repo.git main", network: true},
+		{name: "git ls-remote", script: "git ls-remote origin", network: true},
+		{name: "git remote archive", script: "git archive --remote=origin HEAD", network: true},
 		{name: "git status is offline", script: "git status", network: false},
 		{name: "git local commit", script: `git commit -m "local change"`, network: false},
 		// git's value-taking global options put their value in the NEXT token, so a
@@ -98,6 +100,7 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "git --attr-source push", script: "git --attr-source HEAD push origin main", network: true},
 		{name: "git -C local commit", script: `git -C repo commit -m "local change"`, network: false},
 		{name: "git.exe push", script: "git.exe push origin main", network: true},
+		{name: "git.cmd push", script: "git.cmd push origin main", network: true},
 		{name: "git.exe local commit", script: `git.exe commit -m "local change"`, network: false},
 		{name: "gh release download", script: "gh release download v1.0.0", network: true},
 		{name: "no network", script: "ls -la && echo done", network: false},

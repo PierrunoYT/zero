@@ -453,7 +453,7 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 		if isNumericToken(text) {
 			continue
 		}
-		token := trimWindowsExecutableExtension(normalizeProgramToken(text))
+		token := normalizeProgramToken(text)
 		if wrapperPrograms[token] {
 			wrapper = token
 			continue
@@ -461,18 +461,6 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 		return token, args[index+1:]
 	}
 	return "", nil
-}
-
-// trimWindowsExecutableExtension maps git.exe to git, curl.exe to curl, and so
-// on, so a Windows spelling reaches the same classification as the bare name.
-// Only ".exe" is trimmed: a .bat/.cmd of the same stem is a separate script, not
-// the program it is named after, so classifying it as that program would be a
-// guess. normalizeProgramToken has already lowercased the token.
-func trimWindowsExecutableExtension(token string) string {
-	if trimmed := strings.TrimSuffix(token, ".exe"); trimmed != "" {
-		return trimmed
-	}
-	return token
 }
 
 // dashCPayload returns the literal text of the word following `-c` in an AST arg

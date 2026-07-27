@@ -339,15 +339,23 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 		`git fetch origin && "unterminated`,
 		`git pull origin main && "unterminated`,
 		`git push gitlawb://example.com/repo.git main && "unterminated`,
+		`git ls-remote gitlawb://example.com/repo.git & rem '`,
+		`git archive --remote=gitlawb://example.com/repo.git HEAD & rem '`,
 		`git -C repo push gitlawb://example.com/repo.git main && "unterminated`,
 		// git.exe runs under cmd.exe, which has no notion of a trailing single
 		// quote — this parses fine there but fails the POSIX shell parser used
 		// by AnalyzeCommand, so it must still be caught by the regex fallback.
 		`git.exe push origin main & rem '`,
-		// cmd.exe accepts quoted option values and verbs. Preserve those token
-		// boundaries when the trailing REM quote forces the fallback path.
+		`git.cmd push origin main & rem '`,
+		// cmd.exe accepts quoted executable paths, option values, and verbs.
+		// Preserve those token boundaries when the trailing REM quote forces the
+		// fallback path, including joined short and long option-value forms.
+		`"C:\Program Files\Git\cmd\git.exe" "push" origin main & rem '`,
 		`git.exe -C "C:\Program Files\repo" push origin main & rem '`,
 		`git.exe -C "C:\Program Files\repo" "push" origin main & rem '`,
+		`git.exe -C"C:\Program Files\repo" "push" origin main & rem '`,
+		`git.exe --git-dir="C:\Program Files\repo\.git" push origin main & rem '`,
+		`git.exe "--git-dir=C:\Program Files\repo\.git" push origin main & rem '`,
 		// More value-taking global options than the fallback regex used to cap
 		// its generic-token scan at (formerly {0,8}) — every option here still
 		// precedes the actual subcommand.
@@ -374,16 +382,26 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 // the POSIX parser AnalyzeCommand uses) still forces the unparseable-command
 // fallback path.
 func TestClassifyUnparseableNonGitOptionTokenStaysNonNetwork(t *testing.T) {
-	command := `git status push & rem '`
-	risk := classifyCommand(command)
-	if !HasRiskCategory(risk, "unparseable_command") {
-		t.Fatalf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
-	}
-	if HasRiskCategory(risk, "network") {
-		t.Fatalf("Classify(%q) = level %s, categories %v; want no network category", command, risk.Level, risk.Categories)
-	}
-	if risk.Level != RiskHigh {
-		t.Fatalf("Classify(%q) = level %s; want high (unparseable_command only)", command, risk.Level)
+	for _, command := range []string{
+		`git status push & rem '`,
+		`git "status" push & rem '`,
+		`git 'status' push & rem "`,
+		`git.exe -C "C:\Program Files\push" status & rem '`,
+		`git.exe --git-dir="C:\Program Files\push\.git" status & rem '`,
+		`git.exe "--git-dir=C:\Program Files\push\.git" status & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			risk := classifyCommand(command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+			}
+			if HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = level %s, categories %v; want no network category", command, risk.Level, risk.Categories)
+			}
+			if risk.Level != RiskHigh {
+				t.Errorf("Classify(%q) = level %s; want high (unparseable_command only)", command, risk.Level)
+			}
+		})
 	}
 }
 

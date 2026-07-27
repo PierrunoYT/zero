@@ -33,23 +33,25 @@ var (
 	// unparseableNetworkPattern is used only after the shell parser fails. At
 	// that point the command is already marked too complex, so this intentionally
 	// favors catching obvious network programs over proving exact shell syntax.
-	// The git branch matches an optional .exe suffix (a parser-failing Windows
-	// command like `git.exe push origin main & rem '` runs under cmd.exe and
-	// must still classify as network) and, before the subcommand, skips only
+	// The git branch accepts Windows executable suffixes and a closing quote
+	// from a fully qualified path (a parser-failing command like
+	// `"C:\Program Files\Git\cmd\git.exe" push ... & rem '` runs under cmd.exe
+	// and must still classify as network). Before the subcommand, it skips only
 	// git's own global options — mirroring gitGlobalOptionConsumesValue in
 	// analyzer.go: a recognized value-taking option (-C, -c, --attr-source,
 	// --config-env, --exec-path, --git-dir, --namespace, --super-prefix,
-	// --work-tree) consumes one following token as its value, including a
-	// single- or double-quoted value, and any other dash-prefixed token
-	// (including a joined `--git-dir=/x` form) is skipped on its own. The
-	// subcommand may also be quoted, as cmd.exe permits `git "push" ...`.
+	// --work-tree) consumes one following token as its value, and any other
+	// dash-prefixed token is skipped on its own. Both branches preserve quoted
+	// fragments, including spaces in separate or joined option values such as
+	// `-C "C:\Program Files\repo"` and `--git-dir="C:\Program Files\repo\.git"`.
+	// The subcommand may also be quoted, as cmd.exe permits `git "push" ...`.
 	// This span is unbounded — Go's regexp is RE2-backed (linear time, no
 	// backtracking blowup) — so a git invocation with any number of global
 	// options still reaches its subcommand. Critically, a bare non-option token
 	// (e.g. the "status" in `git status push`, where "push" is only a pathspec)
 	// does NOT match either alternative, so the scan stops and the command is
 	// correctly left unclassified as network.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|\bgo\s+get\b|\bgit(?:\.exe)?(?:\s+(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)|\s+-[^\s;&|]+)*\s+(?:"(?:clone|fetch|pull|push)"|'(?:clone|fetch|pull|push)'|(clone|fetch|pull|push)\b)|\bpython(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
+	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|\bgo\s+get\b|\bgit(?:\.(?:exe|cmd|bat|com))?["']?(?:\s+(?:(?:(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)|"(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)"|'(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)')\s+(?:[^\s;&|"']|"[^"]*"|'[^']*')+|(?:-(?:[^\s;&|"']|"[^"]*"|'[^']*')+|"-[^"]*"|'-[^']*')))*\s+(?:"(?:clone|fetch|pull|push|ls-remote|archive)"|'(?:clone|fetch|pull|push|ls-remote|archive)'|(clone|fetch|pull|push|ls-remote|archive)\b)|\bpython(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.
