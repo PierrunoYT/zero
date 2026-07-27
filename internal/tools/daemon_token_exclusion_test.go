@@ -48,6 +48,28 @@ func daemonTokenFixture(t *testing.T) (string, string, *sandbox.Engine) {
 	return ws, token, engine
 }
 
+// defaultPolicyDaemonTokenEngine is the remote-daemon shape relevant to shell
+// escalation: a selected token file with the default policy and no user
+// DenyRead entries.
+func defaultPolicyDaemonTokenEngine(t *testing.T) *sandbox.Engine {
+	t.Helper()
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(ws, "bridge-token")
+	if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	t.Setenv(remote.EnvToken, "")
+	t.Setenv(remote.EnvTokenFile, token)
+	policy := sandbox.DefaultPolicy()
+	if len(policy.DenyRead) != 0 {
+		t.Fatalf("default policy DenyRead = %#v, want none", policy.DenyRead)
+	}
+	return sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: ws, Policy: policy})
+}
+
 func TestGrepSkipsDaemonTokenFile(t *testing.T) {
 	ws, _, engine := daemonTokenFixture(t)
 	tool, ok := NewScopedGrepTool(ws, nil).(sandboxAwareTool)
@@ -84,6 +106,25 @@ func TestGlobSkipsDaemonTokenFile(t *testing.T) {
 	}
 	if strings.Contains(sandboxed.Output, "bridge-token") {
 		t.Fatalf("glob must NOT surface the remote bridge token file, got:\n%s", sandboxed.Output)
+	}
+}
+
+func TestListDirectorySkipsDaemonTokenFile(t *testing.T) {
+	ws, _, engine := daemonTokenFixture(t)
+	registry := NewRegistry()
+	registry.Register(NewScopedListDirectoryTool(ws, nil))
+
+	result := registry.RunWithOptions(context.Background(), "list_directory", map[string]any{
+		"path": ".",
+	}, RunOptions{Sandbox: engine})
+	if result.Status != StatusOK {
+		t.Fatalf("list_directory failed: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "main.go") {
+		t.Fatalf("list_directory must still show ordinary workspace files, got:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "bridge-token") {
+		t.Fatalf("list_directory must NOT surface the remote bridge token file, got:\n%s", result.Output)
 	}
 }
 

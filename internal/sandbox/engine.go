@@ -193,7 +193,8 @@ func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
 }
 
 // UnsandboxedExecutionAllowed reports whether an escalated shell attempt may
-// bypass the native sandbox without dropping active denied-read restrictions.
+// bypass the native sandbox without dropping active denied-read restrictions,
+// including the automatic remote bridge token exclusion.
 func (engine *Engine) UnsandboxedExecutionAllowed() bool {
 	if engine == nil {
 		return true
@@ -202,7 +203,7 @@ func (engine *Engine) UnsandboxedExecutionAllowed() bool {
 	if policy.Mode == ModeDisabled {
 		return true
 	}
-	return len(normalizeProfilePaths(policy.DenyRead)) == 0
+	return len(normalizeProfilePaths(policy.DenyRead)) == 0 && len(protectedCredentialPaths()) == 0
 }
 
 // toolNetworkExempt reports whether a request is exempt from the engine-level
