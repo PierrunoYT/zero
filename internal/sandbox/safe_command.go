@@ -361,6 +361,16 @@ func firstProgram(fields []string) string {
 // command boundary (e.g. `sudo git rebase -i` -> "git rebase -i") instead of
 // matching the segment text anywhere as a raw substring.
 func commandBody(fields []string) string {
+	return strings.Join(commandBodyFields(fields), " ")
+}
+
+// commandBodyFields is commandBody's scan, returning the fields from the first
+// real command token onward (nil when the segment is nothing but assignments and
+// wrappers). Callers that need to reason about the program and its arguments
+// separately — the unparseable-command fallback in risk.go — use this rather
+// than re-splitting commandBody's joined string, which would lose the token
+// boundaries the fallback tokenizer worked to preserve.
+func commandBodyFields(fields []string) []string {
 	wrapper := ""
 	for index := 0; index < len(fields); index++ {
 		field := fields[index]
@@ -381,9 +391,9 @@ func commandBody(fields []string) string {
 			continue
 		}
 		// First real command token: the body starts here.
-		return strings.Join(fields[index:], " ")
+		return fields[index:]
 	}
-	return ""
+	return nil
 }
 
 // isNumericToken reports whether a token is purely digits (e.g. the duration
@@ -454,8 +464,20 @@ func normalizeProgramToken(field string) string {
 			token = token[i+1:]
 		}
 	}
-	token = strings.ToLower(token)
-	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
+	return trimExecutableSuffix(strings.ToLower(token))
+}
+
+// executableSuffixes are the Windows executable extensions stripped from a
+// program token so curl.exe, git.cmd, and curl all normalize to one name. Both
+// the parseable path (normalizeProgramToken) and the unparseable fallback
+// (executableTokenBase) strip the same set; a token that normalizes differently
+// on the two paths is exactly how a command slips past the fallback.
+var executableSuffixes = []string{".exe", ".cmd", ".bat", ".com"}
+
+// trimExecutableSuffix removes one trailing Windows executable extension from an
+// already-lowercased token.
+func trimExecutableSuffix(token string) string {
+	for _, suffix := range executableSuffixes {
 		if strings.HasSuffix(token, suffix) {
 			return strings.TrimSuffix(token, suffix)
 		}
@@ -487,9 +509,9 @@ func windowsExecutablePathBasename(token string) (string, bool) {
 }
 
 func hasWindowsExecutableSuffix(token string) bool {
-	token = strings.ToLower(token)
-	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
-		if strings.HasSuffix(token, suffix) {
+	lowered := strings.ToLower(token)
+	for _, suffix := range executableSuffixes {
+		if strings.HasSuffix(lowered, suffix) {
 			return true
 		}
 	}

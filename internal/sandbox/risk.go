@@ -68,59 +68,107 @@ func matchesDestructive(command string) bool {
 	return false
 }
 
+// maxUnparseableShellDepth bounds `sh -c <payload>` recursion in the fallback,
+// mirroring maxAnalyzerDepth on the parseable path so a nested launcher chain
+// cannot make classification unbounded.
+const maxUnparseableShellDepth = 3
+
 func matchesUnparseableNetwork(command string) bool {
-	commands := fallbackCommandTokens(command)
-	for _, tokens := range commands {
-		if len(tokens) == 0 {
+	return matchesUnparseableNetworkAt(command, 0)
+}
+
+// matchesUnparseableNetworkAt scans each fallback segment for a network program.
+// It resolves the segment's real program the same way the parseable path does —
+// past environment assignments and wrapper prefixes (sudo, env, timeout, nice,
+// xargs, ...) and the option values those wrappers consume — because a fallback
+// that only looked at the first token would let `sudo curl …`, `env git fetch …`,
+// or `PATH=.:$PATH git push …` through. The point of this path is to fail closed
+// on a command too obfuscated to parse; a wrapper prefix is the cheapest possible
+// obfuscation.
+//
+// Resolving the program (rather than matching the network name anywhere in the
+// string, as an earlier revision did) is what keeps `git status push` and
+// `echo https://example.com/repo.git push` out: a network verb only counts when
+// it belongs to a program actually being invoked.
+func matchesUnparseableNetworkAt(command string, depth int) bool {
+	for _, tokens := range fallbackCommandTokens(command) {
+		body := commandBodyFields(tokens)
+		if len(body) == 0 {
 			continue
 		}
-		if isGitExecutableToken(tokens[0]) && matchesUnparseableGitNetwork(tokens) {
+		program, args := executableTokenBase(body[0]), body[1:]
+		if program == "git" && matchesUnparseableGitNetwork(args) {
 			return true
 		}
-		executable := executableTokenBase(tokens[0])
-		if unparseableNetworkPattern.MatchString(strings.Join(append([]string{executable}, tokens[1:]...), " ")) {
+		if unparseableNetworkPattern.MatchString(strings.Join(append([]string{program}, args...), " ")) {
 			return true
+		}
+		// `sh -c <payload>` runs the payload as a fresh command. The fallback
+		// tokenizer keeps a quoted payload as ONE token, so the network program
+		// inside it is not a token of this segment at all — recurse the way
+		// analyzeInto does on the parseable path.
+		if depth < maxUnparseableShellDepth && shellPrograms[program] {
+			if payload := fallbackDashCPayload(args); payload != "" {
+				if matchesUnparseableNetworkAt(payload, depth+1) {
+					return true
+				}
+			}
 		}
 	}
 	return false
 }
 
-func matchesUnparseableGitNetwork(tokens []string) bool {
-	for j := 1; j < len(tokens); j++ {
-		word := strings.ToLower(tokens[j])
+// matchesUnparseableGitNetwork reports whether git's arguments (everything after
+// the executable) name a subcommand that talks to a remote.
+func matchesUnparseableGitNetwork(args []string) bool {
+	for index := 0; index < len(args); index++ {
+		word := strings.ToLower(args[index])
 		if word == "--help" || word == "--version" {
 			break
 		}
 		if strings.HasPrefix(word, "-") {
 			if gitGlobalOptionConsumesValue(word) {
-				j++
+				index++
 			}
 			continue
 		}
 		switch word {
-		case "clone", "fetch", "pull", "push", "ls-remote", "archive":
+		case "clone", "fetch", "pull", "push", "ls-remote":
 			return true
+		case "archive":
+			// Only a --remote archive leaves the machine; `git archive HEAD` reads
+			// the local object store. See gitUsesNetwork for the same gate on the
+			// parseable path.
+			return gitTargetsRemoteArchive(args)
 		}
 		break
 	}
 	return false
 }
 
-func isGitExecutableToken(token string) bool {
-	switch executableTokenBase(token) {
-	case "git", "git.exe", "git.cmd", "git.bat", "git.com":
-		return true
-	default:
-		return false
+// fallbackDashCPayload returns the argument following `-c` (the command a shell
+// launcher will run), or "" when there is none. It mirrors dashCPayload on the
+// parseable path.
+func fallbackDashCPayload(args []string) string {
+	for index := 0; index < len(args); index++ {
+		if args[index] == "-c" && index+1 < len(args) {
+			return args[index+1]
+		}
 	}
+	return ""
 }
 
+// executableTokenBase reduces a raw fallback token to a comparable program name.
+// It strips quoting, any directory prefix, and a Windows executable suffix, so
+// this path recognizes curl.exe and git.cmd exactly as normalizeProgramToken does
+// on the parseable path — a token that normalized differently here used to be how
+// `curl.exe https://… && "unterminated` lost its network classification.
 func executableTokenBase(token string) string {
 	token = strings.Trim(token, `\"'`)
-	if slash := strings.LastIndexAny(token, `/\\`); slash >= 0 {
+	if slash := strings.LastIndexAny(token, `/\`); slash >= 0 {
 		token = token[slash+1:]
 	}
-	return strings.ToLower(token)
+	return trimExecutableSuffix(strings.ToLower(token))
 }
 
 // fallbackCommandTokens performs deliberately small shell/cmd tokenization.
@@ -157,11 +205,15 @@ func fallbackCommandTokens(command string) [][]string {
 			}
 			continue
 		}
-		if quote == 0 && (r == ';' || r == '&' || r == '|') {
+		// A newline separates commands exactly as ;/&/| do. Treating it as mere
+		// whitespace kept a multi-line script as one segment, so anything after the
+		// first line was scanned as arguments of the first line's program and the
+		// program on line two was never resolved.
+		if quote == 0 && (r == ';' || r == '&' || r == '|' || r == '\n' || r == '\r') {
 			flushCommand()
 			continue
 		}
-		if quote == 0 && (r == ' ' || r == '\t' || r == '\r' || r == '\n') {
+		if quote == 0 && (r == ' ' || r == '\t') {
 			flush()
 			continue
 		}

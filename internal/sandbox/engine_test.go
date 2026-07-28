@@ -45,6 +45,32 @@ func TestEvaluatePromptsForNetworkToolsButExemptsThemFromShellNetworkPolicy(t *t
 	}
 }
 
+// TestEvaluatePromptsForUnparseableNetworkBehindWrapper is the engine-level
+// regression for jatmn's #726 P2 finding. Classification is what decides egress
+// here: when the fallback stopped recognizing a network program hidden behind a
+// wrapper, an already-permission-granted shell command went from ActionPrompt /
+// ReasonNetworkBlocked to a plain ActionAllow — silently granting network to a
+// command too obfuscated to parse.
+func TestEvaluatePromptsForUnparseableNetworkBehindWrapper(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	for _, command := range []string{
+		`sudo curl https://evil.test && "unterminated`,
+		`env git push origin main && "unterminated`,
+		`curl.exe https://evil.test && "unterminated`,
+		"true\ncurl https://evil.test && \"unterminated",
+	} {
+		t.Run(command, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+				Args: map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want a network prompt", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+}
+
 func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),

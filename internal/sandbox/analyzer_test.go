@@ -88,6 +88,11 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "git push custom transport", script: "git push gitlawb://example.com/repo.git main", network: true},
 		{name: "git ls-remote", script: "git ls-remote origin", network: true},
 		{name: "git remote archive", script: "git archive --remote=origin HEAD", network: true},
+		{name: "git remote archive separated value", script: "git archive --remote origin HEAD", network: true},
+		// Only --remote leaves the machine; a local archive streams the object
+		// store and must not cost a network prompt (issue #703 review).
+		{name: "git local archive", script: "git archive HEAD", network: false},
+		{name: "git -C local archive", script: "git -C repo archive HEAD -o out.tar", network: false},
 		{name: "git status is offline", script: "git status", network: false},
 		{name: "git local commit", script: `git commit -m "local change"`, network: false},
 		// git's value-taking global options put their value in the NEXT token, so a

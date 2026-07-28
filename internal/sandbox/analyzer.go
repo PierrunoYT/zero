@@ -279,11 +279,31 @@ func packageManagerOffline(words []string) bool {
 
 func gitUsesNetwork(words []string) bool {
 	switch gitSubcommand(words) {
-	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
+	case "clone", "fetch", "pull", "push", "ls-remote":
 		return true
+	case "archive":
+		// `git archive HEAD` streams a tree out of the local object store and needs
+		// no egress at all; only `--remote=<repo>` sends the request to another
+		// host. Classifying every archive as network cost a proactive network
+		// prompt on a purely local command.
+		return gitTargetsRemoteArchive(words)
 	default:
 		return false
 	}
+}
+
+// gitTargetsRemoteArchive reports whether a git archive invocation carries the
+// --remote option, in either its joined (--remote=<repo>) or separated
+// (--remote <repo>) spelling. The whole argument list is scanned rather than
+// only the part after the subcommand, so option order cannot hide it.
+func gitTargetsRemoteArchive(words []string) bool {
+	for _, word := range words {
+		lowered := strings.ToLower(word)
+		if lowered == "--remote" || strings.HasPrefix(lowered, "--remote=") {
+			return true
+		}
+	}
+	return false
 }
 
 // gitSubcommand resolves the subcommand past git's GLOBAL options. The generic

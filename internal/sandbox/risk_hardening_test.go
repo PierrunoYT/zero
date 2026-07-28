@@ -376,6 +376,74 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 	}
 }
 
+// TestClassifyUnparseableNetworkBehindWrapperFailsClosed is the regression test
+// for jatmn's #726 P2/P3 findings: resolving the fallback's program from
+// tokens[0] alone dropped the network category whenever the real program sat
+// behind a wrapper (sudo/env/timeout/xargs), an environment assignment, a shell
+// launcher's -c payload, a Windows executable suffix, or a newline — each of
+// which base main still caught with its whole-string match. An unparseable
+// command is already too obfuscated to analyze, so a wrapper prefix must not be
+// enough to buy egress without a prompt.
+func TestClassifyUnparseableNetworkBehindWrapperFailsClosed(t *testing.T) {
+	for _, command := range []string{
+		// Wrapper programs, including ones whose options consume a value.
+		`sudo curl https://example.com && "unterminated`,
+		`sudo -u root curl https://example.com && "unterminated`,
+		`env curl https://example.com && "unterminated`,
+		`env git fetch origin && "unterminated`,
+		`sudo git push origin main && "unterminated`,
+		`sudo npm install && "unterminated`,
+		`timeout 5 curl https://example.com && "unterminated`,
+		`xargs curl https://example.com && "unterminated`,
+		// Environment-assignment prefixes.
+		`PATH=.:$PATH git push origin main && "unterminated`,
+		`GIT_SSH_COMMAND=ssh git push origin main && "unterminated`,
+		// A shell launcher's payload is a single token to the fallback tokenizer,
+		// so the program inside it is only visible by recursing into it.
+		`sh -c 'curl https://example.com' && "unterminated`,
+		`bash -c "git push origin main" && "unterminated`,
+		// Windows executable suffixes normalize on the parseable path already.
+		`curl.exe https://example.com && "unterminated`,
+		`wget.exe https://example.com && "unterminated`,
+		`sudo curl.exe https://example.com && "unterminated`,
+		// A newline separates commands; the network program is on its own line.
+		"true\ncurl https://example.com && \"unterminated",
+		"echo start\r\ngit push origin main && \"unterminated",
+	} {
+		t.Run(command, func(t *testing.T) {
+			risk := classifyCommand(command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+			}
+			if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
+			}
+		})
+	}
+}
+
+// TestClassifyUnparseableLocalGitArchiveStaysNonNetwork pins the other half of
+// the archive gate: the fallback must agree with the AST path that only a
+// --remote archive talks to another host.
+func TestClassifyUnparseableLocalGitArchiveStaysNonNetwork(t *testing.T) {
+	for _, command := range []string{
+		`git archive HEAD & rem '`,
+		`git archive -o out.tar HEAD & rem '`,
+		`git -C repo archive HEAD & rem '`,
+		`git.exe archive HEAD & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			risk := classifyCommand(command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+			}
+			if HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = categories %v; want no network category for a local archive", command, risk.Categories)
+			}
+		})
+	}
+}
+
 // TestClassifyUnparseableNonGitOptionTokenStaysNonNetwork guards against the
 // fallback regex treating an arbitrary bare token before a network verb as if
 // it were a git global option. `status` in `git status push` is a pathspec
