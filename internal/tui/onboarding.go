@@ -537,10 +537,14 @@ func (m *model) moveSetupMethod(delta int) {
 
 // setupOAuthCmd runs the chosen provider's browser OAuth login off the UI
 // goroutine for first-run setup. Mirrors the /provider wizard's flow.
-func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
+func setupOAuthCmd(provider providercatalog.Descriptor, configPath ...string) tea.Cmd {
+	path := firstString(configPath)
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
+			if err := preflightOAuthUserConfig(path); err != nil {
+				return setupOAuthMsg{providerID: provider.ID, err: err}
+			}
 			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 				OpenBrowser: browser.OpenURL,
 				Timeout:     3 * time.Minute,
@@ -549,13 +553,13 @@ func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
 		}
 	case provider.ID == "chatgpt":
 		return func() tea.Msg {
-			err := runProviderChatGPTLogin()
+			err := runProviderChatGPTLogin(path)
 			return setupOAuthMsg{tokenLogin: true, providerID: provider.ID, err: err}
 		}
 	default:
 		name := provider.ID
 		return func() tea.Msg {
-			return setupOAuthMsg{tokenLogin: true, providerID: name, err: runProviderTokenLogin(name)}
+			return setupOAuthMsg{tokenLogin: true, providerID: name, err: runProviderTokenLogin(name, path)}
 		}
 	}
 }
@@ -587,9 +591,13 @@ func setupDevicePrepareCmd(name string) tea.Cmd {
 	}
 }
 
-func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+func setupDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath ...string) tea.Cmd {
 	return func() tea.Msg {
-		return setupOAuthMsg{tokenLogin: true, providerID: name, err: oauthDeviceComplete(name, cfg, auth)}
+		path := firstString(configPath)
+		if err := preflightOAuthUserConfig(path); err != nil {
+			return setupOAuthMsg{tokenLogin: true, providerID: name, err: err}
+		}
+		return setupOAuthMsg{tokenLogin: true, providerID: name, err: oauthDeviceComplete(name, cfg, auth, path)}
 	}
 }
 
@@ -626,7 +634,7 @@ func (m model) applySetupOAuthDeviceCode(msg setupOAuthDeviceMsg) (tea.Model, te
 	}
 	m.setup.deviceUserCode = msg.userCode
 	m.setup.deviceVerificationURI = msg.verifyURL
-	return m, setupDevicePollCmd(msg.providerID, msg.cfg, msg.auth)
+	return m, setupDevicePollCmd(msg.providerID, msg.cfg, msg.auth, m.setup.configPath)
 }
 
 // applySetupOAuth folds an OAuth login result into the first-run setup: on success
@@ -790,7 +798,7 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 				m.setup.oauthPending = true
 				m.setup.oauthDevice = false
 				m.setup.oauthErr = ""
-				return m, setupOAuthCmd(descriptor)
+				return m, setupOAuthCmd(descriptor, m.setup.configPath)
 			}
 		}
 		if m.setup.stage == setupStageProvider {

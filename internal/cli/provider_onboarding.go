@@ -71,9 +71,6 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 	cfg, err := config.SetActiveProvider(configPath, options.name)
 	if err != nil {
-		if strings.Contains(err.Error(), "provider ") && strings.Contains(err.Error(), " not found") {
-			err = fmt.Errorf("%w; only providers saved in user config are selectable (use zero providers setup or zero providers add first)", err)
-		}
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
@@ -595,11 +592,17 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 func providerResolvedByName(providers []config.ProviderProfile, name string) bool {
 	name = strings.TrimSpace(name)
 	for _, provider := range providers {
-		if strings.TrimSpace(provider.Name) == name {
+		if strings.TrimSpace(provider.Name) == name || strings.TrimSpace(provider.CatalogID) == name {
 			return true
 		}
 	}
-	return false
+	matches := 0
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider.Name), name) || strings.EqualFold(strings.TrimSpace(provider.CatalogID), name) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 // reportUnpersistedProviderUse handles `zero providers use <name>` for a
@@ -611,6 +614,11 @@ func providerResolvedByName(providers []config.ProviderProfile, name string) boo
 // reports the situation plainly instead of that confusing error (issue
 // #707).
 func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, options providerUseOptions, configPath string) (int, bool) {
+	if persisted, err := config.ProviderPersistedCaseInsensitive(configPath, options.name); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash), true
+	} else if persisted {
+		return exitSuccess, false
+	}
 	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
 	if exitCode != exitSuccess {
 		// resolveCommandCenterConfig already wrote its own error to stderr;

@@ -85,10 +85,8 @@ func TestRunProvidersUseExplainsRuntimeOnlyProfilesAreNotSelectable(t *testing.T
 	if code := runWithDeps([]string{"providers", "use", "runtime"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitCrash {
 		t.Fatalf("unexpected code %d", code)
 	}
-	for _, want := range []string{"only providers saved in user config are selectable", "providers setup", "providers add"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("error missing %q: %s", want, stderr.String())
-		}
+	if !strings.Contains(stderr.String(), `provider "runtime" not found`) {
+		t.Fatalf("error missing plain not-found: %s", stderr.String())
 	}
 }
 
@@ -110,8 +108,8 @@ func TestRunProvidersUseRejectsCaseVariantOfPersistedProvider(t *testing.T) {
 	if code := runWithDeps([]string{"providers", "use", "SAVED"}, &stdout, &stderr, deps); code != exitCrash {
 		t.Fatalf("exit = %d, want %d", code, exitCrash)
 	}
-	if !strings.Contains(stderr.String(), "only providers saved in user config are selectable") {
-		t.Fatalf("case-variant error did not explain selectability: %q", stderr.String())
+	if !strings.Contains(stderr.String(), `provider "SAVED" not found`) {
+		t.Fatalf("case-variant error was not plain not-found: %q", stderr.String())
 	}
 	if cfg := readFileConfig(t, configPath); cfg.ActiveProvider != "saved" {
 		t.Fatalf("ActiveProvider = %q, want saved", cfg.ActiveProvider)

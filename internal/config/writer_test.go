@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -65,6 +67,21 @@ func TestSetActiveProviderRequiresExactProviderIdentity(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("config was rewritten for case-variant provider\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestMarkProviderAPIKeyStoredRequiresExactProviderIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work", APIKeyEnv: "WORK_KEY"}}}, 0o600)
+	if err := MarkProviderAPIKeyStored(path, "WORK"); err == nil || !strings.Contains(err.Error(), `provider "WORK" not found`) {
+		t.Fatalf("MarkProviderAPIKeyStored() error = %v, want exact-case not-found", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("case-variant mark rewrote config")
 	}
 }
 
@@ -256,7 +273,7 @@ func TestSetProviderModelRejectsUnknownProviderWithoutRewriting(t *testing.T) {
 // case must not let SetProviderModel update the wrong one.
 func TestSetProviderModelRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
-	writeConfigFixture(t, path, FileConfig{
+	before := writeConfigFixture(t, path, FileConfig{
 		ActiveProvider: "work",
 		Providers: []ProviderProfile{
 			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, Model: "m1"},
@@ -264,16 +281,8 @@ func TestSetProviderModelRequiresExactProviderIdentityAmongCaseVariants(t *testi
 		},
 	}, 0o600)
 
-	cfg, err := SetProviderModel(path, "WORK", "m2-updated")
-	if err != nil {
-		t.Fatalf("SetProviderModel() error = %v", err)
-	}
-	if cfg.Providers[0].Model != "m1" {
-		t.Fatalf("unrelated 'work' row changed: %+v", cfg.Providers[0])
-	}
-	if cfg.Providers[1].Model != "m2-updated" {
-		t.Fatalf("targeted 'WORK' row not updated: %+v", cfg.Providers[1])
-	}
+	_, err := SetProviderModel(path, "WORK", "m2-updated")
+	assertAmbiguousConfigUnchanged(t, path, before, err, "work", "WORK")
 }
 
 func TestUpsertProviderTightensExistingConfigFilePermissions(t *testing.T) {
@@ -704,7 +713,7 @@ func TestRemoveProviderKeepsActiveWhenOtherRemoved(t *testing.T) {
 // named, not whichever case-variant sorts first.
 func TestRemoveProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
-	writeConfigFixture(t, path, FileConfig{
+	before := writeConfigFixture(t, path, FileConfig{
 		ActiveProvider: "work",
 		Providers: []ProviderProfile{
 			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
@@ -712,18 +721,8 @@ func TestRemoveProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing
 		},
 	}, 0o600)
 
-	cfg, err := RemoveProvider(path, "WORK")
-	if err != nil {
-		t.Fatalf("RemoveProvider() error = %v", err)
-	}
-	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" {
-		t.Fatalf("expected only the untouched 'work' row to remain, got %+v", cfg.Providers)
-	}
-	// "work" is still active and untouched, so the active pointer must not
-	// hand off to another provider.
-	if cfg.ActiveProvider != "work" {
-		t.Fatalf("active provider changed to %q, want unchanged 'work'", cfg.ActiveProvider)
-	}
+	_, err := RemoveProvider(path, "WORK")
+	assertAmbiguousConfigUnchanged(t, path, before, err, "work", "WORK")
 }
 
 func TestRemoveProviderRejectsUnknownWithoutRewriting(t *testing.T) {
@@ -818,7 +817,7 @@ func TestRenameProviderRejectsCollisionAndUnknown(t *testing.T) {
 // let RenameProvider act on the wrong one.
 func TestRenameProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
-	writeConfigFixture(t, path, FileConfig{
+	before := writeConfigFixture(t, path, FileConfig{
 		ActiveProvider: "work",
 		Providers: []ProviderProfile{
 			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
@@ -826,21 +825,8 @@ func TestRenameProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing
 		},
 	}, 0o600)
 
-	cfg, err := RenameProvider(path, "WORK", "renamed")
-	if err != nil {
-		t.Fatalf("RenameProvider() error = %v", err)
-	}
-	names := map[string]bool{}
-	for _, provider := range cfg.Providers {
-		names[provider.Name] = true
-	}
-	if !names["work"] || !names["renamed"] || names["WORK"] {
-		t.Fatalf("expected 'work' untouched and 'WORK' renamed to 'renamed', got %+v", cfg.Providers)
-	}
-	// The active provider is the untouched "work" row, not the renamed one.
-	if cfg.ActiveProvider != "work" {
-		t.Fatalf("active provider changed to %q, want unchanged 'work'", cfg.ActiveProvider)
-	}
+	_, err := RenameProvider(path, "WORK", "renamed")
+	assertAmbiguousConfigUnchanged(t, path, before, err, "work", "WORK")
 }
 
 func TestUpsertProviderPreservesStoredKeyMarkerOnExistingProfile(t *testing.T) {
@@ -1033,7 +1019,7 @@ func TestEditProviderAppliesRenameFieldsAndDescriptionAtomically(t *testing.T) {
 
 func TestEditProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	writeConfigFixture(t, path, FileConfig{
+	before := writeConfigFixture(t, path, FileConfig{
 		ActiveProvider: "work",
 		Providers: []ProviderProfile{
 			{Name: "WORK", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://upper.example.com/v1", Model: "upper"},
@@ -1041,18 +1027,22 @@ func TestEditProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T
 		},
 	}, 0o600)
 
-	cfg, err := EditProvider(path, ProviderEdit{Name: "WORK", NewName: "renamed", Model: "updated"})
-	if err != nil {
-		t.Fatalf("EditProvider() error = %v", err)
+	_, err := EditProvider(path, ProviderEdit{Name: "WORK", NewName: "renamed", Model: "updated"})
+	assertAmbiguousConfigUnchanged(t, path, before, err, "WORK", "work")
+}
+
+func assertAmbiguousConfigUnchanged(t *testing.T, path string, before []byte, err error, first, second string) {
+	t.Helper()
+	want := fmt.Sprintf("ambiguous persisted provider names %q and %q differ only by case; rename or remove one row in config.json", first, second)
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
 	}
-	if cfg.Providers[0].Name != "renamed" || cfg.Providers[0].Model != "updated" {
-		t.Fatalf("exact-case target was not edited: %+v", cfg.Providers[0])
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
-	if cfg.Providers[1].Name != "work" || cfg.Providers[1].Model != "lower" {
-		t.Fatalf("case-variant provider changed: %+v", cfg.Providers[1])
-	}
-	if cfg.ActiveProvider != "work" {
-		t.Fatalf("case-variant active provider changed to %q", cfg.ActiveProvider)
+	if !bytes.Equal(after, before) {
+		t.Fatalf("ambiguous mutation rewrote config\nbefore: %s\nafter: %s", before, after)
 	}
 }
 

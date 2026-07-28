@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +111,82 @@ func TestRunAuthLoginUnknownProvider(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not configured") {
 		t.Fatalf("stderr = %q, want not-configured error", stderr.String())
+	}
+}
+
+func TestRunAuthLoginRevalidatesConfigImmediatelyBeforeSave(t *testing.T) {
+	storePath := withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	initial := `{"providers":[{"name":"demo"}]}`
+	ambiguous := `{"providers":[{"name":"demo"},{"name":"DEMO"}]}`
+	if err := os.WriteFile(configPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "unchanged"}); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	mux.HandleFunc("/device", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"device_code":"dc","user_code":"code","verification_uri":"https://example.test","expires_in":60,"interval":1}`)
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		if err := os.WriteFile(configPath, []byte(ambiguous), 0o600); err != nil {
+			t.Errorf("mutate config: %v", err)
+		}
+		_, _ = io.WriteString(w, `{"access_token":"replacement","token_type":"Bearer"}`)
+	})
+	t.Setenv("ZERO_OAUTH_DEMO_CLIENT_ID", "client")
+	t.Setenv("ZERO_OAUTH_DEMO_TOKEN_URL", server.URL+"/token")
+	t.Setenv("ZERO_OAUTH_DEMO_DEVICE_URL", server.URL+"/device")
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "login", "demo", "--device"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("exit = %d, stderr = %q; want ambiguous-config failure", code, stderr.String())
+	}
+	token, ok, err := store.Load(oauth.ProviderKey("demo"))
+	if err != nil || !ok || token.AccessToken != "unchanged" {
+		t.Fatalf("stored token = %+v, %v, %v; want unchanged", token, ok, err)
+	}
+}
+
+func TestRunAuthChatGPTRevalidatesConfigImmediatelyBeforeSave(t *testing.T) {
+	storePath := withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"chatgpt"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "unchanged"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "chatgpt"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		chatGPTLogin: func(context.Context, provideroauth.ChatGPTOptions) (oauth.Token, error) {
+			ambiguous := `{"providers":[{"name":"chatgpt"},{"name":"ChatGPT"}]}`
+			if err := os.WriteFile(configPath, []byte(ambiguous), 0o600); err != nil {
+				return oauth.Token{}, err
+			}
+			return oauth.Token{AccessToken: "replacement"}, nil
+		},
+	})
+	if code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("exit = %d, stderr = %q; want ambiguous-config failure", code, stderr.String())
+	}
+	token, ok, err := store.Load(oauth.ProviderKey("chatgpt"))
+	if err != nil || !ok || token.AccessToken != "unchanged" {
+		t.Fatalf("stored token = %+v, %v, %v; want unchanged", token, ok, err)
 	}
 }
 

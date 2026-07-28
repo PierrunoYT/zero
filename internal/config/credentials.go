@@ -99,7 +99,7 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 	}
 	changed := false
 	for index := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) && cfg.Providers[index].APIKeyStored {
+		if strings.TrimSpace(cfg.Providers[index].Name) == provider && cfg.Providers[index].APIKeyStored {
 			cfg.Providers[index].APIKeyStored = false
 			changed = true
 		}

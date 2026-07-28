@@ -11,6 +11,72 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
+// ValidatePersistedProviderNames rejects user-config rows that share the same
+// case-insensitive identity. Credential-store keys are case-insensitive, so
+// allowing both rows would make writes and deletes affect a shared secret.
+// This validator intentionally applies only to raw persisted user config, not
+// to profiles merged from project, environment, or provider-command layers.
+func ValidatePersistedProviderNames(cfg FileConfig) error {
+	seen := make(map[string]string, len(cfg.Providers))
+	for _, provider := range cfg.Providers {
+		name := strings.TrimSpace(provider.Name)
+		folded := strings.ToLower(name)
+		if previous, ok := seen[folded]; ok && previous != name {
+			return fmt.Errorf("ambiguous persisted provider names %q and %q differ only by case; rename or remove one row in config.json", previous, name)
+		}
+		seen[folded] = name
+	}
+	return nil
+}
+
+// PreflightUserConfig validates existing user config before any command makes
+// credential-store side effects.
+func PreflightUserConfig(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	return ValidatePersistedProviderNames(cfg)
+}
+
+// PreflightProviderWrite also rejects a new spelling that would share a
+// case-insensitive credential key with an existing persisted row.
+func PreflightProviderWrite(path, name string) error {
+	if err := PreflightUserConfig(path); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	name = strings.TrimSpace(name)
+	for _, provider := range cfg.Providers {
+		existing := strings.TrimSpace(provider.Name)
+		if strings.EqualFold(existing, name) && existing != name {
+			return fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", name, existing)
+		}
+	}
+	return nil
+}
+
 func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -28,6 +94,14 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 		}
 	} else if !os.IsNotExist(err) {
 		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return FileConfig{}, err
+	}
+	for _, existing := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(existing.Name), profile.Name) && strings.TrimSpace(existing.Name) != profile.Name {
+			return FileConfig{}, fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", profile.Name, existing.Name)
+		}
 	}
 
 	mergeProvider(&cfg, profile)
@@ -133,8 +207,11 @@ func MarkProviderAPIKeyStored(path string, provider string) error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return err
+	}
 	for index := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) {
+		if strings.TrimSpace(cfg.Providers[index].Name) == provider {
 			cfg.Providers[index].APIKey = ""
 			cfg.Providers[index].APIKeyEnv = ""
 			cfg.Providers[index].APIKeyStored = true
@@ -192,12 +269,40 @@ func ProviderPersisted(path string, name string) (bool, error) {
 	if path == "" || name == "" {
 		return false, nil
 	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("stat config %s: %w", path, err)
+	}
 	cfg, err := loadConfigFile(path)
 	if err != nil {
 		return false, err
 	}
 	for _, provider := range cfg.Providers {
 		if strings.TrimSpace(provider.Name) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ProviderPersistedCaseInsensitive reports whether any persisted user-config
+// row has the same folded name. CLI runtime-only guidance uses this to avoid
+// describing a case-variant typo of a saved profile as environment-derived.
+func ProviderPersistedCaseInsensitive(path, name string) (bool, error) {
+	data, err := os.ReadFile(strings.TrimSpace(path))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(provider.Name), strings.TrimSpace(name)) {
 			return true, nil
 		}
 	}
@@ -228,11 +333,12 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return FileConfig{}, err
+	}
 
-	// Exact match, like ProviderPersisted/SetActiveProvider: two rows can
-	// coexist that differ only by case (UpsertProvider merges by exact name),
-	// so folding case here would delete whichever row happens to sort first
-	// instead of the one the caller actually asked for.
+	// Persisted provider identity is exact. Resolution may fold names from
+	// runtime sources, but config mutations must target the requested row.
 	index := -1
 	for i, provider := range cfg.Providers {
 		if strings.TrimSpace(provider.Name) == name {
@@ -284,14 +390,13 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return FileConfig{}, err
+	}
 
-	// oldName is matched exactly, like ProviderPersisted/SetActiveProvider:
-	// two rows can coexist that differ only by case (UpsertProvider merges by
-	// exact name), so folding case here would rename whichever row happens to
-	// sort first instead of the one the caller actually asked for. newName
-	// still collides case-insensitively: the credential store normalizes
-	// names, so renaming into an existing row's case variant would silently
-	// share (and corrupt) that row's stored key.
+	// oldName is matched exactly, like ProviderPersisted/SetActiveProvider.
+	// newName collides case-insensitively because the credential store retains
+	// legacy case-insensitive keys.
 	index := -1
 	for i, provider := range cfg.Providers {
 		providerName := strings.TrimSpace(provider.Name)
@@ -378,6 +483,9 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 	cfg := FileConfig{}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return FileConfig{}, err
 	}
 
 	index := -1
@@ -495,10 +603,8 @@ func SetProviderModel(path string, name string, model string) (FileConfig, error
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 
-	// Exact match, like ProviderPersisted/SetActiveProvider: two rows can
-	// coexist that differ only by case (UpsertProvider merges by exact name),
-	// so folding case here would update whichever row happens to sort first
-	// instead of the one the caller actually asked for.
+	// Persisted provider identity is exact. Resolution may fold names from
+	// runtime sources, but config mutations must target the requested row.
 	for index := range cfg.Providers {
 		if strings.TrimSpace(cfg.Providers[index].Name) == name {
 			cfg.Providers[index].Model = model
@@ -750,6 +856,9 @@ func NormalizeRecentModels(entries []RecentModelEntry) []RecentModelEntry {
 }
 
 func writeConfigFile(path string, cfg FileConfig) error {
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {

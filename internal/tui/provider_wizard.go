@@ -137,7 +137,7 @@ func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (m
 	}
 	m.providerWizard.deviceUserCode = msg.userCode
 	m.providerWizard.deviceVerificationURI = msg.verifyURL
-	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth)
+	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth, m.userConfigPath)
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -155,11 +155,15 @@ func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
 // from the ID token and stores it on the saved token so the Codex provider can
 // inject it as a header on every request; other OAuth providers (xAI) run the
 // generic engine login which stores a refreshable token.
-func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int) tea.Cmd {
+func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int, configPath ...string) tea.Cmd {
 	providerID := provider.ID
+	path := firstString(configPath)
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
+			if err := preflightOAuthUserConfig(path); err != nil {
+				return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, err: err}
+			}
 			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 				OpenBrowser: browser.OpenURL,
 				Timeout:     3 * time.Minute,
@@ -168,12 +172,12 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 		}
 	case providerID == "chatgpt":
 		return func() tea.Msg {
-			err := runProviderChatGPTLogin()
+			err := runProviderChatGPTLogin(path)
 			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: err}
 		}
 	default:
 		return func() tea.Msg {
-			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID)}
+			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID, path)}
 		}
 	}
 }
@@ -183,7 +187,11 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 // the token's Account field) and persists the resulting token via the oauth
 // store. The runtime resolver then attaches the bearer to Codex calls and the
 // Codex provider reads the Account field for the `chatgpt-account-id` header.
-func runProviderChatGPTLogin() error {
+func runProviderChatGPTLogin(configPath ...string) error {
+	path := firstString(configPath)
+	if err := preflightOAuthUserConfig(path); err != nil {
+		return err
+	}
 	env := buildOAuthPresetEnv()
 	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
 		Env:         env,
@@ -198,7 +206,24 @@ func runProviderChatGPTLogin() error {
 	if err != nil {
 		return err
 	}
+	if err := preflightOAuthUserConfig(path); err != nil {
+		return err
+	}
 	return store.Save(oauth.ProviderKey("chatgpt"), token)
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func preflightOAuthUserConfig(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return config.PreflightUserConfig(path)
 }
 
 // appendOAuthLoginProfile mirrors the profile persistOAuthLoginProvider wrote to
@@ -260,7 +285,11 @@ func buildOAuthPresetEnv() map[string]string {
 // runProviderTokenLogin runs the generic OAuth engine login for a provider that
 // has a built-in preset (e.g. xAI), storing a refreshable token under
 // provider:<name>. The runtime resolver then attaches it to model calls.
-func runProviderTokenLogin(name string) error {
+func runProviderTokenLogin(name string, configPath ...string) error {
+	path := firstString(configPath)
+	if err := preflightOAuthUserConfig(path); err != nil {
+		return err
+	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
@@ -273,6 +302,7 @@ func runProviderTokenLogin(name string) error {
 		// into its baked-in preset (e.g. xAI's public client_id); without this the
 		// config never resolves and the browser never opens.
 		AllowPresets: true,
+		BeforeSave:   func() error { return preflightOAuthUserConfig(path) },
 	})
 	if err != nil {
 		return err
@@ -316,9 +346,13 @@ func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
 
 // providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
 // UI goroutine and reports completion as a regular OAuth result.
-func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth, configPath ...string) tea.Cmd {
 	return func() tea.Msg {
-		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
+		path := firstString(configPath)
+		if err := preflightOAuthUserConfig(path); err != nil {
+			return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: err}
+		}
+		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth, path)}
 	}
 }
 
@@ -968,7 +1002,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
 				provider := m.providerWizard.currentProvider()
 				attemptID := m.providerWizard.beginOAuthAttempt(false)
-				return m, providerWizardOAuthCmdFor(provider, attemptID)
+				return m, providerWizardOAuthCmdFor(provider, attemptID, m.userConfigPath)
 			}
 			return m, nil
 		case keyText(msg) != "":
@@ -1261,6 +1295,10 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		nextProvider = built
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
+		if err := config.PreflightProviderWrite(m.userConfigPath, profile.Name); err != nil {
+			wizard.err = err.Error()
+			return m, nil
+		}
 		// Capture flip: move the freshly entered key into the encrypted credential
 		// store before persisting, so config.json never holds the cleartext. The
 		// provider was already built above from runtimeProfile, which has the key.
@@ -1329,6 +1367,10 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 		return m, nil
 	case 2: // Remove
 		if strings.TrimSpace(m.userConfigPath) != "" {
+			if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
+				wizard.err = err.Error()
+				return m, nil
+			}
 			if store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath)); err == nil {
 				_, _ = store.Delete(name)
 			}

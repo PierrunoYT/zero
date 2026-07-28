@@ -157,6 +157,16 @@ func TestClearProviderKeyStored(t *testing.T) {
 	if cleared, _ := ClearProviderKeyStored(path, "nope"); cleared {
 		t.Fatal("unknown provider should report no change")
 	}
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := ClearProviderKeyStored(path, "WORK"); err != nil || cleared {
+		t.Fatalf("case-variant clear = %v,%v; want false,nil", cleared, err)
+	}
+	cfg = readConfigFixture(t, path)
+	if !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("clear must require exact provider identity: %+v", cfg.Providers)
+	}
 }
 
 func TestProviderProfileAPIKeyStoredRoundTrips(t *testing.T) {

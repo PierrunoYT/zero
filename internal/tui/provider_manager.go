@@ -604,6 +604,16 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		wizard.err = "name cannot be empty"
 		return m, nil
 	}
+	if !strings.EqualFold(newName, oldName) {
+		if err := config.PreflightProviderWrite(m.userConfigPath, newName); err != nil {
+			wizard.err = err.Error()
+			return m, nil
+		}
+	}
+	if err := config.PreflightUserConfig(m.userConfigPath); err != nil {
+		wizard.err = err.Error()
+		return m, nil
+	}
 	edit := config.ProviderEdit{
 		Name:        oldName,
 		NewName:     newName,

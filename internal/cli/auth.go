@@ -131,6 +131,9 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := config.PreflightUserConfig(configPath); err != nil {
+		return "", err
+	}
 	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
 	if err != nil {
 		return "", err
@@ -176,6 +179,14 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth chatgpt takes no arguments (got %q)", args[0]))
 	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	const provider = "chatgpt"
+	if err := config.PreflightProviderWrite(configPath, provider); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 
 	// Build the same env map the oauth engine reads so the chatgpt preset is
 	// opted into (the preset is off by default to keep third-party OAuth
@@ -189,7 +200,7 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	}
 	env["ZERO_OAUTH_ALLOW_PRESETS"] = "1"
 
-	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
+	token, err := deps.chatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
 		Env:        env,
 		HTTPClient: &http.Client{Timeout: 60 * time.Second},
 		Out:        stdout,
@@ -212,7 +223,10 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := store.Save(oauth.ProviderKey("chatgpt"), token); err != nil {
+	if err := config.PreflightProviderWrite(configPath, provider); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := store.Save(oauth.ProviderKey(provider), token); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	statuses, err := oauthFormatChatGPTStatus(token)
@@ -343,7 +357,7 @@ func validateAuthFlags(sub string, a authArgs) error {
 // ZERO_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it. Setting
 // ZERO_OAUTH_STORAGE=encrypted-file selects the AES-256-GCM encrypted-at-rest
 // backend (a per-user secret is created beside the token file).
-func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
+func newAuthManager(deps appDeps, out io.Writer, beforeSave func() error) (*oauth.Manager, error) {
 	// Validate ZERO_OAUTH_STORAGE up front: a mistyped value must fail fast rather
 	// than silently change the backend. Empty = default (plaintext 0600 file);
 	// "encrypted-file" = AES-256-GCM; "keyring" = the OS keyring.
@@ -372,6 +386,7 @@ func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
 		// `zero auth login <preset>` (e.g. xai) should resolve the baked-in preset
 		// without the operator exporting ZERO_OAUTH_ALLOW_PRESETS first.
 		AllowPresets: true,
+		BeforeSave:   beforeSave,
 	})
 }
 
@@ -387,7 +402,7 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if len(parsed.positional) != 1 {
 		return writeExecUsageError(stderr, "usage: zero auth login <provider> [--device] [--scope <scope>]")
 	}
-	provider := parsed.positional[0]
+	provider := strings.ToLower(strings.TrimSpace(parsed.positional[0]))
 	// ChatGPT (Codex) requires a fixed redirect_uri (http://localhost:1455/
 	// auth/callback) and mandatory authorize params (id_token_add_organizations,
 	// codex_cli_simplified_flow, originator) that the generic loopback flow
@@ -402,7 +417,16 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return runAuthChatGPT(nil, stdout, stderr, deps)
 	}
-	manager, err := newAuthManager(deps, stdout)
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := config.PreflightProviderWrite(configPath, provider); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	manager, err := newAuthManager(deps, stdout, func() error {
+		return config.PreflightProviderWrite(configPath, provider)
+	})
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -438,7 +462,27 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		return writeExecUsageError(stderr, "usage: zero auth logout <provider>")
 	}
 	provider := parsed.positional[0]
-	manager, err := newAuthManager(deps, stdout)
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := config.PreflightUserConfig(configPath); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	exact, err := config.ProviderPersisted(configPath, provider)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if !exact {
+		folded, foldedErr := config.ProviderPersistedCaseInsensitive(configPath, provider)
+		if foldedErr != nil {
+			return writeAppError(stderr, foldedErr.Error(), exitCrash)
+		}
+		if folded {
+			return writeAppError(stderr, fmt.Sprintf("provider %q exists with different capitalization; logout requires the exact persisted provider name", provider), exitCrash)
+		}
+	}
+	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -453,10 +497,8 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
-	if configPath, perr := deps.userConfigPath(); perr == nil {
-		if _, clearErr := config.ClearProviderKeyStored(configPath, provider); clearErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
-		}
+	if _, clearErr := config.ClearProviderKeyStored(configPath, provider); clearErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 	}
 	removed = removed || keyRemoved
 	if parsed.json {
@@ -491,7 +533,7 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if len(parsed.positional) > 1 {
 		return writeExecUsageError(stderr, "usage: zero auth status [provider]")
 	}
-	manager, err := newAuthManager(deps, stdout)
+	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
@@ -530,7 +572,7 @@ func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeExecUsageError(stderr, "usage: zero auth refresh <provider>")
 	}
 	provider := parsed.positional[0]
-	manager, err := newAuthManager(deps, stdout)
+	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
