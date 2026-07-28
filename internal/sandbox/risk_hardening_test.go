@@ -356,6 +356,9 @@ func TestClassifyUnparseableNetworkCommandFailsClosed(t *testing.T) {
 		`git.exe -C"C:\Program Files\repo" "push" origin main & rem '`,
 		`git.exe --git-dir="C:\Program Files\repo\.git" push origin main & rem '`,
 		`git.exe "--git-dir=C:\Program Files\repo\.git" push origin main & rem '`,
+		`git -C repo push origin main & rem '`,
+		`git -c user.name=test fetch origin & rem '`,
+		`git -C "C:\Program Files\repo" push origin main & rem '`,
 		// More value-taking global options than the fallback regex used to cap
 		// its generic-token scan at (formerly {0,8}) — every option here still
 		// precedes the actual subcommand.
@@ -389,6 +392,16 @@ func TestClassifyUnparseableNonGitOptionTokenStaysNonNetwork(t *testing.T) {
 		`git.exe -C "C:\Program Files\push" status & rem '`,
 		`git.exe --git-dir="C:\Program Files\push\.git" status & rem '`,
 		`git.exe "--git-dir=C:\Program Files\push\.git" status & rem '`,
+		`git -C push status & rem '`,
+		`git -c push status & rem '`,
+		`git -C "push" status & rem '`,
+		`git -c "push" status & rem '`,
+		`git --help push & rem '`,
+		`git --version push & rem '`,
+		`echo https://example.com/repo.git push & rem '`,
+		`echo ssh://git@example.com/repo.git push & rem '`,
+		`echo C:\repos\repo.git push & rem '`,
+		`echo git.example.com push & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			risk := classifyCommand(command)

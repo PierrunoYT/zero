@@ -33,25 +33,9 @@ var (
 	// unparseableNetworkPattern is used only after the shell parser fails. At
 	// that point the command is already marked too complex, so this intentionally
 	// favors catching obvious network programs over proving exact shell syntax.
-	// The git branch accepts Windows executable suffixes and a closing quote
-	// from a fully qualified path (a parser-failing command like
-	// `"C:\Program Files\Git\cmd\git.exe" push ... & rem '` runs under cmd.exe
-	// and must still classify as network). Before the subcommand, it skips only
-	// git's own global options — mirroring gitGlobalOptionConsumesValue in
-	// analyzer.go: a recognized value-taking option (-C, -c, --attr-source,
-	// --config-env, --exec-path, --git-dir, --namespace, --super-prefix,
-	// --work-tree) consumes one following token as its value, and any other
-	// dash-prefixed token is skipped on its own. Both branches preserve quoted
-	// fragments, including spaces in separate or joined option values such as
-	// `-C "C:\Program Files\repo"` and `--git-dir="C:\Program Files\repo\.git"`.
-	// The subcommand may also be quoted, as cmd.exe permits `git "push" ...`.
-	// This span is unbounded — Go's regexp is RE2-backed (linear time, no
-	// backtracking blowup) — so a git invocation with any number of global
-	// options still reaches its subcommand. Critically, a bare non-option token
-	// (e.g. the "status" in `git status push`, where "push" is only a pathspec)
-	// does NOT match either alternative, so the scan stops and the command is
-	// correctly left unclassified as network.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|\bgo\s+get\b|\bgit(?:\.(?:exe|cmd|bat|com))?["']?(?:\s+(?:(?:(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)|"(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)"|'(?:-C|-c|--attr-source|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)')\s+(?:[^\s;&|"']|"[^"]*"|'[^']*')+|(?:-(?:[^\s;&|"']|"[^"]*"|'[^']*')+|"-[^"]*"|'-[^']*')))*\s+(?:"(?:clone|fetch|pull|push|ls-remote|archive)"|'(?:clone|fetch|pull|push|ls-remote|archive)'|(clone|fetch|pull|push|ls-remote|archive)\b)|\bpython(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
+	// Git needs token-aware handling below: a regex cannot reliably distinguish
+	// option values and executable path components from subcommands.
+	unparseableNetworkPattern = regexp.MustCompile(`(?i)^(?:(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)(\s|$)|(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|go\s+get\b|python(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|gh\s+(api|repo\s+clone|release\s+download)\b)`)
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.
@@ -85,7 +69,106 @@ func matchesDestructive(command string) bool {
 }
 
 func matchesUnparseableNetwork(command string) bool {
-	return unparseableNetworkPattern.MatchString(command)
+	commands := fallbackCommandTokens(command)
+	for _, tokens := range commands {
+		if len(tokens) == 0 {
+			continue
+		}
+		if isGitExecutableToken(tokens[0]) && matchesUnparseableGitNetwork(tokens) {
+			return true
+		}
+		executable := executableTokenBase(tokens[0])
+		if unparseableNetworkPattern.MatchString(strings.Join(append([]string{executable}, tokens[1:]...), " ")) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesUnparseableGitNetwork(tokens []string) bool {
+	for j := 1; j < len(tokens); j++ {
+		word := strings.ToLower(tokens[j])
+		if word == "--help" || word == "--version" {
+			break
+		}
+		if strings.HasPrefix(word, "-") {
+			if gitGlobalOptionConsumesValue(word) {
+				j++
+			}
+			continue
+		}
+		switch word {
+		case "clone", "fetch", "pull", "push", "ls-remote", "archive":
+			return true
+		}
+		break
+	}
+	return false
+}
+
+func isGitExecutableToken(token string) bool {
+	switch executableTokenBase(token) {
+	case "git", "git.exe", "git.cmd", "git.bat", "git.com":
+		return true
+	default:
+		return false
+	}
+}
+
+func executableTokenBase(token string) string {
+	token = strings.Trim(token, `\"'`)
+	if slash := strings.LastIndexAny(token, `/\\`); slash >= 0 {
+		token = token[slash+1:]
+	}
+	return strings.ToLower(token)
+}
+
+// fallbackCommandTokens performs deliberately small shell/cmd tokenization.
+// It preserves quoted spaces even when the command's trailing quote is
+// unmatched (the condition that sends classification down this fallback).
+func fallbackCommandTokens(command string) [][]string {
+	// Command strings commonly preserve cmd.exe's escaped quote spelling.
+	command = strings.ReplaceAll(command, `\"`, `"`)
+	var commands [][]string
+	var tokens []string
+	var word strings.Builder
+	var quote rune
+	flush := func() {
+		if word.Len() > 0 {
+			tokens = append(tokens, word.String())
+			word.Reset()
+		}
+	}
+	flushCommand := func() {
+		flush()
+		if len(tokens) > 0 {
+			commands = append(commands, tokens)
+			tokens = nil
+		}
+	}
+	for _, r := range command {
+		if r == '\'' || r == '"' {
+			if quote == 0 {
+				quote = r
+			} else if quote == r {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+			continue
+		}
+		if quote == 0 && (r == ';' || r == '&' || r == '|') {
+			flushCommand()
+			continue
+		}
+		if quote == 0 && (r == ' ' || r == '\t' || r == '\r' || r == '\n') {
+			flush()
+			continue
+		}
+		word.WriteRune(r)
+	}
+	flushCommand()
+	return commands
 }
 
 func Classify(request Request) Risk {
