@@ -171,6 +171,16 @@ func TestEngineDeniesDaemonTokenFileTools(t *testing.T) {
 	}
 }
 
+// TestDaemonTokenAliasesDeniedEndToEnd covers the in-process tools, which are
+// the layer that can close inode aliases: they see every requested path before
+// opening it, so a symlink or hard link to the token resolves back to the
+// protected inode and is refused.
+//
+// The OS layer deliberately does not match this. Seatbelt and Bubblewrap rules
+// name paths, so a sandboxed shell on macOS can `ln <token> alias && cat alias`
+// — the same pathname model a user-configured DenyRead has always had. See
+// protectedPathDenied and denyReadRules in internal/sandbox for why that is the
+// boundary rather than an omission.
 func TestDaemonTokenAliasesDeniedEndToEnd(t *testing.T) {
 	for _, aliasKind := range []string{"symlink", "hardlink"} {
 		t.Run(aliasKind, func(t *testing.T) {

@@ -240,6 +240,51 @@ func TestProtectedCredentialsSurviveDisabledPolicy(t *testing.T) {
 	}
 }
 
+// TestDisabledPolicyLeavesShellOutsideTheTokenBoundary pins the boundary jatmn
+// asked to see stated for #685: under ModeDisabled the bridge-token exclusion
+// covers Zero's in-process file tools and nothing else. No OS wrapper is built
+// at all in that mode, so a shell command is confined by nothing and an
+// escalation has nothing to bypass. This test exists so that stops being an
+// implicit property — changing any of it should mean changing this test on
+// purpose, not discovering the behavior later.
+func TestDisabledPolicyLeavesShellOutsideTheTokenBoundary(t *testing.T) {
+	ws, token := protectedTokenFixture(t)
+	engine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: Policy{Mode: ModeDisabled}})
+
+	shell := engine.Evaluate(context.Background(), Request{
+		ToolName:      "bash",
+		WorkspaceRoot: ws,
+		SideEffect:    SideEffectShell,
+		Args:          map[string]any{"command": "cat " + token},
+	})
+	if shell.Action != ActionAllow {
+		t.Fatalf("shell under a disabled policy = %q (%s); the token boundary is documented as in-process only", shell.Action, shell.Reason)
+	}
+
+	// The same command's payload IS blocked when it arrives as a path-carrying
+	// request, which is the whole of the guarantee.
+	read := engine.Evaluate(context.Background(), Request{
+		ToolName:      "read_file",
+		WorkspaceRoot: ws,
+		SideEffect:    SideEffectRead,
+		Args:          map[string]any{"path": token},
+	})
+	if read.Action != ActionDeny {
+		t.Fatalf("in-process read under a disabled policy = %q (%s), want deny", read.Action, read.Reason)
+	}
+
+	if !engine.UnsandboxedExecutionAllowed() {
+		t.Fatal("escalation under a disabled policy must stay allowed: there is no wrapper for it to bypass")
+	}
+
+	// With the sandbox on, the same configured token flips both: the profile is
+	// built, so escalating out of it would drop a real deny rule.
+	enforcing := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: DefaultPolicy()})
+	if enforcing.UnsandboxedExecutionAllowed() {
+		t.Fatal("escalation must be refused while a bridge token is protected by an active profile")
+	}
+}
+
 // TestProtectedCredentialsMatchCaseVariantOnCaseInsensitiveFilesystems covers the
 // bypass a case-variant spelling opened: pathWithinRoot ends in filepath.Rel,
 // which folds case on Windows but NOT on darwin, whose default APFS volume is

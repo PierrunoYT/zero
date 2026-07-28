@@ -195,6 +195,12 @@ func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
 // UnsandboxedExecutionAllowed reports whether an escalated shell attempt may
 // bypass the native sandbox without dropping active denied-read restrictions,
 // including the automatic remote bridge token exclusion.
+//
+// ModeDisabled short-circuits to true before the token is consulted, and that is
+// the intended reading of the switch rather than an oversight: with the sandbox
+// off there is no wrapper for an escalation to bypass, so refusing the
+// escalation would deny a capability the operator already granted globally
+// without protecting anything. See the ModeDisabled branch in Evaluate.
 func (engine *Engine) UnsandboxedExecutionAllowed() bool {
 	if engine == nil {
 		return true
@@ -332,7 +338,18 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		// Disabling the sandbox drops every user-configured restriction, but not the
 		// automatic credential exclusion: the remote bridge token authenticates the
 		// caller driving these tools, so it stays unreadable and unwritable through
-		// them (a shell command is a separate, OS-level boundary).
+		// them.
+		//
+		// Shell is deliberately left open here, and it is worth being blunt about
+		// why. ModeDisabled means no OS wrapper is built at all — the runner sets
+		// SandboxPreferenceForbid and PermissionProfileFromPolicy returns an
+		// unrestricted filesystem — so there is no layer left that could confine a
+		// command. Re-wrapping shell just for this file would quietly undo the
+		// switch the operator flipped, and would not hold anyway: a shell that can
+		// run anything can read anything this process can. The exclusion below is
+		// therefore what it says — a guarantee about Zero's own file tools, not
+		// about the machine. Running a remote bridge with the sandbox disabled
+		// means trusting whoever can drive that bridge with the token.
 		if block := protectedCredentialPathBlock(request, request.WorkspaceRoot); block != nil {
 			return deny(request, risk, block.Code, block.Path, block.Reason, false)
 		}

@@ -104,6 +104,12 @@ func protectedCredentialPaths() []string {
 // that targets a protected credential file, or nil. It exists for the callers
 // that bypass validatePathWithPolicy — currently the ModeDisabled short-circuit,
 // where the exclusion still applies because it is not policy-derived.
+//
+// Only the side effects that name a path are covered. SideEffectShell is not,
+// and cannot be: a shell request carries a command line, not a file path, so
+// there is nothing here to compare against the token. Shell is confined by the
+// OS wrapper instead — which under ModeDisabled does not exist. See the
+// ModeDisabled short-circuit in Engine.Evaluate for what that boundary means.
 func protectedCredentialPathBlock(request Request, workspaceRoot string) *pathBlock {
 	switch request.SideEffect {
 	case SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace:
@@ -145,6 +151,19 @@ func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
 	// closes aliases created after the token path was selected: EvalSymlinks
 	// catches symbolic links, while SameFile catches hard links (and any other
 	// platform-specific names for the same file).
+	//
+	// This inode-level closure is specific to Zero's in-process tools, which see
+	// every requested path before opening it. The OS layer is pathname-based and
+	// stays that way: seatbelt and Bubblewrap rules name paths, so a sandboxed
+	// shell on macOS can still `ln <token> alias && cat alias` — a hard link is a
+	// second name for the same inode, and no path-based rule covers a name that
+	// did not exist when the profile was built. That is the same model a
+	// user-configured DenyRead has always had, deliberately: an aliasing defense
+	// at the OS layer would have to resolve every path at open time, which is not
+	// something either backend's policy language expresses. Shell access to a
+	// host running a remote bridge is therefore access to the token, and the
+	// protection here is the in-process boundary plus the pathname deny rules,
+	// not an inode-tight OS guarantee.
 	abs := path
 	if !filepath.IsAbs(abs) {
 		if workspaceRoot == "" {
