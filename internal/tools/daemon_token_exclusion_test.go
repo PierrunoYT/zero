@@ -170,3 +170,58 @@ func TestEngineDeniesDaemonTokenFileTools(t *testing.T) {
 		t.Fatalf("ordinary workspace read was denied: %q", decision.Reason)
 	}
 }
+
+func TestDaemonTokenAliasesDeniedEndToEnd(t *testing.T) {
+	for _, aliasKind := range []string{"symlink", "hardlink"} {
+		t.Run(aliasKind, func(t *testing.T) {
+			ws, token, engine := daemonTokenFixture(t)
+			alias := filepath.Join(ws, "token-alias")
+			var err error
+			switch aliasKind {
+			case "symlink":
+				err = os.Symlink(token, alias)
+			case "hardlink":
+				err = os.Link(token, alias)
+			}
+			if err != nil {
+				t.Skipf("%s unsupported: %v", aliasKind, err)
+			}
+
+			registry := NewRegistry()
+			registry.Register(NewScopedReadFileTool(ws, nil))
+			registry.Register(NewScopedWriteFileTool(ws, nil))
+
+			read := registry.RunWithOptions(context.Background(), "read_file", map[string]any{"path": alias}, RunOptions{Sandbox: engine})
+			if read.Status == StatusOK || strings.Contains(read.Output, "bridge-secret") {
+				t.Fatalf("read_file followed protected %s: status=%s output=%q", aliasKind, read.Status, read.Output)
+			}
+
+			write := registry.RunWithOptions(context.Background(), "write_file", map[string]any{"path": alias, "content": "attacker-controlled\n"}, RunOptions{Sandbox: engine})
+			if write.Status == StatusOK {
+				t.Fatalf("write_file followed protected %s: output=%q", aliasKind, write.Output)
+			}
+			contents, err := os.ReadFile(token)
+			if err != nil || string(contents) != "bridge-secret\n" {
+				t.Fatalf("token changed after denied write through %s: contents=%q err=%v", aliasKind, contents, err)
+			}
+
+			grep, ok := NewScopedGrepTool(ws, nil).(sandboxAwareTool)
+			if !ok {
+				t.Fatal("grep tool must be sandbox-aware")
+			}
+			result := grep.RunWithSandbox(context.Background(), map[string]any{
+				"pattern":     "bridge-secret",
+				"output_mode": "files_with_matches",
+			}, engine)
+			if result.Status != StatusOK {
+				t.Fatalf("grep failed: %s", result.Output)
+			}
+			if strings.Contains(result.Output, "token-alias") || strings.Contains(result.Output, "bridge-token") {
+				t.Fatalf("grep surfaced protected %s target:\n%s", aliasKind, result.Output)
+			}
+			if !strings.Contains(result.Output, "main.go") {
+				t.Fatalf("grep omitted ordinary file while filtering %s:\n%s", aliasKind, result.Output)
+			}
+		})
+	}
+}

@@ -138,6 +138,34 @@ func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
 			return true
 		}
 	}
+
+	// Keep the lexical check above: in particular, it protects a configured
+	// pathname even when the file is absent, preventing its replacement. For an
+	// existing request, also compare the object reached by the filesystem. This
+	// closes aliases created after the token path was selected: EvalSymlinks
+	// catches symbolic links, while SameFile catches hard links (and any other
+	// platform-specific names for the same file).
+	abs := path
+	if !filepath.IsAbs(abs) {
+		if workspaceRoot == "" {
+			return false
+		}
+		abs = filepath.Join(workspaceRoot, abs)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return false
+	}
+	requestInfo, err := os.Stat(resolved)
+	if err != nil {
+		return false
+	}
+	for _, entry := range protected {
+		protectedInfo, err := os.Stat(entry)
+		if err == nil && os.SameFile(requestInfo, protectedInfo) {
+			return true
+		}
+	}
 	return false
 }
 
