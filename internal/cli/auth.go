@@ -184,7 +184,7 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	const provider = "chatgpt"
-	if err := config.PreflightProviderWrite(configPath, provider); err != nil {
+	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 
@@ -223,7 +223,7 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	if err := config.PreflightProviderWrite(configPath, provider); err != nil {
+	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	if err := store.Save(oauth.ProviderKey(provider), token); err != nil {
@@ -421,11 +421,11 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	if err := config.PreflightProviderWrite(configPath, provider); err != nil {
+	if err := config.PreflightCatalogProviderLogin(configPath, provider); err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	manager, err := newAuthManager(deps, stdout, func() error {
-		return config.PreflightProviderWrite(configPath, provider)
+		return config.PreflightCatalogProviderLogin(configPath, provider)
 	})
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)

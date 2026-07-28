@@ -71,7 +71,7 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 	}
 	cfg, err := config.SetActiveProvider(configPath, options.name)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, providerMutationError(configPath, options.name, err), exitCrash)
 	}
 	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
 	// An override only becomes the effective provider if Zero can actually
@@ -179,7 +179,13 @@ func activeProviderEnvOverrideResolution(deps appDeps, configPath string, overri
 	options.UserConfigPath = configPath
 	options.ProviderCommand = ""
 	resolved, err := config.Resolve(options)
-	if err != nil || strings.TrimSpace(resolved.ActiveProvider) != override {
+	// Fold case: resolution selects the active row case-insensitively and reports
+	// the row's canonical persisted spelling, so ZERO_PROVIDER=openrouter against
+	// a saved "OpenRouter" resolves to "OpenRouter". Comparing exactly called that
+	// a failed override and told the user Zero could not start with it, which was
+	// the opposite of true. A fold cannot report a false success here: if the
+	// active row folds to the override, the override is what selected it.
+	if err != nil || !strings.EqualFold(strings.TrimSpace(resolved.ActiveProvider), override) {
 		return activeProviderOverrideUnresolved
 	}
 	return activeProviderOverrideResolved
@@ -482,7 +488,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 	cfg, err := config.RemoveProvider(configPath, name)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, providerMutationError(configPath, name, err), exitCrash)
 	}
 	// Delete the key from the store BESIDE the config being edited — the same
 	// store setup/rename write to — not the default-path store, so a
@@ -568,7 +574,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 	}
 	cfg, err := config.RenameProvider(configPath, options.names[0], options.names[1])
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
+		return writeAppError(stderr, providerMutationError(configPath, options.names[0], err), exitCrash)
 	}
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{
@@ -605,6 +611,47 @@ func providerResolvedByName(providers []config.ProviderProfile, name string) boo
 	return matches == 1
 }
 
+// providerMutationError renders a provider mutator's failure, naming the saved
+// profile when the config owns what the user asked for under another spelling.
+// The mutators match exactly on purpose — one credential identity, one row — so
+// `zero providers use SAVED` against a saved "saved", or a catalog id against a
+// row saved under a different name, correctly fails not-found. Saying only that
+// leaves the user to guess what they got wrong, and `zero auth logout` already
+// explains the same situation; this keeps the provider commands consistent with
+// it, and goes one better by naming the spelling that works.
+func providerMutationError(configPath, name string, err error) string {
+	message := err.Error()
+	if !strings.Contains(message, "not found") {
+		return message
+	}
+	canonical, owned, lookupErr := config.PersistedProviderIdentity(configPath, name)
+	if lookupErr != nil || !owned || canonical == strings.TrimSpace(name) {
+		return message
+	}
+	return fmt.Sprintf("%s; the saved profile is named %q and provider names are matched exactly", message, canonical)
+}
+
+// configOwnsProviderIdentity reports whether a persisted row already owns name —
+// under any capitalization, or as the catalog id of a row saved under a
+// different name. Every runtime-only report below must consult it first: its
+// message claims the provider exists only because an environment variable is
+// set, and that is simply false for a provider the config owns. The caller falls
+// through to the command's own not-found handling instead, which is the right
+// answer for a mis-addressed saved profile — `zero providers use openrouter`
+// against a saved {name: "my-router", catalogId: "openrouter"} is the wrong name
+// for a real profile, not an env-derived provider.
+//
+// failed reports that reading the config failed; the error is already on stderr
+// and exit carries the code. owned is meaningful only when failed is false.
+func configOwnsProviderIdentity(stderr io.Writer, configPath, name string) (owned bool, exit int, failed bool) {
+	if _, ok, err := config.PersistedProviderIdentity(configPath, name); err != nil {
+		return false, writeAppError(stderr, err.Error(), exitCrash), true
+	} else if ok {
+		return true, exitSuccess, false
+	}
+	return false, exitSuccess, false
+}
+
 // reportUnpersistedProviderUse handles `zero providers use <name>` for a
 // provider that is not persisted in config.json. If it's not resolvable at
 // all (an unknown/misspelled name), it returns handled=false so the caller
@@ -614,9 +661,9 @@ func providerResolvedByName(providers []config.ProviderProfile, name string) boo
 // reports the situation plainly instead of that confusing error (issue
 // #707).
 func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, options providerUseOptions, configPath string) (int, bool) {
-	if persisted, err := config.ProviderPersistedCaseInsensitive(configPath, options.name); err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash), true
-	} else if persisted {
+	if owned, exit, failed := configOwnsProviderIdentity(stderr, configPath, options.name); failed {
+		return exit, true
+	} else if owned {
 		return exitSuccess, false
 	}
 	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
@@ -655,6 +702,11 @@ func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, option
 // name isn't resolvable at all, it returns handled=false so the caller falls
 // through to RemoveProvider's real "not found" error.
 func reportUnpersistedProviderRemove(stdout, stderr io.Writer, deps appDeps, name string, jsonOutput bool, configPath string) (int, bool) {
+	if owned, exit, failed := configOwnsProviderIdentity(stderr, configPath, name); failed {
+		return exit, true
+	} else if owned {
+		return exitSuccess, false
+	}
 	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
 	if exitCode != exitSuccess {
 		return exitCode, true
@@ -686,6 +738,11 @@ func reportUnpersistedProviderRemove(stdout, stderr io.Writer, deps appDeps, nam
 }
 
 func reportUnpersistedProviderRename(stdout, stderr io.Writer, deps appDeps, name string, jsonOutput bool, configPath string) (int, bool) {
+	if owned, exit, failed := configOwnsProviderIdentity(stderr, configPath, name); failed {
+		return exit, true
+	} else if owned {
+		return exitSuccess, false
+	}
 	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
 	if exitCode != exitSuccess {
 		return exitCode, true

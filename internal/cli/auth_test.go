@@ -190,6 +190,59 @@ func TestRunAuthChatGPTRevalidatesConfigImmediatelyBeforeSave(t *testing.T) {
 	}
 }
 
+// TestRunAuthChatGPTAllowsCaseVariantPersistedProfile is the regression test for
+// jatmn's #725 finding: preflighting a login as if it were a new provider write
+// rejected the very row it was logging into. A config whose sole ChatGPT profile
+// is spelled "ChatGPT" made `zero auth chatgpt` fail before the browser flow with
+// `provider "chatgpt" already exists as "ChatGPT"` — while the TUI, which only
+// validates the file, completed the same login. A login mints no new spelling:
+// EnsureCatalogProvider reuses whatever row owns the identity.
+func TestRunAuthChatGPTAllowsCaseVariantPersistedProfile(t *testing.T) {
+	storePath := withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"ChatGPT"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "chatgpt"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		chatGPTLogin: func(context.Context, provideroauth.ChatGPTOptions) (oauth.Token, error) {
+			return oauth.Token{AccessToken: "fresh"}, nil
+		},
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, want success; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "already exists as") {
+		t.Fatalf("a case-variant re-login must not be treated as a colliding new provider: %q", stderr.String())
+	}
+	token, ok, err := store.Load(oauth.ProviderKey("chatgpt"))
+	if err != nil || !ok || token.AccessToken != "fresh" {
+		t.Fatalf("stored token = %+v, %v, %v; want the fresh login saved", token, ok, err)
+	}
+	// The ambiguous-config guard is unchanged: a login still refuses to run
+	// against a file with two case-duplicate rows.
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"chatgpt"},{"name":"ChatGPT"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = runWithDeps([]string{"auth", "chatgpt"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		chatGPTLogin: func(context.Context, provideroauth.ChatGPTOptions) (oauth.Token, error) {
+			return oauth.Token{AccessToken: "should-not-save"}, nil
+		},
+	})
+	if code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("exit = %d, stderr = %q; want the ambiguous-config failure preserved", code, stderr.String())
+	}
+}
+
 func TestRunAuthRefreshNoToken(t *testing.T) {
 	withAuthStore(t)
 	t.Setenv("ZERO_OAUTH_DEMO_CLIENT_ID", "client") // so config resolves; refresh still fails (no token)

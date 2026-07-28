@@ -50,6 +50,66 @@ func PreflightUserConfig(path string) error {
 	return ValidatePersistedProviderNames(cfg)
 }
 
+// PreflightCatalogProviderLogin is the preflight for a credential login against
+// a catalog provider. It is deliberately weaker than PreflightProviderWrite:
+// a login does not mint a new spelling. EnsureCatalogProvider reuses whatever
+// row already owns the identity — matching on catalog id OR folded name — so a
+// persisted "OpenRouter" is the same credential as a `zero auth login
+// openrouter`, not a colliding second row. Preflighting that as a collision
+// blocked OAuth outright for anyone whose config used a capitalized spelling,
+// while the TUI (which only validates the file) completed the same login.
+//
+// The collision check still runs when nothing owns the identity, because that is
+// the case where a row WILL be created. It is unreachable today given
+// EnsureCatalogProvider's own matching, and kept so that if that matching ever
+// narrows, this fails fast before the browser flow instead of after it.
+func PreflightCatalogProviderLogin(path, catalogID string) error {
+	if err := PreflightUserConfig(path); err != nil {
+		return err
+	}
+	if _, owned, err := PersistedProviderIdentity(path, catalogID); err != nil {
+		return err
+	} else if owned {
+		return nil
+	}
+	return PreflightProviderWrite(path, catalogID)
+}
+
+// PersistedProviderIdentity reports whether a persisted user-config row already
+// owns identity — as its name (case-insensitively) or as its catalog id — and
+// returns that row's exact name.
+//
+// Callers use it to answer "is this the config's provider, however it was
+// spelled or addressed?", which is a different question from ProviderPersisted's
+// "is this the exact key a mutator will match". A row saved as
+// {name: "my-router", catalogId: "openrouter"} is owned by both spellings here,
+// so `zero providers use openrouter` is a wrong way to address a saved profile
+// rather than an environment-derived provider.
+func PersistedProviderIdentity(path, identity string) (string, bool, error) {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return "", false, nil
+	}
+	data, err := os.ReadFile(strings.TrimSpace(path))
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", false, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	for _, provider := range cfg.Providers {
+		name := strings.TrimSpace(provider.Name)
+		if strings.EqualFold(name, identity) || strings.EqualFold(strings.TrimSpace(provider.CatalogID), identity) {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // PreflightProviderWrite also rejects a new spelling that would share a
 // case-insensitive credential key with an existing persisted row.
 func PreflightProviderWrite(path, name string) error {

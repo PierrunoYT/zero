@@ -151,6 +151,136 @@ func providersUseOverrideConfigAtDefaultUserPath(t *testing.T) string {
 	return configPath
 }
 
+// TestRunProvidersUseResolvesCaseVariantEnvOverride is the regression test for
+// jatmn's #725 review: the override check ran the real resolver but compared its
+// result to the raw env string exactly. Resolution matches the active row
+// case-insensitively and reports the row's persisted spelling, so
+// ZERO_PROVIDER=WORK against a saved "work" resolves fine at runtime yet was
+// reported as unresolvable — telling the user Zero could not start on an
+// override that works.
+func TestRunProvidersUseResolvesCaseVariantEnvOverride(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	// As in TestRunProvidersUseJSONFlagsEnvOverride: the resolver reads the real
+	// process environment, so the override has to be set for real.
+	t.Setenv(config.ActiveProviderEnv, "WORK")
+	deps := providerSetupDeps(providersUseOverrideConfigAtDefaultUserPath(t))
+	deps.getenv = func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "WORK"
+		}
+		return ""
+	}
+
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if resolves, ok := payload["envProviderResolves"].(bool); !ok || !resolves {
+		t.Fatalf("envProviderResolves = %#v, want true for a case-variant override of a saved profile", payload["envProviderResolves"])
+	}
+	if payload["effectiveProvider"] != "WORK" {
+		t.Fatalf("effectiveProvider = %#v, want the override reported as effective", payload["effectiveProvider"])
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	textDeps := providerSetupDeps(providersUseOverrideConfigAtDefaultUserPath(t))
+	textDeps.getenv = deps.getenv
+	if code := runWithDeps([]string{"providers", "use", "fast"}, &stdout, &stderr, textDeps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	if note := stderr.String(); strings.Contains(note, "can be resolved") {
+		t.Fatalf("a resolvable case-variant override must not be reported as broken: %q", note)
+	}
+}
+
+// TestRunProvidersUseRejectsCatalogIDOfSavedProfile covers jatmn's #725 finding
+// that catalog-id addressing of a SAVED row took the runtime-only path: the row
+// is not persisted under that name, but the config plainly owns the identity, so
+// the env-derived explanation is false and exiting 0 hides a failed switch.
+func TestRunProvidersUseRejectsCatalogIDOfSavedProfile(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, BaseURL: config.OpenAIBaseURL, Model: "gpt-4.1"},
+			{Name: "my-router", ProviderKind: config.ProviderKindOpenAICompatible, CatalogID: "openrouter", BaseURL: "https://openrouter.ai/api/v1", Model: "x"},
+		},
+	})
+
+	var stdout, stderr bytes.Buffer
+	deps := providerSetupDeps(configPath)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		saved := config.ProviderProfile{Name: "my-router", ProviderKind: config.ProviderKindOpenAICompatible, CatalogID: "openrouter", Model: "x"}
+		return config.ResolvedConfig{ActiveProvider: "work", Provider: saved, Providers: []config.ProviderProfile{saved}}, nil
+	}
+	if code := runWithDeps([]string{"providers", "use", "openrouter"}, &stdout, &stderr, deps); code != exitCrash {
+		t.Fatalf("exit = %d, want %d (stdout %q, stderr %q)", code, exitCrash, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "environment variable") {
+		t.Fatalf("a saved profile addressed by catalog id must not be described as environment-derived: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `provider "openrouter" not found`) {
+		t.Fatalf("stderr = %q, want the real not-found error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"my-router"`) {
+		t.Fatalf("stderr = %q, want the saved profile's name named in the hint", stderr.String())
+	}
+	if cfg := readFileConfig(t, configPath); cfg.ActiveProvider != "work" {
+		t.Fatalf("ActiveProvider = %q, want work (nothing should have switched)", cfg.ActiveProvider)
+	}
+}
+
+// TestRunProvidersRemoveRenameRejectCaseVariantOfPersistedProvider extends the
+// guard `providers use` already had to remove and rename, which jatmn found had
+// been left behind: `zero providers remove SAVED` against a saved "saved" exited
+// 0 with the environment-variable explanation instead of failing not-found.
+func TestRunProvidersRemoveRenameRejectCaseVariantOfPersistedProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "remove", args: []string{"providers", "remove", "SAVED"}},
+		{name: "rename", args: []string{"providers", "rename", "SAVED", "renamed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+				ActiveProvider: "saved",
+				Providers: []config.ProviderProfile{
+					{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+				},
+			})
+
+			var stdout, stderr bytes.Buffer
+			deps := providerSetupDeps(configPath)
+			deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+				profile := config.ProviderProfile{Name: "saved", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}
+				return config.ResolvedConfig{ActiveProvider: "saved", Provider: profile, Providers: []config.ProviderProfile{profile}}, nil
+			}
+			if code := runWithDeps(tc.args, &stdout, &stderr, deps); code != exitCrash {
+				t.Fatalf("exit = %d, want %d (stdout %q, stderr %q)", code, exitCrash, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "environment variable") {
+				t.Fatalf("a case variant of a saved profile must not be described as environment-derived: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), `provider "SAVED" not found`) {
+				t.Fatalf("stderr = %q, want the real not-found error", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `"saved"`) {
+				t.Fatalf("stderr = %q, want the persisted spelling named in the hint", stderr.String())
+			}
+			cfg := readFileConfig(t, configPath)
+			if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "saved" {
+				t.Fatalf("config was mutated by a rejected command: %#v", cfg.Providers)
+			}
+		})
+	}
+}
+
 // The write to config.json still succeeds, but when ZERO_PROVIDER names a
 // different provider the saved selection is NOT effective, so the command must
 // warn instead of reporting a silent success (issue #721).
