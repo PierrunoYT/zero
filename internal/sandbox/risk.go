@@ -68,10 +68,11 @@ func matchesDestructive(command string) bool {
 	return false
 }
 
-// maxUnparseableShellDepth bounds `sh -c <payload>` recursion in the fallback,
-// mirroring maxAnalyzerDepth on the parseable path so a nested launcher chain
-// cannot make classification unbounded.
-const maxUnparseableShellDepth = 3
+// maxUnparseableShellDepth bounds `sh -c <payload>` recursion in the fallback.
+// It IS maxAnalyzerDepth rather than a copy of its value: a fallback that gave
+// up a level earlier than the parseable path would drop the network category on
+// exactly the deeply-nested launcher chains this path exists to fail closed on.
+const maxUnparseableShellDepth = maxAnalyzerDepth
 
 func matchesUnparseableNetwork(command string) bool {
 	return matchesUnparseableNetworkAt(command, 0)
@@ -146,16 +147,24 @@ func matchesUnparseableGitNetwork(args []string) bool {
 	return false
 }
 
-// fallbackDashCPayload returns the argument following `-c` (the command a shell
-// launcher will run), or "" when there is none. It mirrors dashCPayload on the
-// parseable path.
+// fallbackDashCPayload returns the argument following `-c` or `--command` (the
+// command a shell launcher will run), or "" when there is none. Both spellings
+// are accepted because bash and zsh accept both, and shellDashCPayload in
+// safe_command.go already does — a fallback that only knew `-c` would let
+// `bash --command "git push …"` past the very check this path exists for.
 func fallbackDashCPayload(args []string) string {
 	for index := 0; index < len(args); index++ {
-		if args[index] == "-c" && index+1 < len(args) {
+		if isShellCommandFlag(args[index]) && index+1 < len(args) {
 			return args[index+1]
 		}
 	}
 	return ""
+}
+
+// isShellCommandFlag reports whether a token is the flag whose value a shell
+// launcher executes.
+func isShellCommandFlag(token string) bool {
+	return token == "-c" || token == "--command"
 }
 
 // executableTokenBase reduces a raw fallback token to a comparable program name.
@@ -163,9 +172,15 @@ func fallbackDashCPayload(args []string) string {
 // this path recognizes curl.exe and git.cmd exactly as normalizeProgramToken does
 // on the parseable path — a token that normalized differently here used to be how
 // `curl.exe https://… && "unterminated` lost its network classification.
+//
+// Drive-relative spellings go through windowsExecutablePathBasename for the same
+// reason: `C:git.exe` has no separator to cut on, so a plain basename scan leaves
+// `c:git` and the deny never matches a program the parseable path classifies.
 func executableTokenBase(token string) string {
 	token = strings.Trim(token, `\"'`)
-	if slash := strings.LastIndexAny(token, `/\`); slash >= 0 {
+	if basename, ok := windowsExecutablePathBasename(token); ok {
+		token = basename
+	} else if slash := strings.LastIndexAny(token, `/\`); slash >= 0 {
 		token = token[slash+1:]
 	}
 	return trimExecutableSuffix(strings.ToLower(token))

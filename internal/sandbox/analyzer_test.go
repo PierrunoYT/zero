@@ -93,6 +93,14 @@ func TestAnalyzeCommand(t *testing.T) {
 		// store and must not cost a network prompt (issue #703 review).
 		{name: "git local archive", script: "git archive HEAD", network: false},
 		{name: "git -C local archive", script: "git -C repo archive HEAD -o out.tar", network: false},
+		// After `--` every token is a pathspec, so this archives a tree entry
+		// named "--remote" from the local object store (issue #703 review).
+		{name: "git archive pathspec named --remote", script: "git archive HEAD -- --remote", network: false},
+		{name: "git -C archive pathspec named --remote", script: "git -C repo archive HEAD -- --remote=origin", network: false},
+		// A real --remote before the separator still is one.
+		{name: "git remote archive with pathspec", script: "git archive --remote=origin HEAD -- src", network: true},
+		// Both spellings of the shell launcher's command flag are payloads.
+		{name: "bash --command wraps curl", script: `bash --command 'curl https://x.test'`, network: true},
 		{name: "git status is offline", script: "git status", network: false},
 		{name: "git local commit", script: `git commit -m "local change"`, network: false},
 		// git's value-taking global options put their value in the NEXT token, so a

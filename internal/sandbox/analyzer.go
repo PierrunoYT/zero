@@ -296,8 +296,17 @@ func gitUsesNetwork(words []string) bool {
 // --remote option, in either its joined (--remote=<repo>) or separated
 // (--remote <repo>) spelling. The whole argument list is scanned rather than
 // only the part after the subcommand, so option order cannot hide it.
+//
+// Scanning stops at a standalone `--`: everything after it is a pathspec, so
+// `git archive HEAD -- --remote` archives a tree entry NAMED --remote from the
+// local object store and never touches the network. Treating that as remote
+// would cost a network prompt — and a network grant — on a purely local
+// command. Same end-of-options rule hasRecursiveForce applies to `rm -- -rf`.
 func gitTargetsRemoteArchive(words []string) bool {
 	for _, word := range words {
+		if word == "--" {
+			return false
+		}
 		lowered := strings.ToLower(word)
 		if lowered == "--remote" || strings.HasPrefix(lowered, "--remote=") {
 			return true
@@ -483,11 +492,14 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 	return "", nil
 }
 
-// dashCPayload returns the literal text of the word following `-c` in an AST arg
-// list (the command a shell launcher will run), or "" when there is none.
+// dashCPayload returns the literal text of the word following `-c`/`--command`
+// in an AST arg list (the command a shell launcher will run), or "" when there
+// is none. Both spellings are recognized, matching shellDashCPayload and the
+// unparseable fallback: bash and zsh accept either, so knowing only `-c` would
+// leave `bash --command '<payload>'` unclassified on both paths.
 func dashCPayload(args []*syntax.Word) string {
 	for index := 0; index < len(args); index++ {
-		if wordText(args[index]) == "-c" && index+1 < len(args) {
+		if isShellCommandFlag(wordText(args[index])) && index+1 < len(args) {
 			return wordText(args[index+1])
 		}
 	}

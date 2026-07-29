@@ -409,6 +409,16 @@ func TestClassifyUnparseableNetworkBehindWrapperFailsClosed(t *testing.T) {
 		// A newline separates commands; the network program is on its own line.
 		"true\ncurl https://example.com && \"unterminated",
 		"echo start\r\ngit push origin main && \"unterminated",
+		// bash and zsh accept --command as well as -c, so the payload behind it
+		// has to be scanned too (issue #703 review).
+		`bash --command 'curl https://example.com' && "unterminated`,
+		`sh --command "git push origin main" && "unterminated`,
+		// A drive-relative Windows spelling has no separator to cut on, so the
+		// basename scan alone left "c:git" and never matched (same review).
+		`C:git.exe push origin main & rem '`,
+		`C:curl.exe https://example.com & rem '`,
+		// Recursion goes through more than one launcher layer.
+		`sh -c "sh -c 'curl https://example.com'" && "unterminated`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			risk := classifyCommand(command)
@@ -422,6 +432,23 @@ func TestClassifyUnparseableNetworkBehindWrapperFailsClosed(t *testing.T) {
 	}
 }
 
+// TestUnparseableShellDepthMatchesAnalyzerDepth pins the two launcher-recursion
+// caps together, which is the property jatmn's #703 review asked for: a fallback
+// that gave up a level earlier than the AST path would drop the network category
+// on exactly the deeply-nested chains it exists to fail closed on.
+//
+// Asserted as constants rather than by driving a four-deep command: the fallback
+// tokenizer is deliberately small and does not model nested escaped quotes, so
+// a literal four-layer `sh -c` string would be testing the tokenizer's escaping
+// rather than the depth limit. The behavior that recursion happens at all, and
+// through more than one layer, is covered above.
+func TestUnparseableShellDepthMatchesAnalyzerDepth(t *testing.T) {
+	if maxUnparseableShellDepth != maxAnalyzerDepth {
+		t.Fatalf("maxUnparseableShellDepth = %d, maxAnalyzerDepth = %d; the fallback must not give up before the parseable path",
+			maxUnparseableShellDepth, maxAnalyzerDepth)
+	}
+}
+
 // TestClassifyUnparseableLocalGitArchiveStaysNonNetwork pins the other half of
 // the archive gate: the fallback must agree with the AST path that only a
 // --remote archive talks to another host.
@@ -431,6 +458,10 @@ func TestClassifyUnparseableLocalGitArchiveStaysNonNetwork(t *testing.T) {
 		`git archive -o out.tar HEAD & rem '`,
 		`git -C repo archive HEAD & rem '`,
 		`git.exe archive HEAD & rem '`,
+		// A pathspec named --remote after the end-of-options separator is a
+		// local tree entry, not a remote (issue #703 review).
+		`git archive HEAD -- --remote & rem '`,
+		`git archive HEAD -- --remote=origin & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			risk := classifyCommand(command)
