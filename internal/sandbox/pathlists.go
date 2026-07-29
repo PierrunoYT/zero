@@ -139,6 +139,9 @@ func protectedCredentialPathBlock(request Request, workspaceRoot string) *pathBl
 // protectedPathDenied reports whether path targets one of the protected
 // credential files. There is no allow-list consultation by design.
 func protectedPathDenied(protected []string, workspaceRoot, path string) bool {
+	if len(protected) == 0 {
+		return false
+	}
 	for _, entry := range protected {
 		if pathUnderProtectedRoot(path, entry, workspaceRoot) {
 			return true

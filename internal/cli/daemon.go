@@ -63,6 +63,7 @@ Commands:
                             daemon. Requires a bearer token in $ZERO_DAEMON_REMOTE_TOKEN
                             (or $ZERO_DAEMON_REMOTE_TOKEN_FILE). --bundle-dir enables
                             git-bundle uploads, extracted into per-link work trees.
+                            An inline token takes precedence, so a stale token-file pointer is intentionally not protected as the live credential.
   link --remote <host:port> --repo <dir> --id <name> [--out <file>]
                             Upload repo's git history to the remote as a bundle and
                             print the extracted remote path. --out saves a session

@@ -140,6 +140,27 @@ func TestProtectedCredentialsSurviveAllowRead(t *testing.T) {
 	}
 }
 
+func TestProtectedCredentialDirExcluded(t *testing.T) {
+	ws, token := protectedTokenFixture(t)
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: ws,
+		Policy:        Policy{Mode: ModeEnforce, EnforceWorkspace: true, AllowRead: []string{token}},
+	})
+
+	if !engine.ReadExclusions().DirExcluded(token) {
+		t.Fatalf("DirExcluded must enforce the protected credential path %q", token)
+	}
+}
+
+func TestProtectedCredentialPreventsUnsandboxedExecution(t *testing.T) {
+	ws, _ := protectedTokenFixture(t)
+	engine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: DefaultPolicy()})
+
+	if engine.UnsandboxedExecutionAllowed() {
+		t.Fatal("UnsandboxedExecutionAllowed must stay false while a credential path is protected")
+	}
+}
+
 // TestProtectedCredentialsRejectSessionPermissionProfile covers the other
 // re-inclusion route: a session/turn permission profile that asks for the token
 // path must not be auto-applicable.

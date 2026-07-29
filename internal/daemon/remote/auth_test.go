@@ -81,8 +81,11 @@ func TestCanonicalizeTokenFileEnv(t *testing.T) {
 		if got := os.Getenv(EnvTokenFile); got != token {
 			t.Fatalf("%s = %q, want %q", EnvTokenFile, got, token)
 		}
+		// Workers run from session directories, so prove the selected path remains
+		// pinned after crossing that boundary rather than merely inspecting the env.
+		t.Chdir(t.TempDir())
 		if tok, err := TokenFromEnv(); err != nil || tok != "from-file" {
-			t.Fatalf("TokenFromEnv after canonicalization = %q, %v", tok, err)
+			t.Fatalf("TokenFromEnv from a worker directory after canonicalization = %q, %v", tok, err)
 		}
 	})
 
