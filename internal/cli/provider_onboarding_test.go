@@ -868,3 +868,35 @@ func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
 		t.Fatalf("stored key must be deleted from the store beside the config")
 	}
 }
+
+func TestRunProvidersRemoveCaseDuplicateKeepsSurvivorKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	seed := `{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "survivor-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"providers", "remove", "WORK", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if key, ok, err := store.Get("work"); err != nil || !ok || key != "survivor-key" {
+		t.Fatalf("surviving provider key = %q, %v, %v; want retained", key, ok, err)
+	}
+	var payload struct {
+		KeyRemoved bool `json:"keyRemoved"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || payload.KeyRemoved {
+		t.Fatalf("payload = %s, err = %v; shared key must not be reported removed", stdout.String(), err)
+	}
+}

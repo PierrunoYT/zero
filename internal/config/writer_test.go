@@ -707,13 +707,47 @@ func TestRemoveProviderKeepsActiveWhenOtherRemoved(t *testing.T) {
 	}
 }
 
+func TestProviderMutatorsHandOffCaseVariantActiveProvider(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(string) (FileConfig, error)
+		wantActive string
+		wantName   string
+	}{
+		{name: "remove", mutate: func(path string) (FileConfig, error) { return RemoveProvider(path, "work") }},
+		{name: "rename", mutate: func(path string) (FileConfig, error) { return RenameProvider(path, "work", "office") }, wantActive: "office", wantName: "office"},
+		{name: "edit", mutate: func(path string) (FileConfig, error) {
+			return EditProvider(path, ProviderEdit{Name: "work", NewName: "office", Model: "updated"})
+		}, wantActive: "office", wantName: "office"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			writeConfigFixture(t, path, FileConfig{ActiveProvider: "WORK", Providers: []ProviderProfile{{Name: "work", Model: "old"}}}, 0o600)
+			cfg, err := test.mutate(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ActiveProvider != test.wantActive {
+				t.Fatalf("activeProvider = %q, want %q", cfg.ActiveProvider, test.wantActive)
+			}
+			if test.wantName == "" && len(cfg.Providers) != 0 {
+				t.Fatalf("providers = %+v, want none", cfg.Providers)
+			}
+			if test.wantName != "" && (len(cfg.Providers) != 1 || cfg.Providers[0].Name != test.wantName) {
+				t.Fatalf("providers = %+v, want canonical name %q", cfg.Providers, test.wantName)
+			}
+		})
+	}
+}
+
 // UpsertProvider merges by exact name, so a config file can end up with two
 // rows that differ only by case (e.g. one saved as "work", another later
 // saved as "WORK"). RemoveProvider must delete the exact row the caller
 // named, not whichever case-variant sorts first.
 func TestRemoveProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
-	before := writeConfigFixture(t, path, FileConfig{
+	writeConfigFixture(t, path, FileConfig{
 		ActiveProvider: "work",
 		Providers: []ProviderProfile{
 			{Name: "work", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://a.example.com/v1", Model: "m1"},
@@ -721,8 +755,55 @@ func TestRemoveProviderRequiresExactProviderIdentityAmongCaseVariants(t *testing
 		},
 	}, 0o600)
 
-	_, err := RemoveProvider(path, "WORK")
-	assertAmbiguousConfigUnchanged(t, path, before, err, "work", "WORK")
+	cfg, err := RemoveProvider(path, "WORK")
+	if err != nil {
+		t.Fatalf("exact removal should repair case duplicates: %v", err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "work" || cfg.ActiveProvider != "work" {
+		t.Fatalf("repaired config = %+v", cfg)
+	}
+}
+
+func TestRemoveProviderRejectsNonExactCaseDuplicateTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}}}, 0o600)
+	_, err := RemoveProvider(path, "WoRk")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want exact-target not-found error", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("rejected removal rewrote config: readErr=%v", readErr)
+	}
+}
+
+func TestRemoveProviderRejectsRepairThatRemainsAmbiguous(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "WORK"}, {Name: "Work"}}}, 0o600)
+	_, err := RemoveProvider(path, "Work")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous persisted provider names") {
+		t.Fatalf("error = %v, want resulting-config validation error", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("invalid repair rewrote config: readErr=%v", readErr)
+	}
+}
+
+func TestRemoveProviderKeepsExactActiveCaseVariant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "work",
+		Providers:      []ProviderProfile{{Name: "alpha"}, {Name: "work"}, {Name: "WORK"}},
+	}, 0o600)
+
+	cfg, err := RemoveProvider(path, "WORK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ActiveProvider != "work" {
+		t.Fatalf("activeProvider = %q, want exact surviving row work", cfg.ActiveProvider)
+	}
 }
 
 func TestRemoveProviderRejectsUnknownWithoutRewriting(t *testing.T) {

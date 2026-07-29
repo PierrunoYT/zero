@@ -498,7 +498,11 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	// Delete the key from the store BESIDE the config being edited — the same
 	// store setup/rename write to — not the default-path store, so a
 	// non-default config path cannot leave the encrypted key behind.
-	keyRemoved, keyErr := removeStoredProviderKeyAt(configPath, name)
+	keyRemoved := false
+	var keyErr error
+	if !configContainsCaseVariantProvider(cfg, name) {
+		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, name)
+	}
 	if options.json {
 		payload := map[string]any{
 			"removed":        name,
@@ -548,6 +552,16 @@ func removeStoredProviderKeyAt(configPath string, provider string) (bool, error)
 		return false, err
 	}
 	return store.Delete(provider)
+}
+
+func configContainsCaseVariantProvider(cfg config.FileConfig, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // runProvidersRename renames a saved provider profile, migrating its stored

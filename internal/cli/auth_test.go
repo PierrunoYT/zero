@@ -308,6 +308,53 @@ func TestRunAuthLogoutResolvesCatalogIdentity(t *testing.T) {
 	}
 }
 
+func TestRunAuthLogoutCleansCredentialsWhenConfigIsAmbiguous(t *testing.T) {
+	storePath := withAuthStore(t)
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(configHome, "zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configData := []byte(`{"providers":[{"name":"demo"},{"name":"DEMO","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "stored"}); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("demo", "stored-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "demo"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("exit = %d stderr = %q, want truthful marker-update failure", code, stderr.String())
+	}
+	if _, ok, err := store.Load(oauth.ProviderKey("demo")); err != nil || ok {
+		t.Fatalf("OAuth credential survived recovery logout: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := keyStore.Get("demo"); err != nil || ok {
+		t.Fatalf("API key survived recovery logout: ok=%v err=%v", ok, err)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(after, configData) {
+		t.Fatalf("invalid config changed during recovery logout: err=%v content=%s", err, after)
+	}
+}
+
 // TestRunAuthOpenRouterPreflightsBeforeTheBrowserFlow covers the second half of
 // the same finding: every other auth entry point validates the config before
 // opening a browser, and this one minted a key first and only discovered the

@@ -480,9 +480,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	if err := config.PreflightUserConfig(configPath); err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
+	configErr := config.PreflightUserConfig(configPath)
 	// Resolve the target the way login does. Login accepts a catalog id or a case
 	// variant and stores its token under the catalog id, and the TUI tells users
 	// to run `zero auth logout <catalog id>` — so refusing that spelling here left
@@ -491,10 +489,12 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// where login put them); only the config mutation below needs the persisted
 	// spelling, because those mutators match a row exactly.
 	configProvider := provider
-	if canonical, owned, identityErr := config.PersistedProviderIdentity(configPath, provider); identityErr != nil {
-		return writeAppError(stderr, identityErr.Error(), exitCrash)
-	} else if owned {
-		configProvider = canonical
+	if configErr == nil {
+		if canonical, owned, identityErr := config.PersistedProviderIdentity(configPath, provider); identityErr != nil {
+			configErr = identityErr
+		} else if owned {
+			configProvider = canonical
+		}
 	}
 	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
@@ -522,6 +522,9 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 			return writeAppError(stderr, redaction.ErrorMessage(canonicalErr, redaction.Options{}), exitCrash)
 		}
 		keyRemoved = keyRemoved || canonicalRemoved
+	}
+	if configErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(configErr, redaction.Options{}), exitCrash)
 	}
 	if _, clearErr := config.ClearProviderKeyStored(configPath, configProvider); clearErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)

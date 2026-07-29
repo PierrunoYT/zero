@@ -419,12 +419,11 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
-	if err := ValidatePersistedProviderNames(cfg); err != nil {
-		return FileConfig{}, err
-	}
 
 	// Persisted provider identity is exact. Resolution may fold names from
-	// runtime sources, but config mutations must target the requested row.
+	// runtime sources, but config mutations must target the requested row. This
+	// lookup intentionally precedes validation so an exact removal can repair a
+	// case-duplicate config; writeConfigFile validates the resulting config.
 	index := -1
 	for i, provider := range cfg.Providers {
 		if strings.TrimSpace(provider.Name) == name {
@@ -435,9 +434,22 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 	if index < 0 {
 		return FileConfig{}, fmt.Errorf("provider %q not found", name)
 	}
-	removed := cfg.Providers[index]
+	activeIndex := -1
+	activeFoldedIndex := -1
+	activeFoldedMatches := 0
+	for i, provider := range cfg.Providers {
+		providerName := strings.TrimSpace(provider.Name)
+		if providerName == strings.TrimSpace(cfg.ActiveProvider) {
+			activeIndex = i
+		}
+		if strings.EqualFold(providerName, strings.TrimSpace(cfg.ActiveProvider)) {
+			activeFoldedIndex = i
+			activeFoldedMatches++
+		}
+	}
+	removedWasActive := activeIndex == index || (activeIndex < 0 && activeFoldedMatches == 1 && activeFoldedIndex == index)
 	cfg.Providers = append(cfg.Providers[:index], cfg.Providers[index+1:]...)
-	if strings.TrimSpace(cfg.ActiveProvider) == strings.TrimSpace(removed.Name) {
+	if removedWasActive {
 		cfg.ActiveProvider = ""
 		if len(cfg.Providers) > 0 {
 			cfg.ActiveProvider = cfg.Providers[0].Name
@@ -509,7 +521,7 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 		}
 		keyMigrated = true
 	}
-	if strings.TrimSpace(cfg.ActiveProvider) == strings.TrimSpace(previousName) {
+	if strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(previousName)) {
 		cfg.ActiveProvider = newName
 	}
 	cfg.Providers[index].Name = newName
@@ -604,7 +616,7 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 		}
 		keyMigrated = true
 	}
-	if renamed && strings.TrimSpace(cfg.ActiveProvider) == strings.TrimSpace(previousName) {
+	if renamed && strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(previousName)) {
 		cfg.ActiveProvider = newName
 	}
 

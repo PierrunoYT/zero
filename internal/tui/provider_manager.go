@@ -364,7 +364,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		}
 		activeAfter = cfg.ActiveProvider
 		notes = []string{"Deleted " + name + "."}
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile)
+		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, configContainsCaseVariantProviderAfterRemoval(cfg, name))
 	} else {
 		// Env-derived providers have no persisted profile or credential to
 		// delete. Keep this path session-only.
@@ -406,6 +406,16 @@ func removeSavedProvider(saved []config.ProviderProfile, name string) []config.P
 	return kept
 }
 
+func configContainsCaseVariantProviderAfterRemoval(cfg config.FileConfig, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+			return true
+		}
+	}
+	return false
+}
+
 // providerManagerCleanupMsg reports the off-thread half of a delete: the
 // stored-key removal outcome and the OAuth-login hint.
 type providerManagerCleanupMsg struct {
@@ -417,17 +427,19 @@ type providerManagerCleanupMsg struct {
 // reads the token store — blocking work the confirm keypress must not wait on.
 // A failed key delete is surfaced rather than letting a lingering secret read
 // as a clean removal.
-func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile) tea.Cmd {
+func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile, retainStoredKey bool) tea.Cmd {
 	name := profile.Name
 	catalogID := profile.CatalogID
 	return func() tea.Msg {
 		notes := []string{}
-		keyStore, storeErr := providerKeyStoreForPath(configPath)
-		if storeErr == nil {
-			_, storeErr = keyStore.Delete(name)
-		}
-		if storeErr != nil {
-			notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
+		if !retainStoredKey {
+			keyStore, storeErr := providerKeyStoreForPath(configPath)
+			if storeErr == nil {
+				_, storeErr = keyStore.Delete(name)
+			}
+			if storeErr != nil {
+				notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
+			}
 		}
 		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {
 			notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
