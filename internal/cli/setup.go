@@ -264,6 +264,12 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
+	// Same identity resolution the login path uses: a catalog-default name yields
+	// to the row already saved for that catalog provider.
+	profile, err = config.AdoptPersistedCatalogProviderName(configPath, profile)
+	if err != nil {
+		return tui.SetupResult{}, err
+	}
 	if err := config.PreflightProviderWrite(configPath, profile.Name); err != nil {
 		return tui.SetupResult{}, err
 	}

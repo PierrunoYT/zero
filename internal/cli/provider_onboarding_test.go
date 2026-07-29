@@ -535,15 +535,27 @@ func TestRunProvidersUseNoWarnWithoutEnvOverride(t *testing.T) {
 	}
 }
 
-func TestActiveProviderEnvOverrideTreatsCaseVariantAsDistinct(t *testing.T) {
-	getenv := func(key string) string {
-		if key == config.ActiveProviderEnv {
-			return "WORK"
+// TestActiveProviderEnvOverrideFoldsCaseAgainstTheSelection replaces the earlier
+// TestActiveProviderEnvOverrideTreatsCaseVariantAsDistinct, which locked in a
+// warning jatmn showed to be misleading: resolution selects the active row
+// case-insensitively, so ZERO_PROVIDER=WORK against a saved "work" lands on
+// exactly the row `providers use work` just selected. Telling the user their
+// switch stays overridden described a conflict that does not exist. A genuinely
+// different provider must still warn.
+func TestActiveProviderEnvOverrideFoldsCaseAgainstTheSelection(t *testing.T) {
+	getenv := func(value string) func(string) string {
+		return func(key string) string {
+			if key == config.ActiveProviderEnv {
+				return value
+			}
+			return ""
 		}
-		return ""
 	}
-	if override := activeProviderEnvOverride(getenv, "work"); override != "WORK" {
-		t.Fatalf("activeProviderEnvOverride() = %q, want WORK", override)
+	if override := activeProviderEnvOverride(getenv("WORK"), "work"); override != "" {
+		t.Fatalf("activeProviderEnvOverride() = %q, want no override for a case variant of the selection", override)
+	}
+	if override := activeProviderEnvOverride(getenv("fast"), "work"); override != "fast" {
+		t.Fatalf("activeProviderEnvOverride() = %q, want the genuinely different provider reported", override)
 	}
 }
 

@@ -153,7 +153,12 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 		return ""
 	}
 	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
-	if override == "" || override == strings.TrimSpace(selected) {
+	// Fold case: resolution selects the active row case-insensitively, so
+	// ZERO_PROVIDER=WORK against a saved "work" names the same provider the write
+	// just selected. Warning that the switch "has no effect" there described a
+	// conflict that does not exist — the runtime lands on exactly the row the user
+	// asked for. Only a genuinely different provider is an override.
+	if override == "" || strings.EqualFold(override, strings.TrimSpace(selected)) {
 		return ""
 	}
 	return override

@@ -1295,6 +1295,14 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		nextProvider = built
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
+		// A catalog-default name yields to the row that already owns that catalog
+		// identity, matching the CLI login path; a user-chosen name still collides.
+		adopted, adoptErr := config.AdoptPersistedCatalogProviderName(m.userConfigPath, profile)
+		if adoptErr != nil {
+			wizard.err = adoptErr.Error()
+			return m, nil
+		}
+		profile = adopted
 		if err := config.PreflightProviderWrite(m.userConfigPath, profile.Name); err != nil {
 			wizard.err = err.Error()
 			return m, nil

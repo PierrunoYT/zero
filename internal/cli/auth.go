@@ -99,6 +99,16 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth openrouter takes no arguments (got %q)", args[0]))
 	}
+	// Check the config BEFORE the browser flow, as every other auth entry point
+	// does. Finding out the file is unusable only after the user has completed a
+	// PKCE round trip wastes their work and mints a key Zero then cannot store.
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := config.PreflightCatalogProviderLogin(configPath, "openrouter"); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	key, err := deps.openRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 		Out:        stdout,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
@@ -111,10 +121,14 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	key = strings.TrimSpace(key)
 	line, err := saveOpenRouterProviderKey(deps, key)
 	if err != nil {
-		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it: %s\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", err, key); writeErr != nil {
+		// The key is real and the user paid for it with a browser round trip, so
+		// print it rather than losing it. But nothing was persisted, so this is a
+		// failure: exiting 0 here reported success for a command that left the
+		// provider unusable, and a script would have carried on.
+		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it.\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", key); writeErr != nil {
 			return exitCrash
 		}
-		return exitSuccess
+		return writeAppError(stderr, "could not save the OpenRouter API key: "+err.Error(), exitCrash)
 	}
 	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key saved.\n%s\n", line); err != nil {
 		return exitCrash
@@ -469,18 +483,18 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if err := config.PreflightUserConfig(configPath); err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	exact, err := config.ProviderPersisted(configPath, provider)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	if !exact {
-		folded, foldedErr := config.ProviderPersistedCaseInsensitive(configPath, provider)
-		if foldedErr != nil {
-			return writeAppError(stderr, foldedErr.Error(), exitCrash)
-		}
-		if folded {
-			return writeAppError(stderr, fmt.Sprintf("provider %q exists with different capitalization; logout requires the exact persisted provider name", provider), exitCrash)
-		}
+	// Resolve the target the way login does. Login accepts a catalog id or a case
+	// variant and stores its token under the catalog id, and the TUI tells users
+	// to run `zero auth logout <catalog id>` — so refusing that spelling here left
+	// the OAuth token and any stored API key in place for exactly the command the
+	// UI documents. The credential store keys stay on what the user typed (that is
+	// where login put them); only the config mutation below needs the persisted
+	// spelling, because those mutators match a row exactly.
+	configProvider := provider
+	if canonical, owned, identityErr := config.PersistedProviderIdentity(configPath, provider); identityErr != nil {
+		return writeAppError(stderr, identityErr.Error(), exitCrash)
+	} else if owned {
+		configProvider = canonical
 	}
 	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
@@ -493,11 +507,23 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// Also drop any stored API key and its marker so `auth logout` clears the whole
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
 	// failures rather than reporting success while a credential remains.
+	//
+	// The key store is asked for both spellings when they differ: a key captured
+	// by provider setup lives under the persisted row's name, while one captured
+	// by a catalog login lives under the catalog id. Clearing only the spelling
+	// the user typed would leave the other behind.
 	keyRemoved, keyErr := config.ForgetProviderKey(provider)
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
-	if _, clearErr := config.ClearProviderKeyStored(configPath, provider); clearErr != nil {
+	if configProvider != provider {
+		canonicalRemoved, canonicalErr := config.ForgetProviderKey(configProvider)
+		if canonicalErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(canonicalErr, redaction.Options{}), exitCrash)
+		}
+		keyRemoved = keyRemoved || canonicalRemoved
+	}
+	if _, clearErr := config.ClearProviderKeyStored(configPath, configProvider); clearErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 	}
 	removed = removed || keyRemoved

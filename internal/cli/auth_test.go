@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -267,6 +268,141 @@ func TestRunAuthRejectsWrongFlags(t *testing.T) {
 		if code := runWithDeps(args, &stdout, &stderr, appDeps{}); code == exitSuccess {
 			t.Errorf("args %v should be rejected, got success", args)
 		}
+	}
+}
+
+// TestRunAuthLogoutResolvesCatalogIdentity covers jatmn's #725 finding: login
+// accepts a catalog id and stores its token under that key, and the TUI tells
+// users to run `zero auth logout chatgpt` — but logout hard-stopped whenever a
+// persisted row matched case-insensitively without matching exactly, so the
+// documented command left the token and any stored key in place.
+func TestRunAuthLogoutResolvesCatalogIdentity(t *testing.T) {
+	storePath := withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"ChatGPT"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{AccessToken: "stored"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "chatgpt"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "capitalization") {
+		t.Fatalf("logout refused the spelling the UI documents: %q", stderr.String())
+	}
+	if _, ok, err := store.Load(oauth.ProviderKey("chatgpt")); err != nil || ok {
+		t.Fatalf("stored token survived logout: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(stdout.String(), "Logged out") {
+		t.Fatalf("stdout = %q, want a logout confirmation", stdout.String())
+	}
+}
+
+// TestRunAuthOpenRouterPreflightsBeforeTheBrowserFlow covers the second half of
+// the same finding: every other auth entry point validates the config before
+// opening a browser, and this one minted a key first and only discovered the
+// config was unusable when trying to save it.
+func TestRunAuthOpenRouterPreflightsBeforeTheBrowserFlow(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work"},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loginCalled := false
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			loginCalled = true
+			return "sk-should-not-be-minted", nil
+		},
+	})
+	if code == exitSuccess {
+		t.Fatalf("an unusable config must fail before login; stdout = %q", stdout.String())
+	}
+	if loginCalled {
+		t.Fatal("the browser flow ran before the config was validated")
+	}
+	if !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("stderr = %q, want the config error", stderr.String())
+	}
+}
+
+// TestRunAuthOpenRouterFailsWhenTheKeyCannotBeSaved pins the exit code: the
+// minted key is still printed so the user does not lose it, but nothing was
+// persisted, and reporting success left a script believing the provider was
+// configured.
+func TestRunAuthOpenRouterFailsWhenTheKeyCannotBeSaved(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) {
+			calls++
+			if calls > 1 {
+				// The preflight passed; break the path only for the save that follows.
+				return "", errors.New("config path unavailable")
+			}
+			return configPath, nil
+		},
+		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			return "sk-openrouter-test", nil
+		},
+	})
+	if code == exitSuccess {
+		t.Fatal("a failed save must not report success")
+	}
+	if !strings.Contains(stdout.String(), "sk-openrouter-test") {
+		t.Fatalf("stdout = %q, want the minted key printed so it is not lost", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "could not save") {
+		t.Fatalf("stderr = %q, want the save failure reported", stderr.String())
+	}
+}
+
+// TestProviderSetupAdoptsPersistedCatalogRowCasing covers the third: catalog
+// OAuth reused an existing row through EnsureCatalogProvider while setup and the
+// wizard still collided with it on write, so re-running setup for a provider
+// saved as "OpenRouter" failed after a successful capture.
+func TestProviderSetupAdoptsPersistedCatalogRowCasing(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"OpenRouter","catalogId":"openrouter","model":"x"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := config.ProviderProfile{Name: "openrouter", CatalogID: "openrouter", Model: "y"}
+
+	adopted, err := config.AdoptPersistedCatalogProviderName(configPath, profile)
+	if err != nil {
+		t.Fatalf("AdoptPersistedCatalogProviderName: %v", err)
+	}
+	if adopted.Name != "OpenRouter" {
+		t.Fatalf("adopted name = %q, want the persisted row's spelling", adopted.Name)
+	}
+	if err := config.PreflightProviderWrite(configPath, adopted.Name); err != nil {
+		t.Fatalf("write preflight rejected the adopted name: %v", err)
+	}
+
+	// A user-chosen name is left alone: colliding with an existing row there is a
+	// real collision, and silently overwriting it would be worse than the error.
+	custom := config.ProviderProfile{Name: "openrouter", CatalogID: "anthropic"}
+	kept, err := config.AdoptPersistedCatalogProviderName(configPath, custom)
+	if err != nil {
+		t.Fatalf("AdoptPersistedCatalogProviderName: %v", err)
+	}
+	if kept.Name != "openrouter" {
+		t.Fatalf("name = %q, want a non-catalog-default name left untouched", kept.Name)
 	}
 }
 

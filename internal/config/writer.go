@@ -75,6 +75,32 @@ func PreflightCatalogProviderLogin(path, catalogID string) error {
 	return PreflightProviderWrite(path, catalogID)
 }
 
+// AdoptPersistedCatalogProviderName retargets a catalog-named profile at the row
+// that already owns its catalog identity, so persisting it UPDATES that row
+// instead of colliding with it.
+//
+// It applies only when the caller took the catalog's own default name (profile
+// name == catalog id). That is the case where the two spellings are the same
+// provider by construction — a re-setup or re-login of, say, openrouter against
+// a row saved as "OpenRouter" — and where EnsureCatalogProvider already reuses
+// the row on the login path. A user-chosen name is left alone on purpose: there,
+// a case collision with an existing row is a real collision, and silently
+// overwriting the other row would be worse than the error.
+func AdoptPersistedCatalogProviderName(path string, profile ProviderProfile) (ProviderProfile, error) {
+	catalogID := strings.TrimSpace(profile.CatalogID)
+	if catalogID == "" || !strings.EqualFold(strings.TrimSpace(profile.Name), catalogID) {
+		return profile, nil
+	}
+	canonical, owned, err := PersistedProviderIdentity(path, catalogID)
+	if err != nil {
+		return profile, err
+	}
+	if owned {
+		profile.Name = canonical
+	}
+	return profile, nil
+}
+
 // PersistedProviderIdentity reports whether a persisted user-config row already
 // owns identity — as its name (case-insensitively) or as its catalog id — and
 // returns that row's exact name.
