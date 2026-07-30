@@ -209,6 +209,14 @@ func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testin
 	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
 		t.Fatalf("shared provider key = %q, %v, %v; want retained", key, ok, err)
 	}
+	// The marker transfer must be mirrored into the in-memory savedProviders
+	// too — reloadProviderManagerRows rebuilds the manager list from it, and
+	// providerManagerCredState gates store lookups on APIKeyStored, so a stale
+	// false here would show "no credential" for the survivor until restart
+	// even though config.json and the credstore both already agree.
+	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "WORK" || !next.savedProviders[0].APIKeyStored {
+		t.Fatalf("in-memory savedProviders must inherit apiKeyStored too, got %+v", next.savedProviders)
+	}
 }
 
 func TestProviderManagerEditModelPersists(t *testing.T) {

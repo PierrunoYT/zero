@@ -365,6 +365,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		activeAfter = cfg.ActiveProvider
 		notes = []string{"Deleted " + name + "."}
 		retainStoredKey := false
+		markerTransferredTo := ""
 		if survivor, ok := caseVariantProviderNameAfterRemoval(cfg, name); ok {
 			retainStoredKey = true
 			// The removed row owned the shared secret's marker; carry it over to
@@ -374,11 +375,27 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 				if survivorRow, foundSurvivor, err := config.ProviderRow(m.userConfigPath, survivor); err == nil && foundSurvivor && !survivorRow.APIKeyStored {
 					if _, err := config.TransferProviderAPIKeyStoredMarker(m.userConfigPath, survivor); err != nil {
 						notes = append(notes, "Warning: could not keep its stored API key reachable ("+err.Error()+").")
+					} else {
+						markerTransferredTo = survivor
 					}
 				}
 			}
 		}
 		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, retainStoredKey)
+		// reloadProviderManagerRows (below, via the caller) rebuilds the manager
+		// list from savedProviders, so the on-disk marker transfer above must be
+		// mirrored here too — otherwise the survivor reads APIKeyStored: false in
+		// memory until the process restarts, and providerManagerCredState (which
+		// gates store lookups on that field) reports "no credential" for a
+		// profile whose key is actually reachable.
+		if markerTransferredTo != "" {
+			for index := range m.savedProviders {
+				if strings.TrimSpace(m.savedProviders[index].Name) == markerTransferredTo {
+					m.savedProviders[index].APIKeyStored = true
+					break
+				}
+			}
+		}
 	} else {
 		// Env-derived providers have no persisted profile or credential to
 		// delete. Keep this path session-only.

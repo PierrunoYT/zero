@@ -501,13 +501,21 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// UI documents. The credential store keys stay on what the user typed (that is
 	// where login put them); only the config mutation below needs the persisted
 	// spelling, because those mutators match a row exactly.
+	//
+	// Identity resolution and candidate expansion run regardless of configErr:
+	// PersistedProviderIdentity/ProviderRow only read+parse the raw JSON, they
+	// never call ValidatePersistedProviderNames, so an unrelated ambiguous
+	// case-duplicate row elsewhere in the file must not suppress deleting every
+	// credential this logout can find for the requested provider. Only the
+	// config WRITE below (clearing the apiKeyStored marker) needs a valid config
+	// and is gated on configErr.
 	configProvider := provider
-	if configErr == nil {
-		if canonical, owned, identityErr := config.PersistedProviderIdentity(configPath, provider); identityErr != nil {
+	if canonical, owned, identityErr := config.PersistedProviderIdentity(configPath, provider); identityErr != nil {
+		if configErr == nil {
 			configErr = identityErr
-		} else if owned {
-			configProvider = canonical
 		}
+	} else if owned {
+		configProvider = canonical
 	}
 	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
@@ -518,18 +526,17 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// not just the spelling the user typed. A profile saved as
 	// {name:"my-xai", catalogId:"xai"} logged in via `zero auth login xai`
 	// stores its token under "xai"; `zero auth logout my-xai` must delete that
-	// too, or the login silently survives.
-	oauthCandidates := []string{provider}
+	// too, or the login silently survives. The same candidate set is used below
+	// for the API key store, which has the identical asymmetry.
+	credentialCandidates := []string{provider}
 	if configProvider != provider {
-		oauthCandidates = append(oauthCandidates, configProvider)
+		credentialCandidates = append(credentialCandidates, configProvider)
 	}
-	if configErr == nil {
-		if row, found, rowErr := config.ProviderRow(configPath, configProvider); rowErr == nil && found {
-			oauthCandidates = appendUniqueOAuthCandidate(oauthCandidates, row.CatalogID)
-		}
+	if row, found, rowErr := config.ProviderRow(configPath, configProvider); rowErr == nil && found {
+		credentialCandidates = appendUniqueOAuthCandidate(credentialCandidates, row.CatalogID)
 	}
 	removed := false
-	for _, candidate := range oauthCandidates {
+	for _, candidate := range credentialCandidates {
 		candidateRemoved, err := manager.Logout(candidate)
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -540,24 +547,21 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
 	// failures rather than reporting success while a credential remains.
 	//
-	// The key store is asked for both spellings when they differ: a key captured
-	// by provider setup lives under the persisted row's name, while one captured
-	// by a catalog login lives under the catalog id. Clearing only the spelling
-	// the user typed would leave the other behind.
+	// The key store is asked for every OAuth candidate spelling too: a key
+	// captured by provider setup lives under the persisted row's name, while one
+	// captured by a catalog login lives under the catalog id. Clearing only the
+	// spelling the user typed would leave the others behind.
 	keyStore, keyErr := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
-	keyRemoved, keyErr := keyStore.Delete(provider)
-	if keyErr != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
-	}
-	if configProvider != provider {
-		canonicalRemoved, canonicalErr := keyStore.Delete(configProvider)
-		if canonicalErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(canonicalErr, redaction.Options{}), exitCrash)
+	keyRemoved := false
+	for _, candidate := range credentialCandidates {
+		candidateRemoved, candidateErr := keyStore.Delete(candidate)
+		if candidateErr != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(candidateErr, redaction.Options{}), exitCrash)
 		}
-		keyRemoved = keyRemoved || canonicalRemoved
+		keyRemoved = keyRemoved || candidateRemoved
 	}
 	if configErr != nil {
 		// Credentials are already gone at this point, but an invalid persisted
