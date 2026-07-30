@@ -512,12 +512,16 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// by provider setup lives under the persisted row's name, while one captured
 	// by a catalog login lives under the catalog id. Clearing only the spelling
 	// the user typed would leave the other behind.
-	keyRemoved, keyErr := config.ForgetProviderKey(provider)
+	keyStore, keyErr := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if keyErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
+	}
+	keyRemoved, keyErr := keyStore.Delete(provider)
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
 	}
 	if configProvider != provider {
-		canonicalRemoved, canonicalErr := config.ForgetProviderKey(configProvider)
+		canonicalRemoved, canonicalErr := keyStore.Delete(configProvider)
 		if canonicalErr != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(canonicalErr, redaction.Options{}), exitCrash)
 		}
