@@ -364,7 +364,21 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		}
 		activeAfter = cfg.ActiveProvider
 		notes = []string{"Deleted " + name + "."}
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, configContainsCaseVariantProviderAfterRemoval(cfg, name))
+		retainStoredKey := false
+		if survivor, ok := caseVariantProviderNameAfterRemoval(cfg, name); ok {
+			retainStoredKey = true
+			// The removed row owned the shared secret's marker; carry it over to
+			// the surviving case-variant so it stays reachable, mirroring the CLI
+			// (`zero providers remove`) fix for the same case.
+			if row.profile.APIKeyStored {
+				if survivorRow, foundSurvivor, err := config.ProviderRow(m.userConfigPath, survivor); err == nil && foundSurvivor && !survivorRow.APIKeyStored {
+					if _, err := config.TransferProviderAPIKeyStoredMarker(m.userConfigPath, survivor); err != nil {
+						notes = append(notes, "Warning: could not keep its stored API key reachable ("+err.Error()+").")
+					}
+				}
+			}
+		}
+		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, retainStoredKey)
 	} else {
 		// Env-derived providers have no persisted profile or credential to
 		// delete. Keep this path session-only.
@@ -394,11 +408,15 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	return next, tea.Batch(cmd, cleanup)
 }
 
-// removeSavedProvider drops one profile from the in-memory saved list.
+// removeSavedProvider drops one profile from the in-memory saved list. Uses
+// exact-name matching to agree with config.RemoveProvider, which the caller
+// just invoked: with case-variant rows now a supported layout (e.g. "work"
+// and "WORK"), a fold-based match here could evict the surviving row from the
+// UI list while it remains in config.json.
 func removeSavedProvider(saved []config.ProviderProfile, name string) []config.ProviderProfile {
 	kept := saved[:0]
 	for _, profile := range saved {
-		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(name)) {
+		if strings.TrimSpace(profile.Name) == strings.TrimSpace(name) {
 			continue
 		}
 		kept = append(kept, profile)
@@ -406,14 +424,18 @@ func removeSavedProvider(saved []config.ProviderProfile, name string) []config.P
 	return kept
 }
 
-func configContainsCaseVariantProviderAfterRemoval(cfg config.FileConfig, name string) bool {
+// caseVariantProviderNameAfterRemoval returns the exact name of a row in cfg
+// that folds to name (a case-only variant surviving the removal), and
+// whether one was found.
+func caseVariantProviderNameAfterRemoval(cfg config.FileConfig, name string) (string, bool) {
 	name = strings.TrimSpace(name)
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
-			return true
+		providerName := strings.TrimSpace(provider.Name)
+		if strings.EqualFold(providerName, name) {
+			return providerName, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // providerManagerCleanupMsg reports the off-thread half of a delete: the

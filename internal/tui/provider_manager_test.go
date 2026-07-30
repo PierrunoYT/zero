@@ -152,6 +152,65 @@ func TestProviderManagerDeleteConfirmsAndRemoves(t *testing.T) {
 	}
 }
 
+// TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant mirrors
+// the CLI's TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant:
+// deleting the case-variant row that owns apiKeyStored must carry the marker
+// to the surviving sibling, since the credential store's secret is keyed
+// case-folded and stays put either way.
+func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := config.FileConfig{
+		ActiveProvider: "WORK",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v1", APIKeyStored: true, Model: "work-model"},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v2", Model: "work-model-2"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatalf("encode seed config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write seed config: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "WORK",
+		ModelName:       "work-model-2",
+		Provider:        &fakeProvider{},
+		ProviderProfile: seed.Providers[1],
+		SavedProviders:  seed.Providers,
+		UserConfigPath:  configPath,
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.width = 120
+	m.height = 40
+	m, _ = m.openProviderManager()
+
+	m = managerKey(t, m, testKeyText("d")) // select "work" (row 0)
+	next, _ := m.handleProviderWizardKey(testKeyText("y"))
+
+	persisted := readManagerConfig(t, next.userConfigPath)
+	if len(persisted.Providers) != 1 || persisted.Providers[0].Name != "WORK" || !persisted.Providers[0].APIKeyStored {
+		t.Fatalf("survivor must inherit apiKeyStored marker, got %+v", persisted.Providers)
+	}
+	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
+		t.Fatalf("shared provider key = %q, %v, %v; want retained", key, ok, err)
+	}
+}
+
 func TestProviderManagerEditModelPersists(t *testing.T) {
 	m := managerTestModel(t)
 	m = managerKey(t, m, testKeyText("e"))

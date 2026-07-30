@@ -372,6 +372,63 @@ func ProviderPersisted(path string, name string) (bool, error) {
 	return false, nil
 }
 
+// ProviderRow returns the persisted user-config row whose Name matches name
+// exactly, and whether one was found. Unlike ProviderPersisted's yes/no, this
+// hands back the row itself (CatalogID, APIKeyStored, ...) so callers that
+// need more than presence — e.g. deciding whether a stored key marker must be
+// carried over to a surviving case-variant row before it is removed — don't
+// each re-implement FileConfig parsing.
+func ProviderRow(path string, name string) (ProviderProfile, bool, error) {
+	path = strings.TrimSpace(path)
+	name = strings.TrimSpace(name)
+	if path == "" || name == "" {
+		return ProviderProfile{}, false, nil
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return ProviderProfile{}, false, nil
+	} else if err != nil {
+		return ProviderProfile{}, false, fmt.Errorf("stat config %s: %w", path, err)
+	}
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		return ProviderProfile{}, false, err
+	}
+	for _, provider := range cfg.Providers {
+		if strings.TrimSpace(provider.Name) == name {
+			return provider, true, nil
+		}
+	}
+	return ProviderProfile{}, false, nil
+}
+
+// TransferProviderAPIKeyStoredMarker sets the APIKeyStored marker on the row
+// named to, without touching any other field on it. The credential store keys
+// its secrets case-folded, so removing a case-variant row that owned the
+// marker leaves the shared secret orphaned unless a surviving case-variant
+// row is marked to take over reading it. No-op (false, nil) when to isn't
+// found or already carries the marker.
+func TransferProviderAPIKeyStoredMarker(path string, to string) (bool, error) {
+	path = strings.TrimSpace(path)
+	to = strings.TrimSpace(to)
+	if path == "" || to == "" {
+		return false, nil
+	}
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		return false, err
+	}
+	for index := range cfg.Providers {
+		if strings.TrimSpace(cfg.Providers[index].Name) == to {
+			if cfg.Providers[index].APIKeyStored {
+				return false, nil
+			}
+			cfg.Providers[index].APIKeyStored = true
+			return true, writeConfigFile(path, cfg)
+		}
+	}
+	return false, fmt.Errorf("provider %q not found", to)
+}
+
 // ProviderPersistedCaseInsensitive reports whether any persisted user-config
 // row has the same folded name. CLI runtime-only guidance uses this to avoid
 // describing a case-variant typo of a saved profile as environment-derived.

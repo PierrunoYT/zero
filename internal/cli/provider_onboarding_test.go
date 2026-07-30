@@ -900,3 +900,51 @@ func TestRunProvidersRemoveCaseDuplicateKeepsSurvivorKey(t *testing.T) {
 		t.Fatalf("payload = %s, err = %v; shared key must not be reported removed", stdout.String(), err)
 	}
 }
+
+// TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant covers the
+// inverse of TestRunProvidersRemoveCaseDuplicateKeepsSurvivorKey: the removed
+// row (not the survivor) owns apiKeyStored. Without transferring the marker,
+// the still-shared credential-store secret becomes unreachable through the
+// surviving row even though it was never deleted.
+func TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	seed := `{"activeProvider":"WORK","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"providers", "remove", "work", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
+		t.Fatalf("shared provider key = %q, %v, %v; want retained", key, ok, err)
+	}
+	var payload struct {
+		KeyRemoved bool `json:"keyRemoved"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || payload.KeyRemoved {
+		t.Fatalf("payload = %s, err = %v; shared key must not be reported removed", stdout.String(), err)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(after, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "WORK" || !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("survivor must inherit apiKeyStored marker, got %+v", cfg.Providers)
+	}
+}

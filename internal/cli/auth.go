@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -463,6 +464,18 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	return exitSuccess
 }
 
+// appendUniqueOAuthCandidate appends candidate to candidates if it is
+// non-blank and not already present. The OAuth token store is a
+// case-sensitive map, so comparison here is exact, matching
+// ProviderProfile.OAuthLoginCandidates.
+func appendUniqueOAuthCandidate(candidates []string, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" || slices.Contains(candidates, candidate) {
+		return candidates
+	}
+	return append(candidates, candidate)
+}
+
 func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	parsed, err := parseAuthArgs("logout", args)
 	if err != nil {
@@ -500,9 +513,28 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	removed, err := manager.Logout(provider)
-	if err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	// Delete every candidate the runtime bearer resolver would have tried
+	// (ProviderProfile.OAuthLoginCandidates: profile name, then catalog id) —
+	// not just the spelling the user typed. A profile saved as
+	// {name:"my-xai", catalogId:"xai"} logged in via `zero auth login xai`
+	// stores its token under "xai"; `zero auth logout my-xai` must delete that
+	// too, or the login silently survives.
+	oauthCandidates := []string{provider}
+	if configProvider != provider {
+		oauthCandidates = append(oauthCandidates, configProvider)
+	}
+	if configErr == nil {
+		if row, found, rowErr := config.ProviderRow(configPath, configProvider); rowErr == nil && found {
+			oauthCandidates = appendUniqueOAuthCandidate(oauthCandidates, row.CatalogID)
+		}
+	}
+	removed := false
+	for _, candidate := range oauthCandidates {
+		candidateRemoved, err := manager.Logout(candidate)
+		if err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
+		removed = removed || candidateRemoved
 	}
 	// Also drop any stored API key and its marker so `auth logout` clears the whole
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
@@ -528,9 +560,17 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		keyRemoved = keyRemoved || canonicalRemoved
 	}
 	if configErr != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(configErr, redaction.Options{}), exitCrash)
+		// Credentials are already gone at this point, but an invalid persisted
+		// config (e.g. ambiguous case-duplicate rows) blocks every config write,
+		// including clearing a stale apiKeyStored marker — writeConfigFile
+		// re-validates on every call, so nothing here could succeed either.
+		// Say so explicitly rather than leaving the marker silently stale.
+		return writeAppError(stderr, redaction.ErrorMessage(configErr, redaction.Options{})+"; any stale apiKeyStored marker in config.json must be corrected by hand alongside this", exitCrash)
 	}
-	if _, clearErr := config.ClearProviderKeyStored(configPath, configProvider); clearErr != nil {
+	// Clear the marker on every case-variant row, not just configProvider's exact
+	// spelling: the credential store keys secrets case-folded, so a sibling row
+	// could have pointed at the same now-deleted secret.
+	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, configProvider); clearErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
 	}
 	removed = removed || keyRemoved

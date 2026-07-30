@@ -491,6 +491,15 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 			return exit
 		}
 	}
+	// Read the row BEFORE removal so we know whether it owned the stored-key
+	// marker — RemoveProvider's returned cfg no longer has it, and the
+	// credential store's secret is keyed case-folded, so removing a keyed row
+	// while a case-variant sibling survives must carry the marker over
+	// instead of silently orphaning the still-shared secret.
+	before, hadBefore, err := config.ProviderRow(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	cfg, err := config.RemoveProvider(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, providerMutationError(configPath, name, err), exitCrash)
@@ -500,7 +509,17 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	// non-default config path cannot leave the encrypted key behind.
 	keyRemoved := false
 	var keyErr error
-	if !configContainsCaseVariantProvider(cfg, name) {
+	if survivor, ok := caseVariantProviderName(cfg, name); ok {
+		if hadBefore && before.APIKeyStored {
+			if survivorRow, foundSurvivor, err := config.ProviderRow(configPath, survivor); err != nil {
+				keyErr = err
+			} else if foundSurvivor && !survivorRow.APIKeyStored {
+				if _, err := config.TransferProviderAPIKeyStoredMarker(configPath, survivor); err != nil {
+					keyErr = err
+				}
+			}
+		}
+	} else {
 		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, name)
 	}
 	if options.json {
@@ -554,14 +573,17 @@ func removeStoredProviderKeyAt(configPath string, provider string) (bool, error)
 	return store.Delete(provider)
 }
 
-func configContainsCaseVariantProvider(cfg config.FileConfig, name string) bool {
+// caseVariantProviderName returns the exact name of a row in cfg that folds
+// to name (a case-only variant), and whether one was found.
+func caseVariantProviderName(cfg config.FileConfig, name string) (string, bool) {
 	name = strings.TrimSpace(name)
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
-			return true
+		providerName := strings.TrimSpace(provider.Name)
+		if strings.EqualFold(providerName, name) {
+			return providerName, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // runProvidersRename renames a saved provider profile, migrating its stored

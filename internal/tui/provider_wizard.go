@@ -1382,7 +1382,11 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 			if store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath)); err == nil {
 				_, _ = store.Delete(name)
 			}
-			_, _ = config.ClearProviderKeyStored(m.userConfigPath, name)
+			// The credential store keys secrets case-folded, so a case-variant
+			// sibling row (e.g. "work" beside the deleted key's "WORK") pointed at
+			// the same now-gone entry — clear the marker on every folded match,
+			// not just the exact row the user picked.
+			_, _ = config.ClearProviderKeyStoredCaseVariants(m.userConfigPath, name)
 		} else {
 			_, _ = config.ForgetProviderKey(name)
 		}

@@ -308,6 +308,40 @@ func TestRunAuthLogoutResolvesCatalogIdentity(t *testing.T) {
 	}
 }
 
+// TestRunAuthLogoutDeletesCatalogIDToken covers jatmn's #725 follow-up
+// finding: a profile addressed by its own name but logged in under its
+// catalog id (e.g. {name:"my-xai", catalogId:"xai"} via `zero auth login
+// xai`) left the "xai" OAuth token behind when logged out as "my-xai",
+// because logout only ever deleted the exact spelling the user typed.
+func TestRunAuthLogoutDeletesCatalogIDToken(t *testing.T) {
+	storePath := withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"my-xai","catalogId":"xai"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "stored"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "my-xai"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if _, ok, err := store.Load(oauth.ProviderKey("xai")); err != nil || ok {
+		t.Fatalf("catalog-id OAuth token survived logout: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(stdout.String(), "Logged out") {
+		t.Fatalf("stdout = %q, want a logout confirmation", stdout.String())
+	}
+}
+
 func TestRunAuthLogoutCleansCredentialsWhenConfigIsAmbiguous(t *testing.T) {
 	storePath := withAuthStore(t)
 	configHome := t.TempDir()

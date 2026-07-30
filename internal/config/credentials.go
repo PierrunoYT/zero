@@ -110,6 +110,43 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 	return true, writeConfigFile(path, cfg)
 }
 
+// ClearProviderKeyStoredCaseVariants unsets the APIKeyStored marker on every
+// row whose name folds to provider, not just an exact-spelling match. The
+// credential store keys its secrets case-folded, so deleting the shared
+// secret for one case-variant row (e.g. "WORK") must also clear the marker
+// on any sibling row ("work") that pointed at the same now-gone entry —
+// leaving it set would claim a key is available when ApplyStoredAPIKey's
+// store lookup will always miss.
+func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
+	path = strings.TrimSpace(path)
+	provider = strings.TrimSpace(provider)
+	if path == "" || provider == "" {
+		return false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	changed := false
+	for index := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) && cfg.Providers[index].APIKeyStored {
+			cfg.Providers[index].APIKeyStored = false
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	return true, writeConfigFile(path, cfg)
+}
+
 // MigratePlaintextProviderKeys moves any inline plaintext API key in the config at
 // path into the credential store, marking the profile APIKeyStored and stripping
 // the inline secret — but ONLY after the store write succeeds, so a failed Set
