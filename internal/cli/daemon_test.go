@@ -149,6 +149,10 @@ func TestDaemonServeRemoteCanonicalizesTokenFileBeforeStartingWorkers(t *testing
 		t.Fatalf("serve-remote exit = %d, want bind failure", code)
 	}
 	want := filepath.Join(startDir, "token")
+	want, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", want, err)
+	}
 	if got := os.Getenv("ZERO_DAEMON_REMOTE_TOKEN_FILE"); got != want {
 		t.Fatalf("ZERO_DAEMON_REMOTE_TOKEN_FILE = %q, want daemon-pinned path %q", got, want)
 	}
