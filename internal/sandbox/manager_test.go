@@ -298,14 +298,14 @@ func TestProtectedCredentialInWritableMacOSRootMatchesSeatbeltWrites(t *testing.
 		Kind:       FileSystemRestricted,
 		WriteRoots: []WritableRoot{{Root: "/Users/Test/Workspace"}},
 	}}
-	if !protectedCredentialInWritableMacOSRoot(restricted, []string{"/users/test/workspace/token"}) {
+	if !protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/users/test/workspace/token")}) {
 		t.Fatal("case-variant token under a macOS write root should be rejected")
 	}
-	if protectedCredentialInWritableMacOSRoot(restricted, []string{"/Users/Test/Credentials/token"}) {
+	if protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/Users/Test/Credentials/token")}) {
 		t.Fatal("token outside every macOS write root should remain allowed")
 	}
 	restricted.FileSystem.AllowTemp = true
-	if !protectedCredentialInWritableMacOSRoot(restricted, []string{"/private/tmp/bridge-token"}) {
+	if !protectedCredentialInWritableMacOSRoot(restricted, []string{normalizeProfilePath("/private/tmp/bridge-token")}) {
 		t.Fatal("token under an allowed temporary root should be rejected")
 	}
 	unrestricted := PermissionProfile{FileSystem: FileSystemPolicy{Kind: FileSystemUnrestricted}}
