@@ -575,8 +575,11 @@ type setupOAuthDeviceMsg struct {
 	err        error
 }
 
-func setupDevicePrepareCmd(name string) tea.Cmd {
+func setupDevicePrepareCmd(name string, configPath ...string) tea.Cmd {
 	return func() tea.Msg {
+		if err := preflightOAuthUserConfig(firstString(configPath)); err != nil {
+			return setupOAuthDeviceMsg{providerID: name, err: err}
+		}
 		auth, cfg, err := oauthDevicePrepare(name)
 		if err != nil {
 			return setupOAuthDeviceMsg{providerID: name, err: err}
@@ -612,7 +615,7 @@ func (m model) startSetupDeviceLogin(descriptor providercatalog.Descriptor) (tea
 	m.setup.oauthErr = ""
 	m.setup.deviceUserCode = ""
 	m.setup.deviceVerificationURI = ""
-	return m, setupDevicePrepareCmd(descriptor.ID)
+	return m, setupDevicePrepareCmd(descriptor.ID, m.setup.configPath)
 }
 
 // applySetupOAuthDeviceCode handles phase 1 of device-code login: show the code,
@@ -660,9 +663,12 @@ func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
 	if msg.tokenLogin {
 		// Early persist on the Update goroutine (see persistOAuthLoginProvider's
 		// threading contract) so quitting setup after the login doesn't lose it;
-		// completeSetup persists the full profile with the chosen model anyway,
-		// so a failure here is recoverable and not fatal to setup.
-		_ = persistOAuthLoginProvider(m.setup.configPath, msg.providerID)
+		// do not advance when that write fails or the stored token would have no
+		// reachable provider profile after setup exits.
+		if err := persistOAuthLoginProvider(m.setup.configPath, msg.providerID); err != nil {
+			m.setup.oauthErr = "Signed in, but the provider profile could not be saved: " + redaction.ErrorMessage(err, redaction.Options{})
+			return m, nil
+		}
 	}
 	m.setup.oauthErr = ""
 	m.setup.err = ""
@@ -882,6 +888,9 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 	})
 	if err != nil {
 		m.setup.err = err.Error()
+		if m.setup.oauthMode && m.setupProviderDescriptor().OAuthMintsKey && strings.TrimSpace(apiKey) != "" {
+			m.setup.err = oauthMintedKeySaveError(m.setup.err, apiKey)
+		}
 		return m, nil
 	}
 
@@ -909,6 +918,10 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 	}
 
 	return m.exitSetupToChat()
+}
+
+func oauthMintedKeySaveError(message, apiKey string) string {
+	return fmt.Sprintf("%s\nThe minted API key was not saved. Copy it now before leaving Zero:\n%s", message, apiKey)
 }
 
 func (m *model) resetSetupModels() {

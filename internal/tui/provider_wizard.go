@@ -327,8 +327,11 @@ type providerWizardDeviceCodeMsg struct {
 
 // providerWizardDevicePrepareCmd runs phase 1 of the device-code login off the UI
 // goroutine and reports the code to display (or an error).
-func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
+func providerWizardDevicePrepareCmd(name string, attemptID int, configPath ...string) tea.Cmd {
 	return func() tea.Msg {
+		if err := preflightOAuthUserConfig(firstString(configPath)); err != nil {
+			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
+		}
 		auth, cfg, err := oauthDevicePrepare(name)
 		if err != nil {
 			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
@@ -364,7 +367,7 @@ func (m model) startProviderDeviceLogin() (model, tea.Cmd) {
 		return m, nil
 	}
 	attemptID := m.providerWizard.beginOAuthAttempt(true)
-	return m, providerWizardDevicePrepareCmd(provider.ID, attemptID)
+	return m, providerWizardDevicePrepareCmd(provider.ID, attemptID, m.userConfigPath)
 }
 
 const maxProviderWizardProvidersVisible = 10
@@ -1300,11 +1303,17 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		adopted, adoptErr := config.AdoptPersistedCatalogProviderName(m.userConfigPath, profile)
 		if adoptErr != nil {
 			wizard.err = adoptErr.Error()
+			if provider.OAuthMintsKey && strings.TrimSpace(wizard.apiKey) != "" {
+				wizard.err = oauthMintedKeySaveError(wizard.err, wizard.apiKey)
+			}
 			return m, nil
 		}
 		profile = adopted
 		if err := config.PreflightProviderWrite(m.userConfigPath, profile.Name); err != nil {
 			wizard.err = err.Error()
+			if provider.OAuthMintsKey && strings.TrimSpace(wizard.apiKey) != "" {
+				wizard.err = oauthMintedKeySaveError(wizard.err, wizard.apiKey)
+			}
 			return m, nil
 		}
 		// Capture flip: move the freshly entered key into the encrypted credential
@@ -1316,6 +1325,9 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		}
 		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
+			if provider.OAuthMintsKey && strings.TrimSpace(secret) != "" {
+				wizard.err = oauthMintedKeySaveError(wizard.err, secret)
+			}
 			return m, nil // nothing committed to live state yet
 		}
 	}

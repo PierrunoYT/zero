@@ -509,13 +509,16 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	// non-default config path cannot leave the encrypted key behind.
 	keyRemoved := false
 	var keyErr error
+	markerTransferFailed := false
 	if survivor, ok := caseVariantProviderName(cfg, name); ok {
 		if hadBefore && before.APIKeyStored {
 			if survivorRow, foundSurvivor, err := config.ProviderRow(configPath, survivor); err != nil {
 				keyErr = err
+				markerTransferFailed = true
 			} else if foundSurvivor && !survivorRow.APIKeyStored {
 				if _, err := config.TransferProviderAPIKeyStoredMarker(configPath, survivor); err != nil {
 					keyErr = err
+					markerTransferFailed = true
 				}
 			}
 		}
@@ -542,7 +545,11 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return exitCrash
 	}
 	if keyErr != nil {
-		if _, err := fmt.Fprintf(stderr, "warning: its stored API key could not be deleted and remains in the credential store: %v\n", keyErr); err != nil {
+		warning := "its stored API key could not be deleted and remains in the credential store"
+		if markerTransferFailed {
+			warning = "the stored API key marker could not be transferred to the surviving case-variant provider, so the shared key may be unreachable"
+		}
+		if _, err := fmt.Fprintf(stderr, "warning: %s: %v\n", warning, keyErr); err != nil {
 			return exitCrash
 		}
 	} else if keyRemoved {

@@ -364,6 +364,29 @@ func TestApplyProviderWizardOAuthIgnoresStaleAttempt(t *testing.T) {
 	}
 }
 
+func TestProviderWizardSurfacesMintedOpenRouterKeyWhenSaveFails(t *testing.T) {
+	const mintedKey = "sk-or-wizard-recovery"
+	m := wizardModelAt(t, "openrouter", providerWizardStepDone)
+	m.providerWizard.oauthMode = true
+	m.providerWizard.apiKey = mintedKey
+	m.userConfigPath = t.TempDir() // A directory cannot be read as config.json.
+
+	next, _ := m.applyProviderWizard()
+	if !strings.Contains(next.providerWizard.err, mintedKey) || !strings.Contains(next.providerWizard.err, "was not saved") {
+		t.Fatalf("wizard error = %q, want minted-key recovery", next.providerWizard.err)
+	}
+}
+
+func TestProviderWizardDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
+	msg := providerWizardDevicePrepareCmd("xai", 42, t.TempDir())().(providerWizardDeviceCodeMsg)
+	if msg.err == nil {
+		t.Fatal("device-code preparation should reject an unreadable config before requesting a code")
+	}
+	if msg.attemptID != 42 {
+		t.Fatalf("attemptID = %d, want 42", msg.attemptID)
+	}
+}
+
 func TestProviderWizardDeviceCodeIgnoresStaleAttempt(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
