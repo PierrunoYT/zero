@@ -250,6 +250,126 @@ func TestSandboxManagerDegradesUnavailableCommandPlan(t *testing.T) {
 	}
 }
 
+func TestSandboxManagerRejectsUnavailableBackendForProtectedToken(t *testing.T) {
+	workspace, _ := protectedTokenFixture(t)
+	policy := DefaultPolicy()
+	backend := Backend{Name: BackendUnavailable, Platform: "linux", Fallback: true, Message: "native sandbox unavailable"}
+	_, err := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "protected credentials cannot be enforced") {
+		t.Fatalf("BuildCommandPlan error = %v, want protected-credential enforcement failure", err)
+	}
+}
+
+func TestSandboxManagerRejectsMacOSTokenInsideWritableWorkspace(t *testing.T) {
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, "/workspace/bridge-token")
+	workspace := "/workspace"
+	policy := DefaultPolicy()
+	backend := Backend{
+		Name:            BackendMacOSSeatbelt,
+		Available:       true,
+		Executable:      "/usr/bin/sandbox-exec",
+		Platform:        "darwin",
+		CommandWrapping: true,
+		NativeIsolation: true,
+	}
+	_, err := NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspace,
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: workspace},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(workspace, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "inside a shell-writable root") {
+		t.Fatalf("BuildCommandPlan error = %v, want macOS writable-token failure", err)
+	}
+}
+
+func TestProtectedCredentialInWritableMacOSRootMatchesSeatbeltWrites(t *testing.T) {
+	restricted := PermissionProfile{FileSystem: FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: "/Users/Test/Workspace"}},
+	}}
+	if !protectedCredentialInWritableMacOSRoot(restricted, []string{"/users/test/workspace/token"}) {
+		t.Fatal("case-variant token under a macOS write root should be rejected")
+	}
+	if protectedCredentialInWritableMacOSRoot(restricted, []string{"/Users/Test/Credentials/token"}) {
+		t.Fatal("token outside every macOS write root should remain allowed")
+	}
+	restricted.FileSystem.AllowTemp = true
+	if !protectedCredentialInWritableMacOSRoot(restricted, []string{"/private/tmp/bridge-token"}) {
+		t.Fatal("token under an allowed temporary root should be rejected")
+	}
+	unrestricted := PermissionProfile{FileSystem: FileSystemPolicy{Kind: FileSystemUnrestricted}}
+	if !protectedCredentialInWritableMacOSRoot(unrestricted, []string{"/credentials/token"}) {
+		t.Fatal("an unrestricted macOS filesystem makes every token path shell-writable")
+	}
+
+	writable := t.TempDir()
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "token")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(writable, "token-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	symlinkProfile := PermissionProfile{FileSystem: FileSystemPolicy{
+		Kind:       FileSystemRestricted,
+		WriteRoots: []WritableRoot{{Root: writable}},
+	}}
+	if !protectedCredentialInWritableMacOSRoot(symlinkProfile, []string{link, target}) {
+		t.Fatal("selected symlink inside a write root must be rejected even when its target is outside")
+	}
+}
+
+func TestSandboxManagerLeavesProtectedTokenShellOpenWhenSandboxDisabled(t *testing.T) {
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, "/workspace/bridge-token")
+	policy := DefaultPolicy()
+	policy.Mode = ModeDisabled
+	backend := Backend{Name: BackendUnavailable, Platform: "darwin", Fallback: true, Message: "native sandbox unavailable"}
+	request, err := NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildExecutionRequest disabled policy: %v", err)
+	}
+	if request.EnforcementLevel != EnforcementDisabled || request.CommandWrapped {
+		t.Fatalf("disabled request = %#v, want intentionally open shell", request)
+	}
+
+	policy = DefaultPolicy()
+	request, err = NewSandboxManager(SandboxManagerOptions{GOOS: "darwin", Backend: backend}).BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceForbid,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildExecutionRequest forbidden sandbox preference: %v", err)
+	}
+	if request.EnforcementLevel != EnforcementDisabled || request.CommandWrapped {
+		t.Fatalf("forbidden-sandbox request = %#v, want intentionally open shell", request)
+	}
+}
+
 func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 	tests := []struct {
 		name       string

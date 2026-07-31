@@ -515,6 +515,21 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	}
 }
 
+func TestSeatbeltTemporaryWritesFollowPermissionProfile(t *testing.T) {
+	runtimeRules := seatbeltPlatformRuntimeRules()
+	if strings.Contains(runtimeRules, `file-write* (subpath "/tmp")`) {
+		t.Fatal("platform runtime rules must not bypass FileSystemPolicy.AllowTemp")
+	}
+	withoutTemp := seatbeltWriteRule(FileSystemPolicy{Kind: FileSystemRestricted})
+	if strings.Contains(withoutTemp, `(subpath "/tmp")`) {
+		t.Fatal("restricted profile with AllowTemp=false unexpectedly permits /tmp writes")
+	}
+	withTemp := seatbeltWriteRule(FileSystemPolicy{Kind: FileSystemRestricted, AllowTemp: true})
+	if !strings.Contains(withTemp, `(subpath "/tmp")`) {
+		t.Fatal("restricted profile with AllowTemp=true must permit /tmp writes")
+	}
+}
+
 // TestSeatbeltProfileAllowsGitWritesExceptHooksAndConfig locks in the fix for
 // git subprocesses (fetch, commit, add, ...) failing under the sandbox: the
 // default profile must stop write-denying the whole .git tree and only carve
