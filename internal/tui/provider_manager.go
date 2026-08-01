@@ -698,7 +698,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	// Keep the live session's identity in sync with a rename of the provider it
 	// is running on: the exported ZERO_PROVIDER must resolve for spawned children.
-	if strings.EqualFold(strings.TrimSpace(m.providerName), oldName) {
+	if strings.TrimSpace(m.providerName) == oldName {
 		m.providerName = newName
 		m.providerProfile.Name = newName
 		config.SetActiveProviderEnv(newName)
@@ -716,7 +716,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 // liveName is the session's provider AFTER any rename sync, so a single
 // comparison against the edited profile's final name suffices.
 func providerEditRestartNote(liveName string, editedName string) string {
-	if strings.EqualFold(strings.TrimSpace(liveName), strings.TrimSpace(editedName)) {
+	if strings.TrimSpace(liveName) == strings.TrimSpace(editedName) {
 		return " Press Enter on it to apply the changes to this session."
 	}
 	return ""
@@ -725,8 +725,9 @@ func providerEditRestartNote(liveName string, editedName string) string {
 // applySavedProviderEdit mirrors a persisted config.EditProvider into the
 // in-memory saved list without wholesale replacement (see saveManagerEdit).
 func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit config.ProviderEdit) []config.ProviderProfile {
+	oldName = strings.TrimSpace(oldName)
 	for index := range saved {
-		if !strings.EqualFold(strings.TrimSpace(saved[index].Name), strings.TrimSpace(oldName)) {
+		if strings.TrimSpace(saved[index].Name) != oldName {
 			continue
 		}
 		profile := &saved[index]

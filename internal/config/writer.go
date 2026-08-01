@@ -799,13 +799,14 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 	}
 
 	index := -1
+	newIdentity := credstore.NormalizeProvider(newName)
 	for i, provider := range cfg.Providers {
 		providerName := strings.TrimSpace(provider.Name)
 		if providerName == oldName {
 			index = i
 			continue
 		}
-		if strings.EqualFold(providerName, newName) {
+		if credstore.NormalizeProvider(providerName) == newIdentity {
 			return FileConfig{}, fmt.Errorf("provider %q already exists", newName)
 		}
 	}

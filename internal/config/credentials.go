@@ -111,12 +111,11 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 }
 
 // ClearProviderKeyStoredCaseVariants unsets the APIKeyStored marker on every
-// row whose name folds to provider, not just an exact-spelling match. The
-// credential store keys its secrets case-folded, so deleting the shared
-// secret for one case-variant row (e.g. "WORK") must also clear the marker
-// on any sibling row ("work") that pointed at the same now-gone entry —
-// leaving it set would claim a key is available when ApplyStoredAPIKey's
-// store lookup will always miss.
+// row whose name normalizes to the same credential-store identity as provider,
+// not just an exact-spelling match. Deleting the shared secret for one
+// case-variant row (e.g. "WORK") must also clear the marker on any sibling row
+// ("work") that pointed at the same now-gone entry — leaving it set would claim
+// a key is available when ApplyStoredAPIKey's store lookup will always miss.
 func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
 	path = strings.TrimSpace(path)
 	provider = strings.TrimSpace(provider)
@@ -135,8 +134,9 @@ func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
 		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 	changed := false
+	providerIdentity := credstore.NormalizeProvider(provider)
 	for index := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) && cfg.Providers[index].APIKeyStored {
+		if credstore.NormalizeProvider(cfg.Providers[index].Name) == providerIdentity && cfg.Providers[index].APIKeyStored {
 			cfg.Providers[index].APIKeyStored = false
 			changed = true
 		}

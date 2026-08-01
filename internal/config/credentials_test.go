@@ -169,6 +169,26 @@ func TestClearProviderKeyStored(t *testing.T) {
 	}
 }
 
+func TestClearProviderKeyStoredCaseVariantsPreservesDistinctUnicodeIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"s","apiKeyStored":true},{"name":"ſ","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared, err := ClearProviderKeyStoredCaseVariants(path, "s")
+	if err != nil || !cleared {
+		t.Fatalf("clear = %v,%v; want true,nil", cleared, err)
+	}
+	cfg := readConfigFixture(t, path)
+	if cfg.Providers[0].APIKeyStored {
+		t.Fatal("s marker should be cleared")
+	}
+	if !cfg.Providers[1].APIKeyStored {
+		t.Fatal("long-s marker belongs to a distinct credential-store identity and must remain set")
+	}
+}
+
 func TestProviderProfileAPIKeyStoredRoundTrips(t *testing.T) {
 	// The apiKeyStored marker survives JSON decode (custom UnmarshalJSON).
 	var p ProviderProfile

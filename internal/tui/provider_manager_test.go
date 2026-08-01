@@ -284,6 +284,63 @@ func TestProviderManagerRenameFollowsLiveSession(t *testing.T) {
 	}
 }
 
+func TestProviderManagerEditKeepsDistinctUnicodeIdentityOutOfLiveSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	t.Setenv(config.ActiveProviderEnv, "s")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := config.FileConfig{
+		ActiveProvider: "s",
+		Providers: []config.ProviderProfile{
+			{Name: "s", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://s.example.com/v1", Model: "s-model"},
+			{Name: "ſ", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://long-s.example.com/v1", Model: "long-s-model"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(context.Background(), Options{
+		ProviderName:    "s",
+		ModelName:       "s-model",
+		Provider:        &fakeProvider{},
+		ProviderProfile: seed.Providers[0],
+		SavedProviders:  seed.Providers,
+		UserConfigPath:  configPath,
+	})
+	m.providerWizard = &providerWizardState{
+		step:         providerWizardStepEditMenu,
+		editOriginal: seed.Providers[1],
+		editDraft: config.ProviderProfile{
+			Name:         "ſ",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://long-s.example.com/v1",
+			Model:        "edited-long-s-model",
+		},
+	}
+
+	next, _ := m.saveManagerEdit()
+	persisted := readManagerConfig(t, configPath)
+	if persisted.Providers[0].Model != "s-model" || persisted.Providers[1].Model != "edited-long-s-model" {
+		t.Fatalf("persisted edit targeted wrong identity: %+v", persisted.Providers)
+	}
+	if next.savedProviders[0].Model != "s-model" || next.savedProviders[1].Model != "edited-long-s-model" {
+		t.Fatalf("in-memory edit targeted wrong identity: %+v", next.savedProviders)
+	}
+	if next.providerName != "s" || next.providerProfile.Name != "s" || os.Getenv(config.ActiveProviderEnv) != "s" {
+		t.Fatalf("unrelated live session changed: provider=%q profile=%q env=%q", next.providerName, next.providerProfile.Name, os.Getenv(config.ActiveProviderEnv))
+	}
+	if strings.Contains(next.providerWizard.manageStatus, "Press Enter") {
+		t.Fatalf("unrelated edit produced live-session restart note: %q", next.providerWizard.manageStatus)
+	}
+}
+
 func TestProviderManagerEscWalksBackThenCloses(t *testing.T) {
 	m := managerTestModel(t)
 	m = managerKey(t, m, testKeyText("e"))
