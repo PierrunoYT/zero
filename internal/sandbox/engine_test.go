@@ -58,6 +58,9 @@ func TestEvaluatePromptsForUnparseableNetworkBehindWrapper(t *testing.T) {
 		`env git push origin main && "unterminated`,
 		`curl.exe https://evil.test && "unterminated`,
 		"true\ncurl https://evil.test && \"unterminated",
+		`echo $(curl https://evil.test) && "unterminated`,
+		`if true; then git push; fi && "unterminated`,
+		`eval "curl https://evil.test" && "unterminated`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			decision := engine.Evaluate(context.Background(), Request{

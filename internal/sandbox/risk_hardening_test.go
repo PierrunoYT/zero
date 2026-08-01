@@ -432,6 +432,72 @@ func TestClassifyUnparseableNetworkBehindWrapperFailsClosed(t *testing.T) {
 	}
 }
 
+// TestClassifyUnparseableNetworkInShellConstructFailsClosed covers compound
+// shell forms where the invoked program is not the first token after a basic
+// ;/&/| separator. The fallback must still find the real invocation without
+// returning to an anywhere-in-the-string regex that would misclassify
+// `git status push` and URL/path text containing `.git push`.
+func TestClassifyUnparseableNetworkInShellConstructFailsClosed(t *testing.T) {
+	for _, command := range []string{
+		`echo $(curl https://evil.test) && "unterminated`,
+		"echo `curl https://evil.test` && \"unterminated",
+		`x=$(curl https://evil.test) && "unterminated`,
+		`echo "$(curl https://evil.test)" && "unterminated`,
+		"echo \"`git push`\" && \"unterminated",
+		`x="$(curl https://evil.test)" && "unterminated`,
+		`(curl https://evil.test) && "unterminated`,
+		`( curl https://evil.test ) && "unterminated`,
+		`{ curl https://evil.test ; } && "unterminated`,
+		`cat <(curl https://evil.test) && "unterminated`,
+		`if true; then curl https://evil.test; fi && "unterminated`,
+		`for i in 1 2; do curl https://evil.test; done && "unterminated`,
+		`while :; do wget https://evil.test; done && "unterminated`,
+		`case x in x) curl https://evil.test;; esac && "unterminated`,
+		`>out curl https://evil.test && "unterminated`,
+		`2>err curl https://evil.test && "unterminated`,
+		`<<< payload curl https://evil.test && "unterminated`,
+		`<<- EOF curl https://evil.test && "unterminated`,
+		`coproc curl https://evil.test; wait && "unterminated`,
+		`eval "curl https://evil.test" && "unterminated`,
+		`! curl https://evil.test && "unterminated`,
+		`if true; then git push; fi && "unterminated`,
+		`(git -C repo push) && "unterminated`,
+		`echo $(git push) && "unterminated`,
+		`eval "git push" && "unterminated`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			risk := classifyCommand(command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+			}
+			if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
+			}
+		})
+	}
+}
+
+func TestClassifyUnparseableShellSyntaxTextStaysNonNetwork(t *testing.T) {
+	for _, command := range []string{
+		`echo ${curl} && "unterminated`,
+		`echo $((curl)) && "unterminated`,
+		`arr=(curl) && "unterminated`,
+		"echo \\`curl\\` && \"unterminated",
+		`command if curl https://evil.test && "unterminated`,
+		`env then git push && "unterminated`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			risk := classifyCommand(command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+			}
+			if HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = level %s, categories %v; want no network category", command, risk.Level, risk.Categories)
+			}
+		})
+	}
+}
+
 // TestUnparseableShellDepthMatchesAnalyzerDepth pins the two launcher-recursion
 // caps together, which is the property jatmn's #703 review asked for: a fallback
 // that gave up a level earlier than the AST path would drop the network category

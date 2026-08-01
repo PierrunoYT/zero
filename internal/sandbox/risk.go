@@ -93,7 +93,7 @@ func matchesUnparseableNetwork(command string) bool {
 // it belongs to a program actually being invoked.
 func matchesUnparseableNetworkAt(command string, depth int) bool {
 	for _, tokens := range fallbackCommandTokens(command) {
-		body := commandBodyFields(tokens)
+		body := fallbackCommandBodyFields(tokens)
 		if len(body) == 0 {
 			continue
 		}
@@ -103,6 +103,14 @@ func matchesUnparseableNetworkAt(command string, depth int) bool {
 		}
 		if unparseableNetworkPattern.MatchString(strings.Join(append([]string{program}, args...), " ")) {
 			return true
+		}
+		// eval executes its remaining arguments as shell source. Recurse into that
+		// source just as we do for `sh -c`; otherwise quoting the same curl/git
+		// invocation behind eval would hide it from this fail-closed path.
+		if depth < maxUnparseableShellDepth && program == "eval" {
+			if matchesUnparseableNetworkAt(strings.Join(args, " "), depth+1) {
+				return true
+			}
 		}
 		// `sh -c <payload>` runs the payload as a fresh command. The fallback
 		// tokenizer keeps a quoted payload as ONE token, so the network program
@@ -117,6 +125,54 @@ func matchesUnparseableNetworkAt(command string, depth int) bool {
 		}
 	}
 	return false
+}
+
+var fallbackLeadingShellKeywords = map[string]bool{
+	"!": true, "if": true, "while": true, "until": true, "then": true,
+	"do": true, "else": true, "elif": true, "in": true, "coproc": true,
+	"{": true, "}": true,
+}
+
+// fallbackCommandBodyFields resolves a command at a shell-control boundary.
+// In addition to ordinary wrappers, an unparseable compound command can put
+// control-flow keywords and redirections before the executable (`then curl`,
+// `do wget`, `>out git push`). Those prefixes do not change the program being
+// invoked and must not make the fail-closed network check lose sight of it.
+func fallbackCommandBodyFields(fields []string) []string {
+	// Shell keywords are syntax only at the original command boundary. Do not
+	// reinterpret a wrapper's payload as syntax: `command if curl` attempts to
+	// execute a program named "if" and does not invoke curl.
+	for len(fields) > 0 && fallbackLeadingShellKeywords[strings.ToLower(fields[0])] {
+		fields = fields[1:]
+	}
+	body := commandBodyFields(fields)
+	for len(body) > 0 {
+		word := strings.ToLower(body[0])
+		if consumesRedirectTarget(word) {
+			if len(body) == 1 {
+				return nil
+			}
+			body = commandBodyFields(body[2:])
+			continue
+		}
+		if isRedirectToken(word) {
+			body = commandBodyFields(body[1:])
+			continue
+		}
+		return body
+	}
+	return nil
+}
+
+func consumesRedirectTarget(word string) bool {
+	word = strings.TrimLeft(word, "0123456789")
+	return word == ">" || word == ">>" || word == "<" || word == "<<" || word == "<<-" ||
+		word == "<<<" || word == "<>" || word == ">|"
+}
+
+func isRedirectToken(word string) bool {
+	word = strings.TrimLeft(word, "0123456789")
+	return strings.HasPrefix(word, ">") || strings.HasPrefix(word, "<")
 }
 
 // matchesUnparseableGitNetwork reports whether git's arguments (everything after
@@ -196,6 +252,9 @@ func fallbackCommandTokens(command string) [][]string {
 	var tokens []string
 	var word strings.Builder
 	var quote rune
+	var outerQuotes []rune
+	backtick := false
+	escaped := false
 	flush := func() {
 		if word.Len() > 0 {
 			tokens = append(tokens, word.String())
@@ -209,15 +268,70 @@ func fallbackCommandTokens(command string) [][]string {
 			tokens = nil
 		}
 	}
-	for _, r := range command {
-		if r == '\'' || r == '"' {
-			if quote == 0 {
-				quote = r
-			} else if quote == r {
-				quote = 0
+	runes := []rune(command)
+	for index, r := range runes {
+		if escaped {
+			word.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			word.WriteRune(r)
+			escaped = true
+			continue
+		}
+		// Backticks execute inside unquoted and double-quoted text, but are
+		// literal inside single quotes. Preserve the surrounding quote while the
+		// substitution body is scanned as its own command.
+		if r == '`' && quote != '\'' {
+			flushCommand()
+			if backtick {
+				quote = outerQuotes[len(outerQuotes)-1]
+				outerQuotes = outerQuotes[:len(outerQuotes)-1]
 			} else {
+				outerQuotes = append(outerQuotes, quote)
+				quote = 0
+			}
+			backtick = !backtick
+			continue
+		}
+		if r == '\'' || r == '"' {
+			switch quote {
+			case 0:
+				quote = r
+			case r:
+				quote = 0
+			default:
 				word.WriteRune(r)
 			}
+			continue
+		}
+		// Command and process substitutions execute even inside double quotes.
+		// Ordinary/arithmetic/array parentheses do not: splitting all parens made
+		// `${curl}`, `$((curl))`, and `arr=(curl)` look like curl invocations.
+		if r == '(' && quote != '\'' {
+			current := word.String()
+			nextIsParen := index+1 < len(runes) && runes[index+1] == '('
+			substitution := (strings.HasSuffix(current, "$") && !nextIsParen) ||
+				strings.HasSuffix(current, "<") || strings.HasSuffix(current, ">")
+			grouping := quote == 0 && word.Len() == 0 && len(tokens) == 0
+			if substitution || grouping {
+				flushCommand()
+				outerQuotes = append(outerQuotes, quote)
+				quote = 0
+				continue
+			}
+		}
+		if r == ')' && quote == 0 && len(outerQuotes) > 0 {
+			flushCommand()
+			quote = outerQuotes[len(outerQuotes)-1]
+			outerQuotes = outerQuotes[:len(outerQuotes)-1]
+			continue
+		}
+		// A case pattern's closing parenthesis starts the command body. It is not
+		// paired with an opening command-group parenthesis.
+		if r == ')' && quote == 0 && len(tokens) > 0 && tokens[0] == "case" {
+			flushCommand()
 			continue
 		}
 		// A newline separates commands exactly as ;/&/| do. Treating it as mere
