@@ -334,6 +334,50 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 	}
 }
 
+// TestAmbiguousGitHeaderIsNotAnApplicablePatch pins the residual assumption in
+// the shared header parser: for a `diff --git` line whose two operands both
+// contain unquoted spaces and name DIFFERENT files, no split is recoverable
+// from the line alone, so PatchHeaderPaths yields nothing for it. That is only
+// safe because git cannot resolve the line either — every real patch of that
+// shape carries the copy/rename headers (parsed separately) that disambiguate
+// it. Without those headers git refuses the patch outright, so there is nothing
+// for the token gate to miss.
+//
+// If a future git ever accepted this form, this test fails and the parser needs
+// a real split rule rather than the current heuristics.
+func TestAmbiguousGitHeaderIsNotAnApplicablePatch(t *testing.T) {
+	patch := "diff --git a/bridge token b/exposed token\n" +
+		"GIT binary patch\n" +
+		"literal 5\n" +
+		"LcmZQzU|<4=0Rj{Q\n\n" +
+		"literal 0\n" +
+		"HcmV?d00001\n\n"
+	if paths := sandbox.PatchHeaderPaths(patch); len(paths) != 0 {
+		t.Fatalf("PatchHeaderPaths = %q; this test only means anything while the line is unresolvable", paths)
+	}
+
+	workspace := t.TempDir()
+	const original = "bridge-secret\n"
+	if err := os.WriteFile(filepath.Join(workspace, "bridge token"), []byte(original), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	registry := NewRegistry()
+	registry.Register(NewScopedApplyPatchTool(workspace, nil))
+	result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+		"patch": patch,
+	}, RunOptions{PermissionGranted: true})
+
+	if result.Status == StatusOK {
+		t.Fatalf("git applied an ambiguous header patch: %q", result.Output)
+	}
+	if contents, err := os.ReadFile(filepath.Join(workspace, "bridge token")); err != nil || string(contents) != original {
+		t.Fatalf("token changed: contents=%q err=%v", contents, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "exposed token")); !os.IsNotExist(err) {
+		t.Fatalf("ambiguous patch created a destination file: err=%v", err)
+	}
+}
+
 // TestDaemonTokenAliasesDeniedEndToEnd covers the in-process tools, which are
 // the layer that can close inode aliases: they see every requested path before
 // opening it, so a symlink or hard link to the token resolves back to the
