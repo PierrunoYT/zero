@@ -134,6 +134,65 @@ func TestEngineClassifiesPowerShellCurlCommandAsNetwork(t *testing.T) {
 	}
 }
 
+// TestEngineClassifiesCMDInvocationFormsAsNetwork covers jatmn's #726 finding
+// at the decision layer it actually costs: Evaluate only reaches the network
+// prompt when the risk carries the "network" category, so a CMD form the
+// fallback resolved to a keyword instead of its program reached ActionAllow (or
+// ran under the deny profile) with no approval flow. On the Windows unelevated
+// backend that prompt is the network boundary.
+func TestEngineClassifiesCMDInvocationFormsAsNetwork(t *testing.T) {
+	for _, command := range []string{
+		`@curl https://evil.test & rem '`,
+		`cmd.exe /c call curl https://evil.test & rem '`,
+		`if not 1==2 curl https://evil.test & rem '`,
+		`start "" curl https://evil.test & rem '`,
+		`if 1==1 (curl https://evil.test) & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) parsed; this case must exercise the fallback", command)
+			}
+			engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       "bash",
+				SideEffect:     SideEffectShell,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Args:           map[string]any{"command": command},
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked ||
+				!HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want a network prompt", command, decision)
+			}
+		})
+	}
+}
+
+// TestEngineDoesNotPromptForLocalGitHelp is the negative half: a terminal git
+// global prints from the local installation, so it must not cost a network
+// grant on either classification path.
+func TestEngineDoesNotPromptForLocalGitHelp(t *testing.T) {
+	for _, command := range []string{
+		"git -C repo --help push",
+		"git -h push",
+		`git -C repo -h push & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       "bash",
+				SideEffect:     SideEffectShell,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Args:           map[string]any{"command": command},
+			})
+			if decision.Reason == ReasonNetworkBlocked || HasRiskCategory(decision.Risk, "network") {
+				t.Fatalf("Evaluate(%q) = %#v, want no network classification", command, decision)
+			}
+		})
+	}
+}
+
 func TestUnsandboxedExecutionAllowedPreservesDeniedReads(t *testing.T) {
 	root := t.TempDir()
 	policy := DefaultPolicy()

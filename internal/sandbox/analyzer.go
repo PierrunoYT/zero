@@ -278,7 +278,13 @@ func packageManagerOffline(words []string) bool {
 }
 
 func gitUsesNetwork(words []string) bool {
-	switch gitSubcommand(words) {
+	invocation := parseGitInvocation(words)
+	if invocation.kind != gitCommandSubcommand {
+		// No subcommand at all, or a global option that makes git print locally
+		// and exit before any subcommand runs.
+		return false
+	}
+	switch invocation.subcommand {
 	case "clone", "fetch", "pull", "push", "ls-remote":
 		return true
 	case "archive":
@@ -315,21 +321,59 @@ func gitTargetsRemoteArchive(words []string) bool {
 	return false
 }
 
-// gitSubcommand resolves the subcommand past git's GLOBAL options. The generic
-// firstSubcommand cannot: git's value-taking globals put their value in the next
-// token, so scanning for the first non-dash token returns that value instead —
-// `git -C repo push origin main` looked like the subcommand "repo" and so
-// classified as no-network, dropping the proactive network prompt for the most
-// common form of the command. internal/agent/command_prefix.go resolves the same
-// option set for its own prefix matching.
-func gitSubcommand(words []string) string {
+// gitCommandKind distinguishes the three outcomes of reading a git command
+// line, which callers must treat differently.
+type gitCommandKind int
+
+const (
+	// gitCommandNone: no subcommand was found (`git`, `git -C repo`).
+	gitCommandNone gitCommandKind = iota
+	// gitCommandTerminalGlobal: a global option that makes git print locally
+	// and exit — no subcommand runs, whatever words follow it.
+	gitCommandTerminalGlobal
+	// gitCommandSubcommand: a subcommand git will actually execute.
+	gitCommandSubcommand
+)
+
+type gitInvocation struct {
+	kind gitCommandKind
+	// subcommand is set only for gitCommandSubcommand.
+	subcommand string
+	// terminalOption is set only for gitCommandTerminalGlobal.
+	terminalOption string
+}
+
+// gitTerminalGlobalOptions are git's global options that print something from
+// the local installation and exit. Everything after one of them is help/version
+// output text, not a command: `git -C repo --help push` prints git-push's
+// manual page without contacting a remote, so a subcommand scan that walked
+// past them would classify a purely local command as network.
+var gitTerminalGlobalOptions = map[string]bool{
+	"-h": true, "--help": true,
+	"-v": true, "--version": true,
+	"--html-path": true, "--man-path": true, "--info-path": true,
+}
+
+// parseGitInvocation resolves what a git command line actually does, past git's
+// GLOBAL options. It is the single reader both classification paths use — the
+// AST path through gitUsesNetwork and the unparseable fallback through
+// matchesUnparseableGitNetwork — so the two cannot disagree about an option, as
+// they did while each carried its own skip list.
+//
+// The generic firstSubcommand cannot do this job: git's value-taking globals put
+// their value in the next token, so scanning for the first non-dash token returns
+// that value instead — `git -C repo push origin main` looked like the subcommand
+// "repo" and so classified as no-network, dropping the proactive network prompt
+// for the most common form of the command. internal/agent/command_prefix.go
+// resolves the same option set for its own prefix matching.
+func parseGitInvocation(words []string) gitInvocation {
 	for index := 0; index < len(words); index++ {
 		word := words[index]
 		if word == "" {
 			continue
 		}
-		if strings.EqualFold(word, "--help") || strings.EqualFold(word, "--version") {
-			return ""
+		if gitTerminalGlobalOptions[strings.ToLower(word)] {
+			return gitInvocation{kind: gitCommandTerminalGlobal, terminalOption: strings.ToLower(word)}
 		}
 		if strings.HasPrefix(word, "-") {
 			// A joined value (--git-dir=/x, -C/x) is one token and needs no skip;
@@ -342,9 +386,18 @@ func gitSubcommand(words []string) string {
 		if isNumericToken(word) {
 			continue
 		}
-		return word
+		return gitInvocation{kind: gitCommandSubcommand, subcommand: word}
 	}
-	return ""
+	return gitInvocation{kind: gitCommandNone}
+}
+
+// gitSubcommand returns the subcommand git will run, or "" when none does.
+func gitSubcommand(words []string) string {
+	invocation := parseGitInvocation(words)
+	if invocation.kind != gitCommandSubcommand {
+		return ""
+	}
+	return invocation.subcommand
 }
 
 // gitGlobalOptionConsumesValue lists git's global options whose value is a

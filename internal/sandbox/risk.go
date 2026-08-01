@@ -93,44 +93,72 @@ func matchesUnparseableNetwork(command string) bool {
 // it belongs to a program actually being invoked.
 func matchesUnparseableNetworkAt(command string, depth int) bool {
 	for _, tokens := range fallbackCommandTokens(command) {
-		body := fallbackCommandBodyFields(tokens)
-		if len(body) == 0 {
-			continue
-		}
-		program, args := executableTokenBase(body[0]), body[1:]
-		if program == "git" && matchesUnparseableGitNetwork(args) {
-			return true
-		}
-		if unparseableNetworkPattern.MatchString(strings.Join(append([]string{program}, args...), " ")) {
-			return true
-		}
-		// eval executes its remaining arguments as shell source. Recurse into that
-		// source just as we do for `sh -c`; otherwise quoting the same curl/git
-		// invocation behind eval would hide it from this fail-closed path.
-		if depth < maxUnparseableShellDepth && program == "eval" {
-			if matchesUnparseableNetworkAt(strings.Join(args, " "), depth+1) {
+		for _, body := range fallbackCommandBodies(tokens) {
+			if fallbackBodyUsesNetwork(body, depth) {
 				return true
 			}
 		}
-		// `sh -c <payload>` runs the payload as a fresh command. The fallback
-		// tokenizer keeps a quoted payload as ONE token, so the network program
-		// inside it is not a token of this segment at all — recurse the way
-		// analyzeInto does on the parseable path.
-		if depth < maxUnparseableShellDepth && shellPrograms[program] {
-			if payload := fallbackDashCPayload(args); payload != "" {
-				if matchesUnparseableNetworkAt(payload, depth+1) {
-					return true
-				}
+	}
+	return false
+}
+
+// fallbackCommandBodies resolves the executable position of one segment under
+// every command language the text may belong to. The fallback runs on input the
+// POSIX parser rejected, and on Windows that input is frequently valid CMD
+// source rather than broken sh — `@curl …`, `call curl …`, `if not 1==2 curl …`
+// and `start "" curl …` all execute curl under cmd.exe while resolving to a
+// non-program token ("@curl", "call", "not", "start") under POSIX rules. Each
+// runtime's resolver therefore gets its own shot at the segment; a resolution
+// can only ADD the network category, which is the direction this fail-closed
+// path is allowed to err in.
+func fallbackCommandBodies(tokens []string) [][]string {
+	bodies := make([][]string, 0, 2)
+	if body := fallbackCommandBodyFields(tokens); len(body) > 0 {
+		bodies = append(bodies, body)
+	}
+	if body := cmdCommandBodyFields(tokens); len(body) > 0 &&
+		(len(bodies) == 0 || body[0] != bodies[0][0]) {
+		bodies = append(bodies, body)
+	}
+	return bodies
+}
+
+// fallbackBodyUsesNetwork classifies one resolved command body, recursing into
+// the payloads of launchers that run command text of their own.
+func fallbackBodyUsesNetwork(body []string, depth int) bool {
+	program, args := executableTokenBase(body[0]), body[1:]
+	if program == "git" && matchesUnparseableGitNetwork(args) {
+		return true
+	}
+	if unparseableNetworkPattern.MatchString(strings.Join(append([]string{program}, args...), " ")) {
+		return true
+	}
+	// eval executes its remaining arguments as shell source. Recurse into that
+	// source just as we do for `sh -c`; otherwise quoting the same curl/git
+	// invocation behind eval would hide it from this fail-closed path.
+	if depth < maxUnparseableShellDepth && program == "eval" {
+		if matchesUnparseableNetworkAt(strings.Join(args, " "), depth+1) {
+			return true
+		}
+	}
+	// `sh -c <payload>` runs the payload as a fresh command. The fallback
+	// tokenizer keeps a quoted payload as ONE token, so the network program
+	// inside it is not a token of this segment at all — recurse the way
+	// analyzeInto does on the parseable path.
+	if depth < maxUnparseableShellDepth && shellPrograms[program] {
+		if payload := fallbackDashCPayload(args); payload != "" {
+			if matchesUnparseableNetworkAt(payload, depth+1) {
+				return true
 			}
 		}
-		// Windows command interpreters carry command text after their command
-		// flag. That payload is valid shell input even when the POSIX parser that
-		// sent us here cannot parse it (for example, `cmd /c curl ... & rem '`).
-		if depth < maxUnparseableShellDepth {
-			if payload := fallbackCommandInterpreterPayload(program, args); payload != "" {
-				if matchesUnparseableNetworkAt(payload, depth+1) {
-					return true
-				}
+	}
+	// Windows command interpreters carry command text after their command
+	// flag. That payload is valid shell input even when the POSIX parser that
+	// sent us here cannot parse it (for example, `cmd /c curl ... & rem '`).
+	if depth < maxUnparseableShellDepth {
+		if payload := fallbackCommandInterpreterPayload(program, args); payload != "" {
+			if matchesUnparseableNetworkAt(payload, depth+1) {
+				return true
 			}
 		}
 	}
@@ -174,6 +202,121 @@ func fallbackCommandBodyFields(fields []string) []string {
 	return nil
 }
 
+// cmdComparisonOperators are CMD's IF comparison operators, which sit between
+// the two values being compared (`if %x% equ 1 curl …`).
+var cmdComparisonOperators = map[string]bool{
+	"equ": true, "neq": true, "lss": true, "leq": true, "gtr": true, "geq": true,
+}
+
+// cmdCommandBodyFields resolves the executable position of a CMD segment: it
+// removes the prefixes that CMD itself consumes before running a command, so
+// the network matcher sees the program rather than a keyword.
+//
+// It exists because the fallback's POSIX resolver cannot: `@` is echo
+// suppression rather than part of the program name, CALL and START launch the
+// command that follows them, and an IF condition sits between the keyword and
+// the command it guards. Every one of those forms is valid CMD that the POSIX
+// parser rejects, which is exactly the input that reaches this path.
+//
+// Returns nil when no command position can be established, so an unrecognized
+// construct simply leaves the POSIX resolution as the only candidate.
+func cmdCommandBodyFields(fields []string) []string {
+	fields = append([]string(nil), fields...)
+	if len(fields) > 0 {
+		// `@` suppresses echo for the command it prefixes: `@curl …` runs curl.
+		if trimmed := strings.TrimPrefix(fields[0], "@"); trimmed != fields[0] {
+			fields[0] = trimmed
+			if trimmed == "" {
+				fields = fields[1:]
+			}
+		}
+	}
+	for len(fields) > 0 {
+		switch strings.ToLower(strings.Trim(fields[0], `"`)) {
+		case "call", "else", "then", "do":
+			// Each introduces the command that actually runs.
+			fields = fields[1:]
+		case "start":
+			fields = cmdStartPayload(fields[1:])
+		case "if":
+			fields = cmdConditionPayload(fields[1:])
+		case "for":
+			// Only the body after DO executes; the IN clause holds data.
+			fields = cmdForPayload(fields[1:])
+		default:
+			return fields
+		}
+	}
+	return nil
+}
+
+// cmdStartPayload skips START's own options and its optional window title so
+// the launched command is what gets classified. The title is recognized by the
+// space it contains: the fallback tokenizer already dropped the quotes that
+// made it one token, and START's options all begin with `/`.
+func cmdStartPayload(fields []string) []string {
+	for len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
+		// /D and /NODE take a separate value; the rest are bare switches.
+		switch strings.ToLower(fields[0]) {
+		case "/d", "/node", "/affinity":
+			if len(fields) < 2 {
+				return nil
+			}
+			fields = fields[2:]
+		default:
+			fields = fields[1:]
+		}
+	}
+	if len(fields) > 0 && strings.ContainsAny(fields[0], " \t") {
+		fields = fields[1:]
+	}
+	return fields
+}
+
+// cmdConditionPayload skips an IF condition and returns the guarded command.
+func cmdConditionPayload(fields []string) []string {
+	for len(fields) > 0 {
+		word := strings.ToLower(strings.Trim(fields[0], `"`))
+		switch {
+		case strings.HasPrefix(word, "/"): // /I, /D — case-insensitivity switches
+			fields = fields[1:]
+		case word == "not":
+			fields = fields[1:]
+		case word == "errorlevel" || word == "exist" || word == "defined":
+			// Keyword plus its single operand.
+			if len(fields) < 2 {
+				return nil
+			}
+			return fields[2:]
+		case len(fields) >= 2 && (fields[1] == "==" || cmdComparisonOperators[strings.ToLower(fields[1])]):
+			// A spaced comparison: <value> <operator> <value>.
+			if len(fields) < 3 {
+				return nil
+			}
+			return fields[3:]
+		case strings.Contains(word, "=="):
+			// The whole comparison arrived as one token (`1==1`).
+			return fields[1:]
+		default:
+			// An unrecognized condition shape. Assume it was one token rather
+			// than guessing further; the caller still has the POSIX resolution.
+			return fields[1:]
+		}
+	}
+	return nil
+}
+
+// cmdForPayload returns the command after DO, which is the only part of a FOR
+// loop that executes. `for %i in (curl) do echo %i` must not resolve to curl.
+func cmdForPayload(fields []string) []string {
+	for index, field := range fields {
+		if strings.EqualFold(strings.Trim(field, `"`), "do") {
+			return fields[index+1:]
+		}
+	}
+	return nil
+}
+
 func consumesRedirectTarget(word string) bool {
 	word = strings.TrimLeft(word, "0123456789")
 	return word == ">" || word == ">>" || word == "<" || word == "<<" || word == "<<-" ||
@@ -187,30 +330,13 @@ func isRedirectToken(word string) bool {
 
 // matchesUnparseableGitNetwork reports whether git's arguments (everything after
 // the executable) name a subcommand that talks to a remote.
+//
+// It defers to gitUsesNetwork rather than reading the option list a second time.
+// The two paths disagreeing is not a theoretical risk: while each kept its own
+// terminal-option rule, `git -h push` was network on one path and local on the
+// other, and every future option would have had to be added to both.
 func matchesUnparseableGitNetwork(args []string) bool {
-	for index := 0; index < len(args); index++ {
-		word := strings.ToLower(args[index])
-		if word == "--help" || word == "--version" {
-			break
-		}
-		if strings.HasPrefix(word, "-") {
-			if gitGlobalOptionConsumesValue(word) {
-				index++
-			}
-			continue
-		}
-		switch word {
-		case "clone", "fetch", "pull", "push", "ls-remote":
-			return true
-		case "archive":
-			// Only a --remote archive leaves the machine; `git archive HEAD` reads
-			// the local object store. See gitUsesNetwork for the same gate on the
-			// parseable path.
-			return gitTargetsRemoteArchive(args)
-		}
-		break
-	}
-	return false
+	return gitUsesNetwork(args)
 }
 
 // fallbackDashCPayload returns the argument following `-c` or `--command` (the

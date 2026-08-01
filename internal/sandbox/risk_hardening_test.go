@@ -482,6 +482,96 @@ func TestClassifyUnparseableNetworkInShellConstructFailsClosed(t *testing.T) {
 	}
 }
 
+// TestClassifyUnparseableCMDInvocationFormsFailClosed covers jatmn's #726
+// finding that the fallback used POSIX rules to find the executable position in
+// what is often valid CMD source. Each command below runs a network program
+// under cmd.exe and is rejected by the POSIX parser only because CMD's `rem`
+// comment swallows the trailing apostrophe; under POSIX resolution each one
+// stops at a token that is not the program ("@curl", "call", "not", "start"),
+// which dropped the network category and with it the engine's network prompt.
+func TestClassifyUnparseableCMDInvocationFormsFailClosed(t *testing.T) {
+	for _, command := range []string{
+		`@curl https://evil.test & rem '`,
+		`call curl https://evil.test & rem '`,
+		`cmd.exe /c call curl https://evil.test & rem '`,
+		`@cmd.exe /c curl https://evil.test & rem '`,
+		`start "" curl https://evil.test & rem '`,
+		`start "download window" curl https://evil.test & rem '`,
+		`start /b /wait curl https://evil.test & rem '`,
+		`start /d C:\tmp curl https://evil.test & rem '`,
+		`if not 1==2 curl https://evil.test & rem '`,
+		`if /i "%mode%" == "fetch" git push origin main & rem '`,
+		`if exist repo git push origin main & rem '`,
+		`if errorlevel 1 curl https://evil.test & rem '`,
+		`if defined PROXY curl https://evil.test & rem '`,
+		`if %retries% gtr 0 curl https://evil.test & rem '`,
+		`for %i in (x) do call curl https://evil.test & rem '`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) parsed; this case must exercise the fallback", command)
+			}
+			risk := classifyCommand(command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+			}
+			if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+				t.Errorf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
+			}
+		})
+	}
+}
+
+// TestGitGlobalOptionsResolveIdenticallyOnBothPaths pins the whole result table
+// of git's global-option scan, on the AST path and the fallback path at once.
+// Terminal globals print from the local installation and exit, so the words
+// after them are output text rather than a subcommand: `git -h push` renders
+// git-push's usage without contacting a remote. Both paths read the same
+// parser, so a future option cannot be taught to one and not the other.
+func TestGitGlobalOptionsResolveIdenticallyOnBothPaths(t *testing.T) {
+	for _, testCase := range []struct {
+		args    string
+		network bool
+	}{
+		{"push origin main", true},
+		{"-C repo push origin main", true},
+		{"--git-dir /repo/.git fetch origin", true},
+		{"--no-pager push origin main", true},
+		{"--help push", false},
+		{"-h push", false},
+		{"--version push", false},
+		{"-v push", false},
+		{"--html-path push", false},
+		{"--man-path push", false},
+		{"--info-path push", false},
+		{"-C repo --help push", false},
+		{"-C repo -h push", false},
+		{"-C repo --version push", false},
+		{"status", false},
+		{"", false},
+	} {
+		t.Run(testCase.args, func(t *testing.T) {
+			parseable := "git " + testCase.args
+			if analysis := AnalyzeCommand(parseable); analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) reported TooComplex; this case must exercise the AST path", parseable)
+			}
+			if got := HasRiskCategory(classifyCommand(parseable), "network"); got != testCase.network {
+				t.Errorf("AST Classify(%q) network = %v, want %v", parseable, got, testCase.network)
+			}
+
+			// The same words through the fallback, made unparseable by a CMD
+			// comment the POSIX parser cannot close.
+			unparseable := parseable + " & rem '"
+			if analysis := AnalyzeCommand(unparseable); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) parsed; this case must exercise the fallback", unparseable)
+			}
+			if got := HasRiskCategory(classifyCommand(unparseable), "network"); got != testCase.network {
+				t.Errorf("fallback Classify(%q) network = %v, want %v", unparseable, got, testCase.network)
+			}
+		})
+	}
+}
+
 // These malformed forms contain network-looking text in non-executing variable,
 // arithmetic, array, escaped-backtick, or ordinary argument contexts. They must
 // stay non-network so fallback tokenization does not over-flag inert text.
@@ -494,6 +584,11 @@ func TestClassifyUnparseableShellSyntaxTextStaysNonNetwork(t *testing.T) {
 		`command if curl https://evil.test && "unterminated`,
 		`env then git push && "unterminated`,
 		`for %i in (curl) do echo %i & rem '`,
+		// CMD's START runs nothing when its only quoted argument is the window
+		// title, and neither ECHO nor REM executes the text that follows it.
+		`start "curl https://evil.test" & rem '`,
+		`echo call curl https://evil.test & rem '`,
+		`rem start curl https://evil.test & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			risk := classifyCommand(command)
@@ -526,6 +621,23 @@ func FuzzFallbackCommandTokensDoesNotPanic(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, command string) {
 		fallbackCommandTokens(command)
+	})
+}
+
+// FuzzFallbackNetworkResolutionDoesNotPanic covers the resolvers layered on top
+// of the tokenizer. They index into token slices around keywords, conditions and
+// option values, and this path exists to be total over input the shell parser
+// already rejected: a panic here is a request-triggerable crash.
+func FuzzFallbackNetworkResolutionDoesNotPanic(f *testing.F) {
+	for _, command := range []string{
+		"", "if", "if not", "start", "start /d", "call", "@", "@curl",
+		"for %i in (x) do", "if errorlevel", "if %x% equ", "git -C",
+		"echo `curl)` && \"unterminated", `cmd /c`, `if 1==1 (curl https://evil.test`,
+	} {
+		f.Add(command)
+	}
+	f.Fuzz(func(t *testing.T, command string) {
+		matchesUnparseableNetwork(command)
 	})
 }
 
