@@ -464,6 +464,11 @@ func TestClassifyUnparseableNetworkInShellConstructFailsClosed(t *testing.T) {
 		`(git -C repo push) && "unterminated`,
 		`echo $(git push) && "unterminated`,
 		`eval "git push" && "unterminated`,
+		// CMD command groups follow condition tokens rather than beginning a
+		// segment, and may themselves contain nested groups.
+		`if 1==1 (curl https://evil.test) & rem '`,
+		`if 1==1 ((git push origin main)) & rem '`,
+		`for %i in (x) do (curl https://evil.test) & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			risk := classifyCommand(command)
@@ -477,6 +482,9 @@ func TestClassifyUnparseableNetworkInShellConstructFailsClosed(t *testing.T) {
 	}
 }
 
+// These malformed forms contain network-looking text in non-executing variable,
+// arithmetic, array, escaped-backtick, or ordinary argument contexts. They must
+// stay non-network so fallback tokenization does not over-flag inert text.
 func TestClassifyUnparseableShellSyntaxTextStaysNonNetwork(t *testing.T) {
 	for _, command := range []string{
 		`echo ${curl} && "unterminated`,
@@ -485,6 +493,7 @@ func TestClassifyUnparseableShellSyntaxTextStaysNonNetwork(t *testing.T) {
 		"echo \\`curl\\` && \"unterminated",
 		`command if curl https://evil.test && "unterminated`,
 		`env then git push && "unterminated`,
+		`for %i in (curl) do echo %i & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			risk := classifyCommand(command)
@@ -496,6 +505,28 @@ func TestClassifyUnparseableShellSyntaxTextStaysNonNetwork(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClassifyUnparseableMismatchedDelimitersDoesNotPanic(t *testing.T) {
+	for _, command := range []string{
+		"echo `curl)` && \"unterminated",
+		"echo `curl(` && \"unterminated",
+		"echo )`curl` && \"unterminated",
+	} {
+		risk := classifyCommand(command)
+		if !HasRiskCategory(risk, "unparseable_command") {
+			t.Errorf("Classify(%q) = categories %v; want unparseable_command", command, risk.Categories)
+		}
+	}
+}
+
+func FuzzFallbackCommandTokensDoesNotPanic(f *testing.F) {
+	for _, command := range []string{"", "`", ")", "(`)", "echo `curl)`"} {
+		f.Add(command)
+	}
+	f.Fuzz(func(t *testing.T, command string) {
+		fallbackCommandTokens(command)
+	})
 }
 
 // TestUnparseableShellDepthMatchesAnalyzerDepth pins the two launcher-recursion

@@ -328,6 +328,9 @@ func gitSubcommand(words []string) string {
 		if word == "" {
 			continue
 		}
+		if strings.EqualFold(word, "--help") || strings.EqualFold(word, "--version") {
+			return ""
+		}
 		if strings.HasPrefix(word, "-") {
 			// A joined value (--git-dir=/x, -C/x) is one token and needs no skip;
 			// a separated one puts its value in the next token.

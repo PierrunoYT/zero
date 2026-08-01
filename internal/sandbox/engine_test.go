@@ -61,8 +61,20 @@ func TestEvaluatePromptsForUnparseableNetworkBehindWrapper(t *testing.T) {
 		`echo $(curl https://evil.test) && "unterminated`,
 		`if true; then git push; fi && "unterminated`,
 		`eval "curl https://evil.test" && "unterminated`,
+		`cmd.exe /c curl https://evil.test & rem '`,
+		`cmd.exe /d /c git push origin main & rem '`,
+		`cmd.exe /k git push origin main & rem '`,
+		`powershell.exe -Command curl https://evil.test & rem '`,
+		`powershell.exe -c curl https://evil.test & rem '`,
+		`pwsh.exe -c git push origin main & rem '`,
+		`if 1==1 (curl https://evil.test) & rem '`,
+		`if 1==1 ((git push origin main)) & rem '`,
+		`for %i in (x) do (curl https://evil.test) & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) = %#v; test must exercise the fallback", command, analysis)
+			}
 			decision := engine.Evaluate(context.Background(), Request{
 				ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
 				Args: map[string]any{"command": command},

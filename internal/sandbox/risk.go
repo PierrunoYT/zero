@@ -123,6 +123,16 @@ func matchesUnparseableNetworkAt(command string, depth int) bool {
 				}
 			}
 		}
+		// Windows command interpreters carry command text after their command
+		// flag. That payload is valid shell input even when the POSIX parser that
+		// sent us here cannot parse it (for example, `cmd /c curl ... & rem '`).
+		if depth < maxUnparseableShellDepth {
+			if payload := fallbackCommandInterpreterPayload(program, args); payload != "" {
+				if matchesUnparseableNetworkAt(payload, depth+1) {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
@@ -223,6 +233,18 @@ func isShellCommandFlag(token string) bool {
 	return token == "-c" || token == "--command"
 }
 
+func fallbackCommandInterpreterPayload(program string, args []string) string {
+	for index, arg := range args {
+		flag := strings.ToLower(arg)
+		isCommandFlag := program == "cmd" && (flag == "/c" || flag == "/k") ||
+			(program == "powershell" || program == "pwsh") && (flag == "-c" || flag == "-command")
+		if isCommandFlag && index+1 < len(args) {
+			return strings.Join(args[index+1:], " ")
+		}
+	}
+	return ""
+}
+
 // executableTokenBase reduces a raw fallback token to a comparable program name.
 // It strips quoting, any directory prefix, and a Windows executable suffix, so
 // this path recognizes curl.exe and git.cmd exactly as normalizeProgramToken does
@@ -242,6 +264,11 @@ func executableTokenBase(token string) string {
 	return trimExecutableSuffix(strings.ToLower(token))
 }
 
+type fallbackDelimiterFrame struct {
+	opener rune
+	quote  rune
+}
+
 // fallbackCommandTokens performs deliberately small shell/cmd tokenization.
 // It preserves quoted spaces even when the command's trailing quote is
 // unmatched (the condition that sends classification down this fallback).
@@ -252,7 +279,7 @@ func fallbackCommandTokens(command string) [][]string {
 	var tokens []string
 	var word strings.Builder
 	var quote rune
-	var outerQuotes []rune
+	var delimiters []fallbackDelimiterFrame
 	backtick := false
 	escaped := false
 	flush := func() {
@@ -286,10 +313,12 @@ func fallbackCommandTokens(command string) [][]string {
 		if r == '`' && quote != '\'' {
 			flushCommand()
 			if backtick {
-				quote = outerQuotes[len(outerQuotes)-1]
-				outerQuotes = outerQuotes[:len(outerQuotes)-1]
+				if len(delimiters) > 0 && delimiters[len(delimiters)-1].opener == '`' {
+					quote = delimiters[len(delimiters)-1].quote
+					delimiters = delimiters[:len(delimiters)-1]
+				}
 			} else {
-				outerQuotes = append(outerQuotes, quote)
+				delimiters = append(delimiters, fallbackDelimiterFrame{opener: '`', quote: quote})
 				quote = 0
 			}
 			backtick = !backtick
@@ -314,18 +343,22 @@ func fallbackCommandTokens(command string) [][]string {
 			nextIsParen := index+1 < len(runes) && runes[index+1] == '('
 			substitution := (strings.HasSuffix(current, "$") && !nextIsParen) ||
 				strings.HasSuffix(current, "<") || strings.HasSuffix(current, ">")
-			grouping := quote == 0 && word.Len() == 0 && len(tokens) == 0
+			// CMD conditionals put the command group after condition tokens, e.g.
+			// `if 1==1 (curl ...)`; the opening parenthesis is still a command
+			// boundary even though it is not the segment's first token.
+			grouping := quote == 0 && word.Len() == 0 &&
+				(len(tokens) == 0 || startsCMDCommandGroup(tokens))
 			if substitution || grouping {
 				flushCommand()
-				outerQuotes = append(outerQuotes, quote)
+				delimiters = append(delimiters, fallbackDelimiterFrame{opener: '(', quote: quote})
 				quote = 0
 				continue
 			}
 		}
-		if r == ')' && quote == 0 && len(outerQuotes) > 0 {
+		if r == ')' && quote == 0 && len(delimiters) > 0 && delimiters[len(delimiters)-1].opener == '(' {
 			flushCommand()
-			quote = outerQuotes[len(outerQuotes)-1]
-			outerQuotes = outerQuotes[:len(outerQuotes)-1]
+			quote = delimiters[len(delimiters)-1].quote
+			delimiters = delimiters[:len(delimiters)-1]
 			continue
 		}
 		// A case pattern's closing parenthesis starts the command body. It is not
@@ -350,6 +383,21 @@ func fallbackCommandTokens(command string) [][]string {
 	}
 	flushCommand()
 	return commands
+}
+
+func startsCMDCommandGroup(tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	switch strings.TrimPrefix(strings.ToLower(tokens[0]), "@") {
+	case "if", "else":
+		return true
+	case "for":
+		// Parentheses after IN contain data; only the group after DO executes.
+		return strings.EqualFold(tokens[len(tokens)-1], "do")
+	default:
+		return false
+	}
 }
 
 func Classify(request Request) Risk {
