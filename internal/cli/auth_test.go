@@ -377,6 +377,59 @@ func TestRunAuthLogoutDeletesCatalogIDAPIKey(t *testing.T) {
 	}
 }
 
+// TestRunAuthLogoutKeepsDistinctUnicodeCredentials pins the end-to-end
+// guarantee behind jatmn's #725 finding that destructive candidate expansion
+// used strings.EqualFold as authority for credential ownership: a saved "s"
+// profile with its own token and key must survive `zero auth logout ſ`, which
+// names a provider the config never saved (the credential store defines
+// identity with credstore.NormalizeProvider, under which "s" and Unicode
+// long-s "ſ" are separate entries).
+//
+// Two independent layers now enforce that, and this test deliberately asserts
+// the outcome rather than either mechanism. The one that fires first is
+// oauth.ValidateKey, which rejects the non-ASCII spelling before any deletion
+// runs — so the folded-name adoption itself is pinned where it is reachable, in
+// TestPersistedProviderIdentityRulesMatchTheCredentialStore (internal/config).
+func TestRunAuthLogoutKeepsDistinctUnicodeCredentials(t *testing.T) {
+	const longS = "ſ"
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	storePath := withAuthStore(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"s","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tokens.Save(oauth.ProviderKey("s"), oauth.Token{AccessToken: "stored"}); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("s", "long-s-is-not-s"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	runWithDeps([]string{"auth", "logout", longS}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+
+	if _, ok, err := tokens.Load(oauth.ProviderKey("s")); err != nil || !ok {
+		t.Fatalf("logging out of a distinct identity deleted the saved token: ok=%v err=%v", ok, err)
+	}
+	if key, ok, err := keyStore.Get("s"); err != nil || !ok || key != "long-s-is-not-s" {
+		t.Fatalf("stored API key = %q, %v, %v; want the unrelated profile untouched", key, ok, err)
+	}
+	saved := readCLIConfigFixture(t, configPath).Providers
+	if len(saved) != 1 || saved[0].Name != "s" || !saved[0].APIKeyStored {
+		t.Fatalf("providers = %+v, want the saved profile keeping its stored-key marker", saved)
+	}
+}
+
 // TestRunAuthLogoutResolvesCandidatesDespiteUnrelatedAmbiguousConfig covers
 // jatmn's third #725 follow-up finding: identity resolution and OAuth/API-key
 // candidate expansion were gated on PreflightUserConfig succeeding, even

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,6 +217,84 @@ func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testin
 	// even though config.json and the credstore both already agree.
 	if len(next.savedProviders) != 1 || next.savedProviders[0].Name != "WORK" || !next.savedProviders[0].APIKeyStored {
 		t.Fatalf("in-memory savedProviders must inherit apiKeyStored too, got %+v", next.savedProviders)
+	}
+}
+
+// TestProviderManagerDeleteReportsFailedKeyMarkerHandoff covers jatmn's #725
+// finding that the manager committed the retain-the-key decision before it knew
+// the handoff had worked. The marker transfer can only run AFTER RemoveProvider
+// (while both case-variant rows exist the config is ambiguous and every write
+// against it is rejected), so its failure is reachable: the shared secret then
+// sits in the store with no row marked to read it, while the UI had already
+// reported a completed "Deleted <name>."
+func TestProviderManagerDeleteReportsFailedKeyMarkerHandoff(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", filepath.Join(home, "oauth-tokens.json"))
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := config.FileConfig{
+		ActiveProvider: "WORK",
+		Providers: []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v1", APIKeyStored: true, Model: "work-model"},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v2", Model: "work-model-2"},
+		},
+	}
+	data, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatalf("encode seed config: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write seed config: %v", err)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+	original := transferProviderAPIKeyStoredMarker
+	transferProviderAPIKeyStoredMarker = func(string, string) (bool, error) {
+		return false, errors.New("injected marker write failure")
+	}
+	t.Cleanup(func() { transferProviderAPIKeyStoredMarker = original })
+
+	m := newModel(context.Background(), Options{
+		ProviderName:    "WORK",
+		ModelName:       "work-model-2",
+		Provider:        &fakeProvider{},
+		ProviderProfile: seed.Providers[1],
+		SavedProviders:  seed.Providers,
+		UserConfigPath:  configPath,
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.width = 120
+	m.height = 40
+	m, _ = m.openProviderManager()
+
+	m = managerKey(t, m, testKeyText("d")) // select "work" (row 0)
+	next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+	next = drainProviderManagerCmds(t, next, cmd)
+
+	status := next.providerWizard.manageStatus
+	if strings.Contains(status, "Deleted work.") {
+		t.Fatalf("status = %q, must not report a completed delete while the shared key is unreachable", status)
+	}
+	if !strings.Contains(status, "incomplete") || !strings.Contains(status, "WORK") {
+		t.Fatalf("status = %q, want it to name the incomplete handoff and the survivor", status)
+	}
+	// The secret is kept rather than destroyed by a failed config write: it is
+	// recoverable by setting a key for the survivor again, whereas deleting it
+	// is not.
+	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
+		t.Fatalf("shared provider key = %q, %v, %v; want it preserved for recovery", key, ok, err)
+	}
+	persisted := readManagerConfig(t, next.userConfigPath)
+	if len(persisted.Providers) != 1 || persisted.Providers[0].Name != "WORK" {
+		t.Fatalf("providers = %+v, want only the survivor", persisted.Providers)
 	}
 }
 

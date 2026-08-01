@@ -329,6 +329,13 @@ func (m model) activateManagerSelection() (model, tea.Cmd) {
 	return next, cmd
 }
 
+// transferProviderAPIKeyStoredMarker is a package var so a test can drive the
+// partial-failure path: the handoff runs AFTER RemoveProvider has committed
+// (while both case-variant rows are present the config is ambiguous and every
+// write against it is rejected), so its failure is a real state the UI must
+// report rather than an unreachable branch.
+var transferProviderAPIKeyStoredMarker = config.TransferProviderAPIKeyStoredMarker
+
 // deleteManagerSelection removes the confirmed provider: the config write runs
 // synchronously (the list must reflect the config the instant the confirm
 // resolves), while the stored-key delete and the OAuth-login lookup — a
@@ -368,14 +375,29 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		retainStoredKey := false
 		markerTransferredTo := ""
 		if survivor, ok := caseVariantProviderNameAfterRemoval(cfg, name); ok {
+			// A surviving case variant reads the same credential-store entry, so
+			// the shared key must not be deleted — provided that row can still
+			// REACH it. ApplyStoredAPIKey consults the store only for a row
+			// carrying apiKeyStored, so retention is only safe once the marker
+			// is where the survivor can use it.
 			retainStoredKey = true
 			// The removed row owned the shared secret's marker; carry it over to
 			// the surviving case-variant so it stays reachable, mirroring the CLI
 			// (`zero providers remove`) fix for the same case.
 			if row.profile.APIKeyStored {
 				if survivorRow, foundSurvivor, err := config.ProviderRow(m.userConfigPath, survivor); err == nil && foundSurvivor && !survivorRow.APIKeyStored {
-					if _, err := config.TransferProviderAPIKeyStoredMarker(m.userConfigPath, survivor); err != nil {
-						notes = append(notes, "Warning: could not keep its stored API key reachable ("+err.Error()+").")
+					if _, err := transferProviderAPIKeyStoredMarker(m.userConfigPath, survivor); err != nil {
+						// The row is already gone and the handoff failed, so the
+						// key is in the store with no profile marked to read it.
+						// Keep it rather than destroying a secret because a config
+						// write failed — but say so, and do not report this as a
+						// completed delete. Re-saving a key for the survivor (or
+						// restoring its apiKeyStored marker) makes it reachable again.
+						retainStoredKey = true
+						notes = []string{
+							"Removed " + name + ", but the delete is incomplete: its stored API key marker could not be handed to " + survivor + " (" + err.Error() + ").",
+							"The shared key is still in the credential store and " + survivor + " cannot reach it until you set a key for it again.",
+						}
 					} else {
 						markerTransferredTo = survivor
 					}

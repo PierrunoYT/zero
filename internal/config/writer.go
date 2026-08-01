@@ -40,6 +40,17 @@ func ValidatePersistedProviderNames(cfg FileConfig) error {
 	return nil
 }
 
+// sameProviderIdentity reports whether two persisted spellings name the same
+// provider identity. It is credstore.NormalizeProvider — the credential store's
+// own rule — rather than strings.EqualFold, because the two disagree and the
+// store is the authority: EqualFold folds "s" and Unicode long-s "ſ" together,
+// while the store keeps separate entries for them. Treating them as one identity
+// let a mutation of one profile reach the other's row and its secret, which is
+// precisely what ValidatePersistedProviderNames permits as a distinct pair.
+func sameProviderIdentity(a string, b string) bool {
+	return credstore.NormalizeProvider(a) == credstore.NormalizeProvider(b)
+}
+
 // PreflightUserConfig validates existing user config before any command makes
 // credential-store side effects.
 func PreflightUserConfig(path string) error {
@@ -106,10 +117,21 @@ func PreflightCatalogProviderLogin(path, catalogID string) error {
 // silently overwrite that row's endpoint, model, and stored key. An exactly
 // spelled existing row also short-circuits: there is nothing to adopt, the
 // caller's own spelling is already the persisted one.
+//
+// Nor is a matching NAME on its own proof of ownership. A custom profile is free
+// to be called {name: "OpenRouter", catalogId: "custom-openai-compatible",
+// baseURL: "https://corp.example/v1"}; adopting it for `zero providers add
+// openrouter` would hand that row to UpsertProvider, whose merge overwrites the
+// catalog id, endpoint, model, transport and headers with OpenRouter's defaults
+// while a stored-key marker survives the rewrite. So the row's catalog identity
+// must agree too, and a row that declares no catalog id at all is accepted only
+// because its name is the sole identity it has (the legacy shape this function
+// exists for). Anything else keeps the requested name and lets the write report
+// the collision instead of mutating a different profile.
 func AdoptPersistedCatalogProviderName(path string, profile ProviderProfile) (ProviderProfile, error) {
 	catalogID := strings.TrimSpace(profile.CatalogID)
 	name := strings.TrimSpace(profile.Name)
-	if catalogID == "" || !strings.EqualFold(name, catalogID) {
+	if catalogID == "" || !sameProviderIdentity(name, catalogID) {
 		return profile, nil
 	}
 	providers, err := persistedProviders(path)
@@ -120,10 +142,15 @@ func AdoptPersistedCatalogProviderName(path string, profile ProviderProfile) (Pr
 	variants := 0
 	for _, row := range providers {
 		rowName := strings.TrimSpace(row.Name)
-		if !strings.EqualFold(rowName, name) {
+		if !sameProviderIdentity(rowName, name) {
 			continue
 		}
 		if rowName == name {
+			return profile, nil
+		}
+		if rowCatalogID := strings.TrimSpace(row.CatalogID); rowCatalogID != "" &&
+			!sameProviderIdentity(rowCatalogID, catalogID) {
+			// A different provider that happens to carry this name.
 			return profile, nil
 		}
 		canonical = rowName
@@ -239,11 +266,11 @@ func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, P
 		if name == identity {
 			return row, PersistedIdentityName, nil
 		}
-		if foldedName == nil && strings.EqualFold(name, identity) {
+		if foldedName == nil && sameProviderIdentity(name, identity) {
 			match := row
 			foldedName = &match
 		}
-		if strings.EqualFold(strings.TrimSpace(row.CatalogID), identity) {
+		if sameProviderIdentity(row.CatalogID, identity) {
 			catalogMatches++
 			if catalogRow == nil {
 				match := row
@@ -284,7 +311,7 @@ func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 		if name == owner {
 			continue
 		}
-		if strings.EqualFold(name, catalogID) || strings.EqualFold(strings.TrimSpace(row.CatalogID), catalogID) {
+		if sameProviderIdentity(name, catalogID) || sameProviderIdentity(row.CatalogID, catalogID) {
 			return false, nil
 		}
 	}
@@ -311,7 +338,7 @@ func PreflightProviderWrite(path, name string) error {
 	name = strings.TrimSpace(name)
 	for _, provider := range cfg.Providers {
 		existing := strings.TrimSpace(provider.Name)
-		if strings.EqualFold(existing, name) && existing != name {
+		if sameProviderIdentity(existing, name) && existing != name {
 			return fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", name, existing)
 		}
 	}
@@ -340,7 +367,7 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 		return FileConfig{}, err
 	}
 	for _, existing := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(existing.Name), profile.Name) && strings.TrimSpace(existing.Name) != profile.Name {
+		if sameProviderIdentity(existing.Name, profile.Name) && strings.TrimSpace(existing.Name) != profile.Name {
 			return FileConfig{}, fmt.Errorf("provider %q already exists as %q; provider names must be unique case-insensitively", profile.Name, existing.Name)
 		}
 	}
@@ -406,8 +433,8 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 		return EnsuredProvider{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(provider.CatalogID), descriptor.ID) ||
-			strings.EqualFold(strings.TrimSpace(provider.Name), descriptor.ID) {
+		if sameProviderIdentity(provider.CatalogID, descriptor.ID) ||
+			sameProviderIdentity(provider.Name, descriptor.ID) {
 			return EnsuredProvider{Name: provider.Name, Active: cfg.ActiveProvider}, nil
 		}
 	}
@@ -600,7 +627,7 @@ func ProviderPersistedCaseInsensitive(path, name string) (bool, error) {
 		return false, fmt.Errorf("invalid config JSON %s: %w", path, err)
 	}
 	for _, provider := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), strings.TrimSpace(name)) {
+		if sameProviderIdentity(provider.Name, name) {
 			return true, nil
 		}
 	}
@@ -654,7 +681,7 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 		if providerName == strings.TrimSpace(cfg.ActiveProvider) {
 			activeIndex = i
 		}
-		if strings.EqualFold(providerName, strings.TrimSpace(cfg.ActiveProvider)) {
+		if sameProviderIdentity(providerName, cfg.ActiveProvider) {
 			activeFoldedIndex = i
 			activeFoldedMatches++
 		}
@@ -714,14 +741,14 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 			index = i
 			continue
 		}
-		if strings.EqualFold(providerName, newName) {
+		if sameProviderIdentity(providerName, newName) {
 			return FileConfig{}, fmt.Errorf("provider %q already exists", newName)
 		}
 	}
 	if index < 0 {
 		return FileConfig{}, fmt.Errorf("provider %q not found", oldName)
 	}
-	if strings.EqualFold(oldName, newName) && cfg.Providers[index].Name == newName {
+	if sameProviderIdentity(oldName, newName) && cfg.Providers[index].Name == newName {
 		return cfg, nil
 	}
 
@@ -733,7 +760,7 @@ func RenameProvider(path string, oldName string, newName string) (FileConfig, er
 		}
 		keyMigrated = true
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(previousName)) {
+	if sameProviderIdentity(cfg.ActiveProvider, previousName) {
 		cfg.ActiveProvider = newName
 	}
 	cfg.Providers[index].Name = newName
@@ -829,7 +856,7 @@ func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
 		}
 		keyMigrated = true
 	}
-	if renamed && strings.EqualFold(strings.TrimSpace(cfg.ActiveProvider), strings.TrimSpace(previousName)) {
+	if renamed && sameProviderIdentity(cfg.ActiveProvider, previousName) {
 		cfg.ActiveProvider = newName
 	}
 
@@ -869,7 +896,7 @@ func migrateStoredProviderKey(configPath string, oldName string, newName string)
 	// (groq -> Groq) targets ONE entry: Set(new) rewrites it in place and
 	// Delete(old) would then remove the key that was just "moved". Nothing to
 	// migrate — the existing entry already serves the new name.
-	if strings.EqualFold(strings.TrimSpace(oldName), strings.TrimSpace(newName)) {
+	if sameProviderIdentity(oldName, newName) {
 		return nil
 	}
 	store, err := ProviderKeyStoreAt(filepath.Dir(configPath))

@@ -1303,6 +1303,98 @@ func TestAdoptPersistedCatalogProviderNameFollowsCaseVariantOfTheDefaultName(t *
 	}
 }
 
+// TestAdoptPersistedCatalogProviderNameIgnoresForeignCatalogRow covers jatmn's
+// #725 finding that a case-folded NAME match was taken as proof of ownership.
+// A custom profile may legitimately be called "OpenRouter" while pointing at a
+// different provider entirely; adopting it for `zero providers add openrouter`
+// handed that row to UpsertProvider, whose merge overwrites the catalog id,
+// endpoint, model and transport with OpenRouter's defaults while a stored-key
+// marker survives the rewrite.
+func TestAdoptPersistedCatalogProviderNameIgnoresForeignCatalogRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "OpenRouter", CatalogID: "custom-openai-compatible", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://corp.example/v1", Model: "corp-model", APIKeyStored: true},
+		},
+	}, 0o600)
+
+	adopted, err := AdoptPersistedCatalogProviderName(path, ProviderProfile{Name: "openrouter", CatalogID: "openrouter"})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if adopted.Name != "openrouter" {
+		t.Fatalf("Name = %q, want the requested spelling kept — a differently-catalogued row is another provider", adopted.Name)
+	}
+	// And the write that follows must report the collision rather than rewriting
+	// the custom row in place.
+	if err := PreflightProviderWrite(path, adopted.Name); err == nil {
+		t.Fatal("PreflightProviderWrite accepted a name that collides with the custom row; want a reported collision")
+	}
+}
+
+// TestAdoptPersistedCatalogProviderNameFollowsNameOnlyRow keeps the legacy shape
+// adoption exists for: a row whose only identity is its name.
+func TestAdoptPersistedCatalogProviderNameFollowsNameOnlyRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "OpenRouter", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://openrouter.ai/api/v1", Model: "m"},
+		},
+	}, 0o600)
+
+	adopted, err := AdoptPersistedCatalogProviderName(path, ProviderProfile{Name: "openrouter", CatalogID: "openrouter"})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if adopted.Name != "OpenRouter" {
+		t.Fatalf("Name = %q, want the persisted case variant adopted", adopted.Name)
+	}
+}
+
+// TestPersistedProviderIdentityRulesMatchTheCredentialStore pins the identity
+// contract this PR introduced across every persisted-config path at once.
+// strings.EqualFold folds "s" and Unicode long-s "ſ" together while
+// credstore.NormalizeProvider (the store's own rule, and the rule
+// ValidatePersistedProviderNames enforces) keeps them apart, so the two
+// spellings are separate profiles with separate secrets. Mixing the two
+// comparisons made one profile's mutation reach the other's row: destructive
+// logout expansion adopted the unrelated row, while ordinary writes rejected
+// the pair as a collision.
+func TestPersistedProviderIdentityRulesMatchTheCredentialStore(t *testing.T) {
+	const longS = "ſ"
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "s", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://s.example/v1", Model: "m", APIKeyStored: true},
+		},
+	}, 0o600)
+
+	t.Run("identity resolution does not adopt the distinct spelling", func(t *testing.T) {
+		if _, match, err := ResolvePersistedProviderIdentity(path, longS); err != nil || match != PersistedIdentityNone {
+			t.Fatalf("ResolvePersistedProviderIdentity(%q) = %v, %v; want no match", longS, match, err)
+		}
+	})
+
+	t.Run("a distinct spelling is writable, not a collision", func(t *testing.T) {
+		if err := PreflightProviderWrite(path, longS); err != nil {
+			t.Fatalf("PreflightProviderWrite(%q) = %v; want the distinct identity accepted", longS, err)
+		}
+		cfg, err := UpsertProvider(path, ProviderProfile{Name: longS, ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://long-s.example/v1", Model: "m"}, false)
+		if err != nil {
+			t.Fatalf("UpsertProvider(%q) = %v; want the distinct identity accepted", longS, err)
+		}
+		if len(cfg.Providers) != 2 {
+			t.Fatalf("providers = %+v, want both distinct rows saved", cfg.Providers)
+		}
+	})
+
+	t.Run("a case variant is still a collision", func(t *testing.T) {
+		if err := PreflightProviderWrite(path, "S"); err == nil {
+			t.Fatal("PreflightProviderWrite(\"S\") accepted a case variant of a saved row")
+		}
+	})
+}
+
 // TestResolvePersistedProviderIdentityPrefersNames covers jatmn's #725 finding
 // that identity resolution took the first row matching EITHER field, so a
 // catalog id on an earlier row outranked a later row with the exact name.
