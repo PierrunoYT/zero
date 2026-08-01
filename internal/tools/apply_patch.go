@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -81,8 +82,19 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 		return errorResult("Error applying patch: " + err.Error())
 	}
 	var createdTargets []string
+	var fullySuppliedTargets []string
+	wholeBefore := map[string]bool{}
 	if options.FileTracker != nil {
 		createdTargets = missingPatchTargets(applyRoot, patch)
+		fullySuppliedTargets = completeCreatedPatchTargets(applyRoot, patch)
+		for _, path := range sandbox.PatchHeaderPaths(patch) {
+			if path == "" || path == "/dev/null" {
+				continue
+			}
+			if absolute, _, rerr := resolveWorkspaceTargetPath(applyRoot, path); rerr == nil {
+				wholeBefore[absolute] = options.FileTracker.SeenWhole(absolute)
+			}
+		}
 	}
 
 	command := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn", patchPath)
@@ -103,13 +115,28 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	result := okResult(summary)
 	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
 	result.Display = Display{Summary: summary, Kind: "diff", Preview: capPreviewDiff(patch)}
-	// git apply already rejects a patch whose context drifted, so it has its own
-	// staleness guard. Drop any tracked baseline for the files it rewrote so a
-	// subsequent edit_file/write_file re-reads instead of false-flagging the
-	// patch's own change as an external modification.
+	fullySupplied := make(map[string]bool, len(fullySuppliedTargets))
+	for _, absolute := range fullySuppliedTargets {
+		fullySupplied[absolute] = true
+	}
+	// Re-baseline files changed by this tool. When the model had already seen the
+	// whole input (or supplied a complete new file), the exact patch plus that
+	// input determines the whole output, so a follow-up edit needs no wasted read.
+	// Partial observations remain conservative and are cleared by Record.
 	for _, changed := range result.ChangedFiles {
 		if absolute, _, rerr := resolveScopedPath(tool.workspaceRoot, tool.scope, changed); rerr == nil {
-			options.FileTracker.Forget(absolute)
+			content, readErr := os.ReadFile(absolute)
+			if readErr != nil {
+				options.FileTracker.Forget(absolute)
+				continue
+			}
+			info, _ := os.Stat(absolute)
+			wasWhole := wholeBefore[absolute] || fullySupplied[absolute]
+			options.FileTracker.Record(absolute, content, info)
+			if wasWhole {
+				lines := lineCount(string(content))
+				options.FileTracker.RecordSeenRange(absolute, 1, lines, lines)
+			}
 		}
 	}
 	recordCreatedPatchTargets(options.FileTracker, createdTargets)
@@ -133,6 +160,98 @@ func missingPatchTargets(root string, patch string) []string {
 		}
 	}
 	return missing
+}
+
+// completeCreatedPatchTargets returns only files whose full contents are
+// supplied by a /dev/null creation patch. A missing rename/copy destination is
+// created by git too, but its bytes come from an unread source and must not gain
+// whole-file observation credit.
+func completeCreatedPatchTargets(root string, patch string) []string {
+	seen := map[string]bool{}
+	var created []string
+	oldRemaining, newRemaining := 0, 0
+	inHunk := false
+	fromDevNull := false
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
+			switch {
+			case strings.HasPrefix(line, "-"):
+				oldRemaining--
+			case strings.HasPrefix(line, "+"):
+				newRemaining--
+			case strings.HasPrefix(line, "\\"):
+			default:
+				oldRemaining--
+				newRemaining--
+			}
+			continue
+		}
+		inHunk = false
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			fromDevNull = false
+		case strings.HasPrefix(line, "@@"):
+			oldRemaining, newRemaining = completePatchHunkCounts(line)
+			inHunk = oldRemaining > 0 || newRemaining > 0
+		case strings.HasPrefix(line, "--- "):
+			fromDevNull = sharedPatchFileHeaderPath(line) == "/dev/null"
+		case strings.HasPrefix(line, "+++ "):
+			path := sharedPatchFileHeaderPath(line)
+			if !fromDevNull || path == "" || path == "/dev/null" {
+				fromDevNull = false
+				continue
+			}
+			fromDevNull = false
+			absolute, _, err := resolveWorkspaceTargetPath(root, path)
+			if err != nil || seen[absolute] {
+				continue
+			}
+			if _, err := os.Stat(absolute); !os.IsNotExist(err) {
+				continue
+			}
+			seen[absolute] = true
+			created = append(created, absolute)
+		}
+	}
+	return created
+}
+
+func sharedPatchFileHeaderPath(line string) string {
+	paths := sandbox.PatchHeaderPaths(line)
+	if len(paths) == 0 {
+		return ""
+	}
+	return paths[0]
+}
+
+func completePatchHunkCounts(line string) (int, int) {
+	_, rest, ok := strings.Cut(line, "@@")
+	if !ok {
+		return 0, 0
+	}
+	if before, _, ok := strings.Cut(rest, "@@"); ok {
+		rest = before
+	}
+	old, next := 0, 0
+	for _, field := range strings.Fields(rest) {
+		switch {
+		case strings.HasPrefix(field, "-"):
+			old = completePatchHunkCount(field[1:])
+		case strings.HasPrefix(field, "+"):
+			next = completePatchHunkCount(field[1:])
+		}
+	}
+	return old, next
+}
+
+func completePatchHunkCount(spec string) int {
+	if _, count, ok := strings.Cut(spec, ","); ok {
+		if n, err := strconv.Atoi(count); err == nil {
+			return n
+		}
+		return 0
+	}
+	return 1
 }
 
 func recordCreatedPatchTargets(tracker *FileTracker, missingBefore []string) {
