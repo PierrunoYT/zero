@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -16,12 +17,22 @@ import (
 // allowing both rows would make writes and deletes affect a shared secret.
 // This validator intentionally applies only to raw persisted user config, not
 // to profiles merged from project, environment, or provider-command layers.
+//
+// A repeated folded identity is rejected whether or not the spellings differ.
+// Exact duplicates are just as broken as case variants: resolver merging
+// silently coalesces the rows, and plaintext-key migration writes both values
+// into the same normalized credential-store entry, so the second row's key
+// overwrites the first.
 func ValidatePersistedProviderNames(cfg FileConfig) error {
 	seen := make(map[string]string, len(cfg.Providers))
 	for _, provider := range cfg.Providers {
 		name := strings.TrimSpace(provider.Name)
-		folded := strings.ToLower(name)
-		if previous, ok := seen[folded]; ok && previous != name {
+		folded := credstore.NormalizeProvider(name)
+		previous, ok := seen[folded]
+		if ok && previous == name {
+			return fmt.Errorf("duplicate persisted provider name %q; remove one of the rows in config.json", name)
+		}
+		if ok {
 			return fmt.Errorf("ambiguous persisted provider names %q and %q differ only by case; rename or remove one row in config.json", previous, name)
 		}
 		seen[folded] = name
@@ -80,25 +91,83 @@ func PreflightCatalogProviderLogin(path, catalogID string) error {
 // instead of colliding with it.
 //
 // It applies only when the caller took the catalog's own default name (profile
-// name == catalog id). That is the case where the two spellings are the same
-// provider by construction — a re-setup or re-login of, say, openrouter against
-// a row saved as "OpenRouter" — and where EnsureCatalogProvider already reuses
-// the row on the login path. A user-chosen name is left alone on purpose: there,
-// a case collision with an existing row is a real collision, and silently
-// overwriting the other row would be worse than the error.
+// name == catalog id) AND a persisted row owns that very NAME under a different
+// spelling. That is the case where the two spellings are the same provider by
+// construction — a re-setup or re-login of, say, openrouter against a row saved
+// as "OpenRouter" — and where EnsureCatalogProvider already reuses the row on
+// the login path. A user-chosen name is left alone on purpose: there, a case
+// collision with an existing row is a real collision, and silently overwriting
+// the other row would be worse than the error.
+//
+// Adoption deliberately does NOT follow the catalog id of an arbitrary row.
+// Several profiles may legitimately share one catalog provider — {name:
+// "work-xai", catalogId: "xai"} alongside a plain "xai" — so retargeting the
+// default "xai" profile at whichever row happened to list catalogId "xai" would
+// silently overwrite that row's endpoint, model, and stored key. An exactly
+// spelled existing row also short-circuits: there is nothing to adopt, the
+// caller's own spelling is already the persisted one.
 func AdoptPersistedCatalogProviderName(path string, profile ProviderProfile) (ProviderProfile, error) {
 	catalogID := strings.TrimSpace(profile.CatalogID)
-	if catalogID == "" || !strings.EqualFold(strings.TrimSpace(profile.Name), catalogID) {
+	name := strings.TrimSpace(profile.Name)
+	if catalogID == "" || !strings.EqualFold(name, catalogID) {
 		return profile, nil
 	}
-	canonical, owned, err := PersistedProviderIdentity(path, catalogID)
+	providers, err := persistedProviders(path)
 	if err != nil {
 		return profile, err
 	}
-	if owned {
+	canonical := ""
+	variants := 0
+	for _, row := range providers {
+		rowName := strings.TrimSpace(row.Name)
+		if !strings.EqualFold(rowName, name) {
+			continue
+		}
+		if rowName == name {
+			return profile, nil
+		}
+		canonical = rowName
+		variants++
+	}
+	if variants == 1 {
 		profile.Name = canonical
 	}
 	return profile, nil
+}
+
+// PersistedProviderNames returns the exact name of every row in the persisted
+// user config, in file order. Callers that must reason about the SET of saved
+// rows — e.g. deciding whether removing one row leaves a case variant behind
+// that still reads the same credential-store entry — get the raw names here
+// rather than re-implementing FileConfig parsing.
+func PersistedProviderNames(path string) ([]string, error) {
+	providers, err := persistedProviders(path)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		names = append(names, strings.TrimSpace(provider.Name))
+	}
+	return names, nil
+}
+
+// persistedProviders reads the provider rows out of the user config at path.
+// A missing file is an empty list, not an error: every caller here asks "what
+// is already saved?", and "nothing yet" is a legitimate answer.
+func persistedProviders(path string) ([]ProviderProfile, error) {
+	data, err := os.ReadFile(strings.TrimSpace(path))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	return cfg.Providers, nil
 }
 
 // PersistedProviderIdentity reports whether a persisted user-config row already
@@ -112,28 +181,114 @@ func AdoptPersistedCatalogProviderName(path string, profile ProviderProfile) (Pr
 // so `zero providers use openrouter` is a wrong way to address a saved profile
 // rather than an environment-derived provider.
 func PersistedProviderIdentity(path, identity string) (string, bool, error) {
+	row, match, err := ResolvePersistedProviderIdentity(path, identity)
+	if err != nil || match == PersistedIdentityNone {
+		return "", false, err
+	}
+	return strings.TrimSpace(row.Name), true, nil
+}
+
+// PersistedIdentityMatch says HOW a persisted row was addressed, because the
+// two ways carry different authority. A name match identifies exactly one
+// profile. A catalog-id match identifies "some profile of this kind" — several
+// profiles may legitimately share one catalog provider — so callers that go on
+// to delete credentials must not treat it as proof of ownership.
+type PersistedIdentityMatch uint8
+
+const (
+	// PersistedIdentityNone means no row owns the identity, or a catalog id was
+	// given that more than one row claims (an ambiguous request this package
+	// refuses to guess at).
+	PersistedIdentityNone PersistedIdentityMatch = iota
+	// PersistedIdentityName means a row's own name matched, exactly or as a
+	// case variant.
+	PersistedIdentityName
+	// PersistedIdentityCatalog means the identity matched only the catalog id of
+	// exactly one row.
+	PersistedIdentityCatalog
+)
+
+// ResolvePersistedProviderIdentity finds the persisted user-config row that
+// owns identity and reports how it was addressed.
+//
+// Names win over catalog ids, and an exact name wins over a case variant.
+// Scanning in file order and accepting the first name-OR-catalog hit picked
+// whichever row came first, so `zero auth logout xai` against
+// [{name:"work-xai", catalogId:"xai"}, {name:"xai"}] resolved to "work-xai" —
+// a different profile, with different credentials, than the one named.
+//
+// A catalog id claimed by more than one row resolves to nothing rather than to
+// an arbitrary winner: the caller asked for something the config does not
+// uniquely identify, and guessing there is what let one profile's logout delete
+// a sibling's shared token.
+func ResolvePersistedProviderIdentity(path, identity string) (ProviderProfile, PersistedIdentityMatch, error) {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
-		return "", false, nil
+		return ProviderProfile{}, PersistedIdentityNone, nil
 	}
-	data, err := os.ReadFile(strings.TrimSpace(path))
-	if os.IsNotExist(err) {
-		return "", false, nil
-	}
+	providers, err := persistedProviders(path)
 	if err != nil {
-		return "", false, fmt.Errorf("read config %s: %w", path, err)
+		return ProviderProfile{}, PersistedIdentityNone, err
 	}
-	var cfg FileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", false, fmt.Errorf("invalid config JSON %s: %w", path, err)
-	}
-	for _, provider := range cfg.Providers {
-		name := strings.TrimSpace(provider.Name)
-		if strings.EqualFold(name, identity) || strings.EqualFold(strings.TrimSpace(provider.CatalogID), identity) {
-			return name, true, nil
+	var foldedName *ProviderProfile
+	var catalogRow *ProviderProfile
+	catalogMatches := 0
+	for index := range providers {
+		row := providers[index]
+		name := strings.TrimSpace(row.Name)
+		if name == identity {
+			return row, PersistedIdentityName, nil
+		}
+		if foldedName == nil && strings.EqualFold(name, identity) {
+			match := row
+			foldedName = &match
+		}
+		if strings.EqualFold(strings.TrimSpace(row.CatalogID), identity) {
+			catalogMatches++
+			if catalogRow == nil {
+				match := row
+				catalogRow = &match
+			}
 		}
 	}
-	return "", false, nil
+	if foldedName != nil {
+		return *foldedName, PersistedIdentityName, nil
+	}
+	if catalogMatches == 1 {
+		return *catalogRow, PersistedIdentityCatalog, nil
+	}
+	return ProviderProfile{}, PersistedIdentityNone, nil
+}
+
+// CatalogIdentityExclusive reports whether catalogID is claimed by the row
+// named owner and by nothing else in the persisted config — neither as another
+// row's name nor as another row's catalog id.
+//
+// Credential cleanup uses this before treating the catalog id as one of the
+// target profile's own credential keys. With stored-key "work-xai",
+// stored-key "xai", and keyless "personal-xai" all carrying catalogId "xai",
+// the "xai" token and key belong to whoever logged in under that spelling —
+// deleting them while logging out of "work-xai" takes down a sibling's login.
+func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
+	catalogID = strings.TrimSpace(catalogID)
+	owner = strings.TrimSpace(owner)
+	if catalogID == "" || owner == "" {
+		return false, nil
+	}
+	providers, err := persistedProviders(path)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range providers {
+		name := strings.TrimSpace(row.Name)
+		if name == owner {
+			continue
+		}
+		if strings.EqualFold(name, catalogID) || strings.EqualFold(strings.TrimSpace(row.CatalogID), catalogID) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // PreflightProviderWrite also rejects a new spelling that would share a

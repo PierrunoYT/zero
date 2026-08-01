@@ -16,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/oauth"
 )
 
@@ -442,13 +443,18 @@ func removeSavedProvider(saved []config.ProviderProfile, name string) []config.P
 }
 
 // caseVariantProviderNameAfterRemoval returns the exact name of a row in cfg
-// that folds to name (a case-only variant surviving the removal), and
-// whether one was found.
+// that shares name's CREDENTIAL-STORE identity (a case-only variant surviving
+// the removal that reads the same stored secret), and whether one was found.
+//
+// Matching uses credstore.NormalizeProvider, the store's own equivalence rule,
+// for the reason spelled out on the CLI twin (caseVariantProviderName in
+// internal/cli/provider_onboarding.go): strings.EqualFold is a strictly wider
+// relation and would promise a survivor a key it cannot look up.
 func caseVariantProviderNameAfterRemoval(cfg config.FileConfig, name string) (string, bool) {
-	name = strings.TrimSpace(name)
+	target := credstore.NormalizeProvider(name)
 	for _, provider := range cfg.Providers {
 		providerName := strings.TrimSpace(provider.Name)
-		if strings.EqualFold(providerName, name) {
+		if credstore.NormalizeProvider(providerName) == target {
 			return providerName, true
 		}
 	}

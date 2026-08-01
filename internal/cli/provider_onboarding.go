@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/credstore"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
 )
@@ -74,6 +75,13 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return writeAppError(stderr, providerMutationError(configPath, options.name, err), exitCrash)
 	}
 	override := activeProviderEnvOverride(deps.getenv, cfg.ActiveProvider)
+	// A case-only difference is only harmless when it demonstrably selects the
+	// row just written; a separate exact-case profile from project config makes
+	// it a real override of a real, different provider.
+	if override != "" && strings.EqualFold(override, strings.TrimSpace(cfg.ActiveProvider)) &&
+		activeProviderEnvOverrideSelectsSaved(deps, configPath, cfg.ActiveProvider) {
+		override = ""
+	}
 	// An override only becomes the effective provider if Zero can actually
 	// resolve it; a stale value names nothing and fails the next resolution.
 	overrideResolution := activeProviderOverrideAbsent
@@ -142,26 +150,68 @@ func (resolution activeProviderOverrideResolution) resolves() any {
 }
 
 // activeProviderEnvOverride returns the ZERO_PROVIDER value when it is set and
-// names a DIFFERENT provider than the one just selected, meaning the saved
-// `providers use` selection will NOT be the effective active provider until the
+// names a DIFFERENT spelling than the one just selected, meaning the saved
+// `providers use` selection may NOT be the effective active provider until the
 // env var is unset. applyEnv (resolver.go) makes ZERO_PROVIDER win over
 // config.json unconditionally, so reporting the write as a plain success reads as
 // a switch that silently has no effect (issue #721). Empty when nothing overrides
 // (including when getenv is nil, e.g. a test that did not inject the environment).
+//
+// A case-only difference is NOT assumed here to name the same provider — see
+// activeProviderEnvOverrideSelectsSaved, which resolves that question instead of
+// guessing at it.
 func activeProviderEnvOverride(getenv func(string) string, selected string) string {
 	if getenv == nil {
 		return ""
 	}
 	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
-	// Fold case: resolution selects the active row case-insensitively, so
-	// ZERO_PROVIDER=WORK against a saved "work" names the same provider the write
-	// just selected. Warning that the switch "has no effect" there described a
-	// conflict that does not exist — the runtime lands on exactly the row the user
-	// asked for. Only a genuinely different provider is an override.
-	if override == "" || strings.EqualFold(override, strings.TrimSpace(selected)) {
+	if override == "" || override == strings.TrimSpace(selected) {
 		return ""
 	}
 	return override
+}
+
+// activeProviderEnvOverrideSelectsSaved reports whether a case-only ZERO_PROVIDER
+// difference actually lands on the row `providers use` just wrote.
+//
+// Folding the comparison outright was wrong: user config resolves the active row
+// case-insensitively, but project config and provider commands contribute their
+// own rows, and resolution then selects an exact-case match. With a workspace
+// profile literally named "WORK", ZERO_PROVIDER=WORK selects THAT row — different
+// credentials, different endpoint — while `zero providers use work` reported a
+// clean switch with no override at all. So the suppression is granted only when
+// resolution proves the env value produces the very spelling just selected.
+func activeProviderEnvOverrideSelectsSaved(deps appDeps, configPath string, selected string) bool {
+	resolved, ok := resolveActiveProviderWithoutProviderCommand(deps, configPath)
+	if !ok {
+		return false
+	}
+	return resolved == strings.TrimSpace(selected)
+}
+
+// resolveActiveProviderWithoutProviderCommand resolves the effective active
+// provider name without running ZERO_PROVIDER_COMMAND. Provider commands are
+// arbitrary external programs and `providers use` must remain a config-only
+// operation, so a configured one makes the answer unknowable here (false).
+func resolveActiveProviderWithoutProviderCommand(deps appDeps, configPath string) (string, bool) {
+	if deps.getenv != nil && strings.TrimSpace(deps.getenv(config.ProviderCommandEnv)) != "" {
+		return "", false
+	}
+	workspaceRoot, err := resolveWorkspaceRoot("", deps)
+	if err != nil {
+		return "", false
+	}
+	options, err := config.DefaultResolveOptions(workspaceRoot)
+	if err != nil {
+		return "", false
+	}
+	options.UserConfigPath = configPath
+	options.ProviderCommand = ""
+	resolved, err := config.Resolve(options)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(resolved.ActiveProvider), true
 }
 
 // activeProviderEnvOverrideResolution checks whether ZERO_PROVIDER resolves
@@ -173,24 +223,14 @@ func activeProviderEnvOverrideResolution(deps appDeps, configPath string, overri
 	if deps.getenv != nil && strings.TrimSpace(deps.getenv(config.ProviderCommandEnv)) != "" {
 		return activeProviderOverrideDeferred
 	}
-	workspaceRoot, err := resolveWorkspaceRoot("", deps)
-	if err != nil {
-		return activeProviderOverrideUnresolved
-	}
-	options, err := config.DefaultResolveOptions(workspaceRoot)
-	if err != nil {
-		return activeProviderOverrideUnresolved
-	}
-	options.UserConfigPath = configPath
-	options.ProviderCommand = ""
-	resolved, err := config.Resolve(options)
+	resolved, ok := resolveActiveProviderWithoutProviderCommand(deps, configPath)
 	// Fold case: resolution selects the active row case-insensitively and reports
 	// the row's canonical persisted spelling, so ZERO_PROVIDER=openrouter against
 	// a saved "OpenRouter" resolves to "OpenRouter". Comparing exactly called that
 	// a failed override and told the user Zero could not start with it, which was
 	// the opposite of true. A fold cannot report a false success here: if the
 	// active row folds to the override, the override is what selected it.
-	if err != nil || !strings.EqualFold(strings.TrimSpace(resolved.ActiveProvider), override) {
+	if !ok || !strings.EqualFold(resolved, override) {
 		return activeProviderOverrideUnresolved
 	}
 	return activeProviderOverrideResolved
@@ -500,26 +540,35 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	// Decide up front whether a sibling row will survive this removal holding
+	// the SAME credential-store identity, because that decides what happens to
+	// the shared secret: hand the marker over, or delete the key outright.
+	survivor, survivorSurvives, err := survivingCaseVariantProviderName(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	cfg, err := config.RemoveProvider(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, providerMutationError(configPath, name, err), exitCrash)
 	}
+	// The marker handoff can only run AFTER the removal, not as a transaction
+	// around it: while both case-variant rows are present the config is
+	// ambiguous, and writeConfigFile rejects every write against it — removing
+	// one row is precisely the repair. So the window is real, and the command
+	// reports it as a partial failure (nonzero below) instead of success.
+	//
 	// Delete the key from the store BESIDE the config being edited — the same
 	// store setup/rename write to — not the default-path store, so a
-	// non-default config path cannot leave the encrypted key behind.
+	// non-default config path cannot leave the encrypted key behind. Skipped
+	// when a case variant survives: that row keeps reading the shared entry.
 	keyRemoved := false
 	var keyErr error
 	markerTransferFailed := false
-	if survivor, ok := caseVariantProviderName(cfg, name); ok {
+	if survivorSurvives {
 		if hadBefore && before.APIKeyStored {
-			if survivorRow, foundSurvivor, err := config.ProviderRow(configPath, survivor); err != nil {
+			if _, err := config.TransferProviderAPIKeyStoredMarker(configPath, survivor); err != nil {
 				keyErr = err
 				markerTransferFailed = true
-			} else if foundSurvivor && !survivorRow.APIKeyStored {
-				if _, err := config.TransferProviderAPIKeyStoredMarker(configPath, survivor); err != nil {
-					keyErr = err
-					markerTransferFailed = true
-				}
 			}
 		}
 	} else {
@@ -539,6 +588,11 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
 		}
+		// A failed handoff left the survivor unable to reach the shared key.
+		// Scripts must not read that as a completed removal.
+		if markerTransferFailed {
+			return exitCrash
+		}
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintf(stdout, "Removed provider %s\n", name); err != nil {
@@ -547,7 +601,7 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if keyErr != nil {
 		warning := "its stored API key could not be deleted and remains in the credential store"
 		if markerTransferFailed {
-			warning = "the stored API key marker could not be transferred to the surviving case-variant provider, so the shared key may be unreachable"
+			warning = fmt.Sprintf("the stored API key marker could not be handed to %s, which shares its credential entry, so the shared key is now unreachable", survivor)
 		}
 		if _, err := fmt.Fprintf(stderr, "warning: %s: %v\n", warning, keyErr); err != nil {
 			return exitCrash
@@ -566,6 +620,9 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 			return exitCrash
 		}
 	}
+	if markerTransferFailed {
+		return exitCrash
+	}
 	return exitSuccess
 }
 
@@ -580,17 +637,34 @@ func removeStoredProviderKeyAt(configPath string, provider string) (bool, error)
 	return store.Delete(provider)
 }
 
-// caseVariantProviderName returns the exact name of a row in cfg that folds
-// to name (a case-only variant), and whether one was found.
-func caseVariantProviderName(cfg config.FileConfig, name string) (string, bool) {
-	name = strings.TrimSpace(name)
-	for _, provider := range cfg.Providers {
-		providerName := strings.TrimSpace(provider.Name)
-		if strings.EqualFold(providerName, name) {
-			return providerName, true
+// survivingCaseVariantProviderName returns the exact name of another persisted
+// row that shares name's CREDENTIAL-STORE identity — a case-only variant that
+// will still read the same stored secret once name's row is gone — and whether
+// one was found. config.RemoveProvider matches its row exactly, so any row with
+// a different exact spelling survives.
+//
+// The comparison is credstore.NormalizeProvider, not strings.EqualFold, because
+// only the former is the store's own equivalence rule. Unicode case folding
+// equates "s" and "ſ" while strings.ToLower does not, so EqualFold would let
+// `providers remove s` skip deleting the key and hand the marker to "ſ", whose
+// lookup uses a different store entry — orphaning the secret and leaving the
+// survivor with a marker pointing at nothing.
+func survivingCaseVariantProviderName(configPath string, name string) (string, bool, error) {
+	names, err := config.PersistedProviderNames(configPath)
+	if err != nil {
+		return "", false, err
+	}
+	removed := strings.TrimSpace(name)
+	target := credstore.NormalizeProvider(removed)
+	for _, candidate := range names {
+		if candidate == removed {
+			continue
+		}
+		if credstore.NormalizeProvider(candidate) == target {
+			return candidate, true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // runProvidersRename renames a saved provider profile, migrating its stored

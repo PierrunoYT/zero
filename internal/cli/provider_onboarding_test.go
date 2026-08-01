@@ -535,14 +535,12 @@ func TestRunProvidersUseNoWarnWithoutEnvOverride(t *testing.T) {
 	}
 }
 
-// TestActiveProviderEnvOverrideFoldsCaseAgainstTheSelection replaces the earlier
-// TestActiveProviderEnvOverrideTreatsCaseVariantAsDistinct, which locked in a
-// warning jatmn showed to be misleading: resolution selects the active row
-// case-insensitively, so ZERO_PROVIDER=WORK against a saved "work" lands on
-// exactly the row `providers use work` just selected. Telling the user their
-// switch stays overridden described a conflict that does not exist. A genuinely
-// different provider must still warn.
-func TestActiveProviderEnvOverrideFoldsCaseAgainstTheSelection(t *testing.T) {
+// TestActiveProviderEnvOverrideReportsEveryDistinctSpelling pins the pure
+// function's contract after jatmn's #725 round: a case-only difference is no
+// longer silently treated as "the same provider". Deciding that needs the
+// resolver (see TestRunProvidersUseCaseVariantEnvOverrideFollowsResolution),
+// so this layer reports every spelling that is not literally the selection.
+func TestActiveProviderEnvOverrideReportsEveryDistinctSpelling(t *testing.T) {
 	getenv := func(value string) func(string) string {
 		return func(key string) string {
 			if key == config.ActiveProviderEnv {
@@ -551,12 +549,67 @@ func TestActiveProviderEnvOverrideFoldsCaseAgainstTheSelection(t *testing.T) {
 			return ""
 		}
 	}
-	if override := activeProviderEnvOverride(getenv("WORK"), "work"); override != "" {
-		t.Fatalf("activeProviderEnvOverride() = %q, want no override for a case variant of the selection", override)
+	if override := activeProviderEnvOverride(getenv("work"), "work"); override != "" {
+		t.Fatalf("activeProviderEnvOverride() = %q, want no override when the env names the selection exactly", override)
+	}
+	if override := activeProviderEnvOverride(getenv("WORK"), "work"); override != "WORK" {
+		t.Fatalf("activeProviderEnvOverride() = %q, want the case-distinct spelling reported to the resolver", override)
 	}
 	if override := activeProviderEnvOverride(getenv("fast"), "work"); override != "fast" {
 		t.Fatalf("activeProviderEnvOverride() = %q, want the genuinely different provider reported", override)
 	}
+}
+
+// TestRunProvidersUseCaseVariantEnvOverrideFollowsResolution is the regression
+// test for jatmn's #725 finding that a case-distinct ZERO_PROVIDER was hidden
+// unconditionally. Folding is right only when the env value lands on the row
+// `providers use` just wrote; a project config contributing a separate
+// exact-case "WORK" profile makes it a real override of a different provider,
+// with different credentials, and that must still be reported.
+func TestRunProvidersUseCaseVariantEnvOverrideFollowsResolution(t *testing.T) {
+	run := func(t *testing.T, projectProviders []config.ProviderProfile) string {
+		t.Helper()
+		// The resolver reads the real process environment, so the override has
+		// to be set for real, and the user config has to sit at the default path.
+		t.Setenv(config.ActiveProviderEnv, "WORK")
+		configPath := providersUseOverrideConfigAtDefaultUserPath(t)
+		workspace := t.TempDir()
+		if len(projectProviders) > 0 {
+			projectPath := filepath.Join(workspace, ".zero", "config.json")
+			writeProviderOnboardingConfig(t, projectPath, config.FileConfig{Providers: projectProviders})
+		}
+		deps := providerSetupDeps(configPath)
+		deps.getwd = func() (string, error) { return workspace, nil }
+		deps.getenv = func(key string) string {
+			if key == config.ActiveProviderEnv {
+				return "WORK"
+			}
+			return ""
+		}
+		var stdout, stderr bytes.Buffer
+		if code := runWithDeps([]string{"providers", "use", "work"}, &stdout, &stderr, deps); code != exitSuccess {
+			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+		}
+		return stderr.String()
+	}
+
+	t.Run("case variant of the selection", func(t *testing.T) {
+		if note := run(t, nil); note != "" {
+			t.Fatalf("an override that resolves to the selected row must not warn: %q", note)
+		}
+	})
+
+	t.Run("case-distinct project profile", func(t *testing.T) {
+		note := run(t, []config.ProviderProfile{{
+			Name:         "WORK",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			Model:        "example-model",
+		}})
+		if !strings.Contains(note, "WORK") || !strings.Contains(note, config.ActiveProviderEnv) {
+			t.Fatalf("a separate exact-case profile must be reported as an override: %q", note)
+		}
+	})
 }
 
 func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
@@ -946,5 +999,52 @@ func TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant(t *testing.T
 	}
 	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "WORK" || !cfg.Providers[0].APIKeyStored {
 		t.Fatalf("survivor must inherit apiKeyStored marker, got %+v", cfg.Providers)
+	}
+}
+
+// TestRunProvidersRemoveUsesCredentialStoreEquivalenceForSurvivors covers
+// jatmn's #725 finding that survivor detection compared with strings.EqualFold
+// while the credential store keys entries with trimmed strings.ToLower. The two
+// relations differ: Unicode case folding equates "s" and "ſ", ToLower does not.
+// Both spellings therefore pass persisted-name validation as separate rows with
+// separate store entries, but the EqualFold check called "ſ" a survivor of
+// removing "s" — skipping the key deletion (orphaning the secret) and handing
+// the marker to a row whose lookup uses a different entry entirely.
+func TestRunProvidersRemoveUsesCredentialStoreEquivalenceForSurvivors(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	seed := `{"activeProvider":"s","providers":[{"name":"s","apiKeyStored":true},{"name":"\u017f"}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("s", "long-s-is-not-s"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"providers", "remove", "s", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("remove failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if _, ok, err := store.Get("s"); err != nil || ok {
+		t.Fatalf("key = ok:%v err:%v; the removed row owned its own store entry, which must be deleted", ok, err)
+	}
+	var payload struct {
+		KeyRemoved bool `json:"keyRemoved"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || !payload.KeyRemoved {
+		t.Fatalf("payload = %s, err = %v; want keyRemoved true", stdout.String(), err)
+	}
+	cfg := readFileConfig(t, configPath)
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "\u017f" {
+		t.Fatalf("providers = %+v, want only the distinct long-s row", cfg.Providers)
+	}
+	if cfg.Providers[0].APIKeyStored {
+		t.Fatal("a row with its own credential-store identity must not inherit another row's marker")
 	}
 }

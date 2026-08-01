@@ -751,3 +751,105 @@ func readCLIConfigFixture(t *testing.T, path string) config.FileConfig {
 	}
 	return cfg
 }
+
+// TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone covers jatmn's #725
+// finding that logout cleanup was scoped by catalog id rather than by proven
+// profile ownership. Catalog ids are shared by design: stored-key "work-xai",
+// stored-key "xai", and keyless "personal-xai" can all carry catalogId "xai".
+// Logging out "work-xai" deleted the shared "xai" OAuth token and the "xai"
+// profile's API key — another profile's credentials — while clearing only
+// work-xai's own marker.
+func TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone(t *testing.T) {
+	storePath := withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	configData := []byte(`{"providers":[` +
+		`{"name":"work-xai","catalogId":"xai","apiKeyStored":true},` +
+		`{"name":"xai","catalogId":"xai","apiKeyStored":true},` +
+		`{"name":"personal-xai","catalogId":"xai"}]}`)
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "shared"}); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("xai", "sibling-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("work-xai", "own-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "logout", "work-xai"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+	if code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if _, ok, err := keyStore.Get("work-xai"); err != nil || ok {
+		t.Fatalf("the profile's own API key must be deleted: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := store.Load(oauth.ProviderKey("xai")); err != nil || !ok {
+		t.Fatalf("a catalog token three profiles can use must survive one profile's logout: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := keyStore.Get("xai"); err != nil || !ok {
+		t.Fatalf("the sibling xai profile's API key must survive: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestRunAuthLogoutPrefersTheExactlyNamedProfile is the other half of the same
+// finding: identity resolution took the first row matching name OR catalog id,
+// so `zero auth logout xai` retargeted an earlier {name:"work-xai",
+// catalogId:"xai"} row and cleared that profile's marker instead.
+func TestRunAuthLogoutPrefersTheExactlyNamedProfile(t *testing.T) {
+	withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	configData := []byte(`{"providers":[` +
+		`{"name":"work-xai","catalogId":"xai","apiKeyStored":true},` +
+		`{"name":"xai","catalogId":"xai","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("work-xai", "work-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("xai", "own-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "logout", "xai"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if _, ok, err := keyStore.Get("xai"); err != nil || ok {
+		t.Fatalf("the exactly named profile's key must be deleted: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := keyStore.Get("work-xai"); err != nil || !ok {
+		t.Fatalf("an earlier catalog sibling must not be logged out instead: ok=%v err=%v", ok, err)
+	}
+	cfg := readFileConfig(t, configPath)
+	for _, provider := range cfg.Providers {
+		if provider.Name == "xai" && provider.APIKeyStored {
+			t.Fatal("the named profile's apiKeyStored marker must be cleared")
+		}
+		if provider.Name == "work-xai" && !provider.APIKeyStored {
+			t.Fatal("the sibling profile's apiKeyStored marker must be left alone")
+		}
+	}
+}

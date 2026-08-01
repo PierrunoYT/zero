@@ -1233,3 +1233,161 @@ func TestEditProviderRejectsCollisionAndUnknown(t *testing.T) {
 		t.Fatalf("config was rewritten by a rejected edit")
 	}
 }
+
+// TestValidatePersistedProviderNamesRejectsExactDuplicates covers jatmn's #725
+// finding: the validator only rejected a repeated folded name when the
+// SPELLINGS differed, so two rows literally named "work" passed. That breaks
+// the same one-credential-per-folded-name invariant the case check protects —
+// resolver merging coalesces the rows, and plaintext-key migration writes both
+// values into one normalized credential-store entry, overwriting the first key.
+func TestValidatePersistedProviderNamesRejectsExactDuplicates(t *testing.T) {
+	for name, providers := range map[string][]ProviderProfile{
+		"identical spellings": {{Name: "work"}, {Name: "work"}},
+		"same after trimming": {{Name: "work"}, {Name: "  work  "}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidatePersistedProviderNames(FileConfig{Providers: providers})
+			if err == nil {
+				t.Fatal("a repeated folded provider identity must be rejected")
+			}
+			if want := `duplicate persisted provider name "work"`; !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want it to contain %q", err, want)
+			}
+		})
+	}
+	if err := ValidatePersistedProviderNames(FileConfig{Providers: []ProviderProfile{{Name: "work"}, {Name: "fast"}}}); err != nil {
+		t.Fatalf("distinct names must validate: %v", err)
+	}
+}
+
+// TestAdoptPersistedCatalogProviderNameIgnoresCatalogSiblings covers jatmn's
+// #725 finding: adoption followed PersistedProviderIdentity, which returned the
+// first row sharing the catalog id. Several profiles may legitimately use one
+// catalog provider, so adding the default "xai" profile silently retargeted an
+// existing {name:"work-xai", catalogId:"xai"} row and would have overwritten its
+// endpoint, model, and stored key.
+func TestAdoptPersistedCatalogProviderNameIgnoresCatalogSiblings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "work-xai", CatalogID: "xai", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v1", Model: "m"},
+		},
+	}, 0o600)
+
+	adopted, err := AdoptPersistedCatalogProviderName(path, ProviderProfile{Name: "xai", CatalogID: "xai"})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if adopted.Name != "xai" {
+		t.Fatalf("Name = %q, want the default spelling kept — a catalog sibling is not the same profile", adopted.Name)
+	}
+}
+
+// TestAdoptPersistedCatalogProviderNameFollowsCaseVariantOfTheDefaultName is the
+// behaviour adoption exists for: a re-setup of "openrouter" against a row the
+// user saved as "OpenRouter" must UPDATE that row instead of colliding with it.
+func TestAdoptPersistedCatalogProviderNameFollowsCaseVariantOfTheDefaultName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "OpenRouter", CatalogID: "openrouter", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://openrouter.ai/api/v1", Model: "m"},
+		},
+	}, 0o600)
+
+	adopted, err := AdoptPersistedCatalogProviderName(path, ProviderProfile{Name: "openrouter", CatalogID: "openrouter"})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if adopted.Name != "OpenRouter" {
+		t.Fatalf("Name = %q, want the persisted case variant adopted", adopted.Name)
+	}
+}
+
+// TestResolvePersistedProviderIdentityPrefersNames covers jatmn's #725 finding
+// that identity resolution took the first row matching EITHER field, so a
+// catalog id on an earlier row outranked a later row with the exact name.
+func TestResolvePersistedProviderIdentityPrefersNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, path, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "work-xai", CatalogID: "xai"},
+			{Name: "xai", CatalogID: "xai"},
+		},
+	}, 0o600)
+
+	t.Run("exact name beats an earlier catalog id", func(t *testing.T) {
+		row, match, err := ResolvePersistedProviderIdentity(path, "xai")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if match != PersistedIdentityName || row.Name != "xai" {
+			t.Fatalf("row = %q match = %v, want the exactly named row", row.Name, match)
+		}
+	})
+
+	t.Run("a shared catalog id resolves to nothing", func(t *testing.T) {
+		_, match, err := ResolvePersistedProviderIdentity(path, "XAI")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		// "XAI" folds to the "xai" row's NAME, so that wins; the point of the
+		// exclusivity rule shows on a catalog id nothing is named after.
+		if match != PersistedIdentityName {
+			t.Fatalf("match = %v, want the case-variant name match", match)
+		}
+	})
+
+	t.Run("unique catalog id still resolves", func(t *testing.T) {
+		unique := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, unique, FileConfig{
+			Providers: []ProviderProfile{{Name: "my-router", CatalogID: "openrouter"}},
+		}, 0o600)
+		row, match, err := ResolvePersistedProviderIdentity(unique, "openrouter")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if match != PersistedIdentityCatalog || row.Name != "my-router" {
+			t.Fatalf("row = %q match = %v, want the sole catalog owner", row.Name, match)
+		}
+	})
+
+	t.Run("an ambiguous catalog id resolves to nothing", func(t *testing.T) {
+		shared := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, shared, FileConfig{
+			Providers: []ProviderProfile{
+				{Name: "work-xai", CatalogID: "xai"},
+				{Name: "personal-xai", CatalogID: "xai"},
+			},
+		}, 0o600)
+		if _, match, err := ResolvePersistedProviderIdentity(shared, "xai"); err != nil || match != PersistedIdentityNone {
+			t.Fatalf("match = %v err = %v, want no guess at a shared catalog id", match, err)
+		}
+	})
+}
+
+// TestCatalogIdentityExclusive guards the rule credential cleanup depends on:
+// a catalog id claimed by any other row is not the target profile's own key.
+func TestCatalogIdentityExclusive(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, shared, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "work-xai", CatalogID: "xai"},
+			{Name: "xai", CatalogID: "xai"},
+			{Name: "personal-xai", CatalogID: "xai"},
+		},
+	}, 0o600)
+	if exclusive, err := CatalogIdentityExclusive(shared, "xai", "work-xai"); err != nil || exclusive {
+		t.Fatalf("exclusive = %v err = %v, want false for a catalog id three rows claim", exclusive, err)
+	}
+
+	sole := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFixture(t, sole, FileConfig{
+		Providers: []ProviderProfile{
+			{Name: "my-router", CatalogID: "openrouter"},
+			{Name: "work", CatalogID: "xai"},
+		},
+	}, 0o600)
+	if exclusive, err := CatalogIdentityExclusive(sole, "openrouter", "my-router"); err != nil || !exclusive {
+		t.Fatalf("exclusive = %v err = %v, want true when only the owner claims the id", exclusive, err)
+	}
+}

@@ -509,13 +509,20 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// credential this logout can find for the requested provider. Only the
 	// config WRITE below (clearing the apiKeyStored marker) needs a valid config
 	// and is gated on configErr.
+	//
+	// Identity resolution prefers an exact name over a case variant, and a name
+	// over a catalog id (config.ResolvePersistedProviderIdentity). Taking the
+	// first row that matched either field let `logout xai` retarget a
+	// {name:"work-xai", catalogId:"xai"} row — a different profile, with
+	// different credentials, than the one named.
 	configProvider := provider
-	if canonical, owned, identityErr := config.PersistedProviderIdentity(configPath, provider); identityErr != nil {
+	target, identityMatch, identityErr := config.ResolvePersistedProviderIdentity(configPath, provider)
+	if identityErr != nil {
 		if configErr == nil {
 			configErr = identityErr
 		}
-	} else if owned {
-		configProvider = canonical
+	} else if identityMatch != config.PersistedIdentityNone {
+		configProvider = strings.TrimSpace(target.Name)
 	}
 	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
@@ -528,12 +535,28 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// stores its token under "xai"; `zero auth logout my-xai` must delete that
 	// too, or the login silently survives. The same candidate set is used below
 	// for the API key store, which has the identical asymmetry.
+	//
+	// The catalog id joins that set only when the resolved profile is the ONLY
+	// row claiming it. Catalog ids are shared by design — stored-key "work-xai",
+	// stored-key "xai", and keyless "personal-xai" can all carry catalogId
+	// "xai" — so expanding unconditionally made `logout work-xai` delete the
+	// "xai" token and the "xai" profile's API key while clearing only
+	// work-xai's marker. When the id is shared, the user has to name the
+	// profile whose credential they mean.
 	credentialCandidates := []string{provider}
 	if configProvider != provider {
 		credentialCandidates = append(credentialCandidates, configProvider)
 	}
-	if row, found, rowErr := config.ProviderRow(configPath, configProvider); rowErr == nil && found {
-		credentialCandidates = appendUniqueOAuthCandidate(credentialCandidates, row.CatalogID)
+	if identityMatch != config.PersistedIdentityNone {
+		catalogID := strings.TrimSpace(target.CatalogID)
+		exclusive, exclusiveErr := config.CatalogIdentityExclusive(configPath, catalogID, configProvider)
+		if exclusiveErr != nil {
+			if configErr == nil {
+				configErr = exclusiveErr
+			}
+		} else if exclusive {
+			credentialCandidates = appendUniqueOAuthCandidate(credentialCandidates, catalogID)
+		}
 	}
 	removed := false
 	for _, candidate := range credentialCandidates {
