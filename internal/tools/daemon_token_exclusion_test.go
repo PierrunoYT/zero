@@ -204,6 +204,136 @@ func TestApplyPatchDeniesQuotedDaemonTokenPathWithSpaces(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
+	original := []byte("bridge-secret\x00original\n")
+	for _, tc := range []struct {
+		name              string
+		tokenName         string
+		patch             string
+		destination       string
+		wantControlSource []byte
+		wantControlTarget []byte
+	}{
+		{
+			name:      "header-only copy",
+			tokenName: "bridge token",
+			patch: "diff --git a/bridge token b/exposed-token\n" +
+				"similarity index 100%\n" +
+				"copy from bridge token\n" +
+				"copy to exposed-token\n",
+			destination:       "exposed-token",
+			wantControlSource: original,
+			wantControlTarget: original,
+		},
+		{
+			name:      "header-only rename",
+			tokenName: "bridge token",
+			patch: "diff --git a/bridge token b/renamed-token\n" +
+				"similarity index 100%\n" +
+				"rename from bridge token\n" +
+				"rename to renamed-token\n",
+			destination:       "renamed-token",
+			wantControlTarget: original,
+		},
+		{
+			name:      "header-only rename aliases",
+			tokenName: "bridge token",
+			patch: "diff --git a/bridge token b/alias-renamed-token\n" +
+				"similarity index 100%\n" +
+				"rename old bridge token\n" +
+				"rename new alias-renamed-token\n",
+			destination:       "alias-renamed-token",
+			wantControlTarget: original,
+		},
+		{
+			name:      "header-only copy preserves leading space",
+			tokenName: " bridge-token",
+			patch: "diff --git a/ bridge-token b/leading-space-copy\n" +
+				"similarity index 100%\n" +
+				"copy from  bridge-token\n" +
+				"copy to leading-space-copy\n",
+			destination:       "leading-space-copy",
+			wantControlSource: original,
+			wantControlTarget: original,
+		},
+		{
+			name:      "binary modification",
+			tokenName: "bridge token",
+			patch: "diff --git a/bridge token b/bridge token\n" +
+				"index 6e4018bb778ca15e70706fe1f7a4c22e762f37b6..d3eae57ec6ad245ec7ab173e28141ac2f87cca68 100644\n" +
+				"GIT binary patch\n" +
+				"literal 23\n" +
+				"ecmYc+DM?JuPA$?+Ni0cZ$jwj5Ov_A7;Q|0@R|sMN\n\n" +
+				"literal 23\n" +
+				"ecmYc)%1lX5)h$j<E=nz7$S=xF&&*5A;Q|0@YY2b<\n\n",
+			wantControlSource: []byte("attacker-data\x00modified\n"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Prove the fixture is a valid patch with the stated effect. The protected
+			// case below is rejected before git runs, so without this control an
+			// accidentally invalid regression fixture could pass vacuously.
+			control := t.TempDir()
+			if err := os.WriteFile(filepath.Join(control, tc.tokenName), original, 0o600); err != nil {
+				t.Fatalf("write control token: %v", err)
+			}
+			controlRegistry := NewRegistry()
+			controlRegistry.Register(NewScopedApplyPatchTool(control, nil))
+			controlResult := controlRegistry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+				"patch": tc.patch,
+			}, RunOptions{PermissionGranted: true})
+			if controlResult.Status != StatusOK {
+				t.Fatalf("control patch is invalid: %s", controlResult.Output)
+			}
+			controlSource, sourceErr := os.ReadFile(filepath.Join(control, tc.tokenName))
+			if tc.wantControlSource == nil {
+				if !os.IsNotExist(sourceErr) {
+					t.Fatalf("control source still exists after rename: contents=%q err=%v", controlSource, sourceErr)
+				}
+			} else if sourceErr != nil || string(controlSource) != string(tc.wantControlSource) {
+				t.Fatalf("control source: contents=%q err=%v", controlSource, sourceErr)
+			}
+			if tc.destination != "" {
+				controlTarget, err := os.ReadFile(filepath.Join(control, tc.destination))
+				if err != nil || string(controlTarget) != string(tc.wantControlTarget) {
+					t.Fatalf("control target: contents=%q err=%v", controlTarget, err)
+				}
+			}
+
+			ws, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("EvalSymlinks: %v", err)
+			}
+			token := filepath.Join(ws, tc.tokenName)
+			if err := os.WriteFile(token, original, 0o600); err != nil {
+				t.Fatalf("write token: %v", err)
+			}
+			t.Setenv(remote.EnvToken, "")
+			t.Setenv(remote.EnvTokenFile, token)
+			engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: ws, Policy: sandbox.DefaultPolicy()})
+
+			registry := NewRegistry()
+			registry.Register(NewScopedApplyPatchTool(ws, nil))
+			result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+				"patch": tc.patch,
+			}, RunOptions{Sandbox: engine, PermissionGranted: true})
+			if result.Status == StatusOK || !strings.Contains(result.Output, "remote bridge token") {
+				t.Fatalf("apply_patch: status=%s output=%q, want bridge-token denial", result.Status, result.Output)
+			}
+
+			contents, err := os.ReadFile(token)
+			if err != nil || string(contents) != string(original) {
+				t.Fatalf("token changed after denied patch: contents=%q err=%v", contents, err)
+			}
+			if tc.destination != "" {
+				if _, err := os.Stat(filepath.Join(ws, tc.destination)); !os.IsNotExist(err) {
+					t.Fatalf("denied patch created %q: err=%v", tc.destination, err)
+				}
+			}
+		})
+	}
+}
+
 // TestDaemonTokenAliasesDeniedEndToEnd covers the in-process tools, which are
 // the layer that can close inode aliases: they see every requested path before
 // opening it, so a symlink or hard link to the token resolves back to the
