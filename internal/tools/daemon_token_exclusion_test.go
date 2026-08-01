@@ -171,6 +171,39 @@ func TestEngineDeniesDaemonTokenFileTools(t *testing.T) {
 	}
 }
 
+func TestApplyPatchDeniesQuotedDaemonTokenPathWithSpaces(t *testing.T) {
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(ws, "bridge token")
+	if err := os.WriteFile(token, []byte("bridge-secret\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	t.Setenv(remote.EnvToken, "")
+	t.Setenv(remote.EnvTokenFile, token)
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: ws, Policy: sandbox.DefaultPolicy()})
+
+	registry := NewRegistry()
+	registry.Register(NewScopedApplyPatchTool(ws, nil))
+	patch := "diff --git \"a/bridge token\" \"b/bridge token\"\n" +
+		"--- \"a/bridge token\"\n" +
+		"+++ \"b/bridge token\"\n" +
+		"@@ -1 +1 @@\n" +
+		"-bridge-secret\n" +
+		"+attacker-controlled\n"
+	result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+		"patch": patch,
+	}, RunOptions{Sandbox: engine, PermissionGranted: true})
+	if result.Status == StatusOK || !strings.Contains(result.Output, "remote bridge token") {
+		t.Fatalf("apply_patch on quoted protected path: status=%s output=%q, want bridge-token denial", result.Status, result.Output)
+	}
+	contents, err := os.ReadFile(token)
+	if err != nil || string(contents) != "bridge-secret\n" {
+		t.Fatalf("token changed after denied patch: contents=%q err=%v", contents, err)
+	}
+}
+
 // TestDaemonTokenAliasesDeniedEndToEnd covers the in-process tools, which are
 // the layer that can close inode aliases: they see every requested path before
 // opening it, so a symlink or hard link to the token resolves back to the

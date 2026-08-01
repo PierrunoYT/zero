@@ -325,13 +325,29 @@ func patchHeaderPaths(patch string) []string {
 			oldRemaining, newRemaining = parsePatchHunkCounts(line)
 			inHunk = oldRemaining > 0 || newRemaining > 0
 		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				paths = append(paths, stripPatchPrefix(fields[1]))
+			if path := patchFileHeaderPath(line); path != "" {
+				paths = append(paths, stripPatchPrefix(path))
 			}
 		}
 	}
 	return paths
+}
+
+// patchFileHeaderPath mirrors the apply_patch parser's handling of unified-diff
+// file headers: paths may be C-quoted and may contain spaces, while an optional
+// timestamp is separated by a tab.
+func patchFileHeaderPath(line string) string {
+	rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
+	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
+		rest = rest[:tab]
+	}
+	rest = strings.TrimSpace(rest)
+	if len(rest) >= 2 && rest[0] == '"' && rest[len(rest)-1] == '"' {
+		if unquoted, err := strconv.Unquote(rest); err == nil {
+			return unquoted
+		}
+	}
+	return rest
 }
 
 func parsePatchHunkCounts(line string) (int, int) {
