@@ -102,6 +102,7 @@ type model struct {
 	doctorInFlight       bool
 	doctorFrame          int
 	activeSession        sessions.Metadata
+	pendingSessionTitle  string
 	sessionEvents        []sessions.Event
 	btw                  btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
@@ -112,14 +113,8 @@ type model struct {
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
 	// Lazily initialized.
-	titledSessions map[string]bool
-	// retitle* drive the sequential /retitle backfill: queued session ids still
-	// awaiting a title, whether a backfill is running, and its progress counters.
-	retitleQueue                []string
-	retitleActive               bool
-	retitleTotal                int
-	retitleDone                 int
-	retitleOK                   int
+	titledSessions              map[string]bool
+	renamePrompt                *sessionRenamePrompt
 	usageTracker                *usage.Tracker
 	sessionCompactor            SessionCompactor
 	prService                   *PrService
@@ -221,6 +216,9 @@ type model struct {
 	// renders the live elapsed time from it so a long or stalled turn never looks
 	// like a frozen terminal (for ANY provider, not just slow ones). Zero = idle.
 	turnStartedAt time.Time
+	// turnTimer is shared with the agent command so both the live status and the
+	// settled "worked for" duration exclude time blocked on a user permission.
+	turnTimer *activeTurnTimer
 	// lastCharTime tracks when the last non-Enter key was received, for paste detection.
 	lastCharTime time.Time
 	// lastKeyTime tracks every keypress timestamp for burst calculation.
@@ -474,8 +472,14 @@ type model struct {
 	// pins), this is maintained by recordRecentModel on every successful
 	// switch and persisted via config.SetRecentModels.
 	recentModels                 []config.RecentModelEntry
-	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
-	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
+	recapsEnabled                bool // idle orientation note (config: recaps on|off)
+	recapSeq                     int
+	recapRunning                 bool
+	recapCancel                  context.CancelFunc
+	recapTimerCancel             context.CancelFunc
+	recapIdleArmed               bool
+	recapIdleRunID               int
+	idleRecap                    string
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
@@ -1069,7 +1073,7 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
-		m.sttKeyPrompt == nil
+		m.sttKeyPrompt == nil && m.renamePrompt == nil
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1157,6 +1161,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.printInFlight = false
 		return m.drainFlushQueue()
 	}
+	var recapActivityCmd tea.Cmd
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseMsg:
+		m, recapActivityCmd = m.resetIdleRecapAfterActivity()
+	}
 	next, cmd := m.updateModel(msg)
 	nm, ok := next.(model)
 	if !ok {
@@ -1165,7 +1174,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
-	return nm, batchCommands(cmd, mouseCmd, flushCmd)
+	return nm, batchCommands(cmd, mouseCmd, flushCmd, recapActivityCmd)
 }
 
 func batchCommands(cmds ...tea.Cmd) tea.Cmd {
@@ -1351,6 +1360,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// input) until Enter saves or Esc cancels.
 		if m.sttKeyPrompt != nil {
 			return m.handleSTTKeyPromptKey(msg)
+		}
+		if m.renamePrompt != nil {
+			return m.handleSessionRenameKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
 		m.composerSelection = composerSelectionState{}
@@ -1702,6 +1714,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lineAges = nil
 				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
 				return m, nil
+			}
+		case keyCtrl(msg, 'v'), keySuper(msg, 'v'):
+			// Ctrl+V probes the clipboard for an IMAGE only. Text pasting stays
+			// exclusively on the terminal's bracketed-paste path (Bubble's own
+			// Ctrl+V binding is disabled in newModel for exactly that reason), so
+			// this cannot double-insert text. It is needed because a clipboard
+			// holding a screenshot produces no bracketed paste at all: the terminal
+			// has no text to send, so routePaste never runs and its empty-content
+			// image probe never fires. Right-click paste reached that probe only
+			// because it always delivers a clipboardReadMsg, empty or not.
+			// readClipboardImageCmd yields no message when the clipboard holds no
+			// image, so Ctrl+V with text on the clipboard stays a no-op here and is
+			// handled by the bracketed paste exactly as before.
+			//
+			// Cmd+V is matched too, since macOS reports Command as ModSuper rather
+			// than ModCtrl. That only helps on terminals that deliver the key to the
+			// application: one that handles Cmd+V itself pastes the clipboard TEXT
+			// and sends no key event, so an image-only clipboard still produces
+			// nothing for this to react to.
+			if m.noBlockingModal() {
+				return m, readClipboardImageCmd()
 			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
@@ -2444,15 +2477,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var titleCmd, recapCmd tea.Cmd
 		if msg.err == nil {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
-			// Post-turn recap (gated on the recaps preference): one short sentence
-			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
+			// Arm an idle recap only after a successful answer. The timer performs
+			// no provider work unless the session stays untouched long enough.
 			var finalAnswer string
 			for _, row := range msg.rows {
 				if row.kind == rowAssistant && row.final {
 					finalAnswer = row.text
 				}
 			}
-			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
+			m, recapCmd = m.maybeScheduleIdleRecap(msg.runID, finalAnswer)
 		}
 		// End-of-turn git sweep: catch file mutations the tool stream couldn't
 		// report (bash scaffolding, subagent edits) so the FILES sidebar is
@@ -2485,6 +2518,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
+	case recapIdleMsg:
+		return m.handleRecapIdle(msg)
 	case recapGeneratedMsg:
 		return m.handleRecapGenerated(msg)
 	case compactResultMsg:
@@ -2927,6 +2962,12 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	if m.renamePrompt != nil {
+		footer.WriteString(m.sessionRenamePromptView(width))
+		footer.WriteString("\n")
+		footer.WriteString(m.statusLine(width))
+		return footer.String()
+	}
 	// While an ask-user questionnaire is active it REPLACES the composer box (the
 	// text box becomes the questionnaire): render the tabbed prompt + status line and
 	// skip the plan panel / idle hints / composer for a focused modal.
@@ -2965,6 +3006,8 @@ func (m model) footerView(width int) string {
 	// so the footer height is unchanged.
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+	} else if recap := strings.TrimSpace(m.idleRecap); recap != "" {
+		footer.WriteString(fitStyledLine("  "+zeroTheme.faint.Render("※ "+recap), width))
 	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
 		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
 	}
@@ -3015,9 +3058,18 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar", sidebarKey)
+		parts := []string{"? shortcuts", "Ctrl+X cmds"}
+		if m.sidebarAvailable() {
+			parts = append(parts, sidebarKey+" sidebar")
+		}
+		hint = strings.Join(parts, " · ")
 	default:
-		hint = fmt.Sprintf("? shortcuts · Ctrl+X cmds · %s sidebar · %s detail · %s copy · Shift+Tab mode", sidebarKey, detailKey, mouseKey)
+		parts := []string{"? shortcuts", "Ctrl+X cmds"}
+		if m.sidebarAvailable() {
+			parts = append(parts, sidebarKey+" sidebar")
+		}
+		parts = append(parts, detailKey+" detail", mouseKey+" copy", "Shift+Tab mode")
+		hint = strings.Join(parts, " · ")
 	}
 	return zeroTheme.faint.Render(hint)
 }
@@ -3481,7 +3533,7 @@ func (m model) workingStatusLine() string {
 	// (reasoning, waiting on the model, or running a tool).
 	line += zeroTheme.faint.Render("  ·  " + m.workingActivity())
 	if !m.turnStartedAt.IsZero() {
-		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
+		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.activeTurnElapsed(m.turnStartedAt)))
 	}
 	// Live token estimate so the working line visibly climbs as the model reasons
 	// and writes, instead of a static figure. Shown from the start of the turn (at
@@ -3566,7 +3618,7 @@ const quietWorkingHint = 8 * time.Second
 // the ticking number was the only signal, and it looks identical whether real
 // (if slow) content is coming or nothing ever will.
 func (m model) quietGenerationHint() string {
-	if m.activeRunID == 0 {
+	if m.activeRunID == 0 || m.pendingPermission != nil {
 		return ""
 	}
 	last := m.lastStreamActivity
@@ -4115,6 +4167,10 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		})
 	}
 	m.pendingPermission = nil
+	// Time spent at the prompt is user wait, not provider silence. Restart the
+	// quiet-generation clock so resuming a long-blocked run does not immediately
+	// claim the model has been inactive for the entire approval interval.
+	m.lastStreamActivity = m.now()
 	return m, nil
 }
 
@@ -4499,21 +4555,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		return m, nil
-	case commandRetitle:
-		if m.pending {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{
-				kind: actionAppendError,
-				text: "Cannot retitle sessions while a run is active.",
-			})
-			return m, nil
+	case commandRename:
+		if title := strings.TrimSpace(command.text); title != "" {
+			return m.renameActiveSession(title), nil
 		}
-		text := ""
-		var retitleCmd tea.Cmd
-		m, retitleCmd, text = m.startSessionRetitle()
-		if text != "" {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		}
-		return m, retitleCmd
+		return m.openSessionRenamePrompt(), nil
 	case commandSpec:
 		return m.handleSpecCommand(command.text)
 	case commandInit:
@@ -4817,6 +4863,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 // (normal prompt + spec draft/impl) keeps these in sync — a missing
 // turnStartedAt previously dropped the elapsed timer on spec-mode runs.
 func (m model) beginRun(cancel context.CancelFunc) model {
+	m = m.cancelIdleRecap()
 	if m.prepareRunCompletionWarning != nil {
 		m.prepareRunCompletionWarning()
 	}
@@ -4838,6 +4885,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// suppressed by a stale preference.
 	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
+	m.turnTimer = newActiveTurnTimer(m.turnStartedAt)
 	m.lastStreamActivity = m.turnStartedAt
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
@@ -5018,9 +5066,21 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		started := m.now()
-		// firstTokenAt is stamped when the first token (reasoning or text) streams,
-		// so the turn can report time-to-first-token alongside total wall time.
-		var firstTokenAt time.Time
+		if m.turnTimer != nil {
+			m.turnTimer.start(started)
+		}
+		// firstTokenElapsed is stamped from the pause-aware turn timer when the
+		// first reasoning or text token streams, so TTFT and total elapsed use
+		// the same clock.
+		var firstTokenElapsed time.Duration
+		firstTokenSeen := false
+		stampFirstToken := func(at time.Time) {
+			if firstTokenSeen {
+				return
+			}
+			firstTokenSeen = true
+			firstTokenElapsed = m.activeTurnElapsedAt(started, at)
+		}
 		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
@@ -5136,11 +5196,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
-			if firstTokenAt.IsZero() {
-				firstTokenAt = m.now()
-			}
+			now := m.now()
+			stampFirstToken(now)
 			if strings.TrimSpace(reasoningText) != "" {
-				flushReasoning(m.now())
+				flushReasoning(now)
 			}
 			m.sendAgentText(runID, delta)
 			if onText != nil {
@@ -5157,6 +5216,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
+			if m.turnTimer != nil {
+				m.turnTimer.pause(m.now())
+				defer func() {
+					m.turnTimer.resume(m.now())
+				}()
+			}
 			if onPermissionRequest != nil {
 				return onPermissionRequest(ctx, request)
 			}
@@ -5234,8 +5299,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onReasoning := options.OnReasoning
 		options.OnReasoning = func(delta string) {
 			now := m.now()
-			if firstTokenAt.IsZero() && strings.TrimSpace(delta) != "" {
-				firstTokenAt = now
+			if strings.TrimSpace(delta) != "" {
+				stampFirstToken(now)
 			}
 			if strings.TrimSpace(reasoningText) == "" && strings.TrimSpace(delta) != "" {
 				reasoningStarted = now
@@ -5346,6 +5411,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				tool:            result.Name,
 				status:          result.Status,
 				detail:          toolResultDetail(result),
+				meta:            result.Meta,
 				runID:           runID,
 				changedFiles:    result.ChangedFiles,
 				changeSummaries: result.ChangeSummaries,
@@ -5460,7 +5526,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -5470,17 +5536,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 			}
 			flushReasoning(m.now())
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		flushReasoning(m.now())
-		elapsed := m.now().Sub(started)
-		ttft := time.Duration(0)
-		if !firstTokenAt.IsZero() {
-			ttft = firstTokenAt.Sub(started)
-		}
+		elapsed := m.activeTurnElapsed(started)
 		rows = append(rows, transcriptRow{
 			kind:        rowAssistant,
 			text:        result.FinalAnswer,
@@ -5498,7 +5560,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: ttft}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
 	}
 }
 
