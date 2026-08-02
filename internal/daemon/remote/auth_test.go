@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -54,6 +55,58 @@ func TestTokenFromEnv(t *testing.T) {
 	}
 	if _, err := TokenFromEnv(); err == nil {
 		t.Fatal("empty token file must error")
+	}
+}
+
+// TestTokenFilePathFromEnvPreservesFilenameWhitespace pins the pointer as a
+// pathname rather than a trimmed word. Trimming it made this boundary select
+// "<dir>/bridge-token" while the operator had named "<dir>/bridge-token " —
+// which fails the daemon start at best, and at worst reads and protects a
+// different file than the one holding the bearer token.
+func TestTokenFilePathFromEnvPreservesFilenameWhitespace(t *testing.T) {
+	t.Setenv(EnvToken, "")
+	for _, configured := range []string{"/srv/zero/bridge-token ", " /srv/zero/bridge-token", "/srv/zero/ token "} {
+		t.Setenv(EnvTokenFile, configured)
+		if got := TokenFilePathFromEnv(); got != configured {
+			t.Fatalf("TokenFilePathFromEnv() = %q, want the configured pathname %q", got, configured)
+		}
+	}
+	for _, blank := range []string{"", "   ", "\t\n"} {
+		t.Setenv(EnvTokenFile, blank)
+		if got := TokenFilePathFromEnv(); got != "" {
+			t.Fatalf("TokenFilePathFromEnv() = %q for a blank value, want unset", got)
+		}
+	}
+}
+
+// TestCanonicalizeTokenFileEnvKeepsTrailingSpaceFilename covers the same rule at
+// the daemon boundary: the file the bridge authenticates against must survive
+// canonicalization byte for byte.
+func TestCanonicalizeTokenFileEnvKeepsTrailingSpaceFilename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot end in a space")
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(base, "bridge-token ")
+	if err := os.WriteFile(token, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	t.Chdir(base)
+	t.Setenv(EnvToken, "")
+	t.Setenv(EnvTokenFile, "bridge-token ")
+
+	if err := CanonicalizeTokenFileEnv(); err != nil {
+		t.Fatalf("CanonicalizeTokenFileEnv: %v", err)
+	}
+	if got := os.Getenv(EnvTokenFile); got != token {
+		t.Fatalf("%s = %q, want %q", EnvTokenFile, got, token)
+	}
+	t.Chdir(t.TempDir())
+	if tok, err := TokenFromEnv(); err != nil || tok != "from-file" {
+		t.Fatalf("TokenFromEnv after canonicalization = %q, %v", tok, err)
 	}
 }
 

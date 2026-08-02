@@ -53,11 +53,21 @@ const (
 // selectedDaemonRemoteTokenFile returns the token-file pointer only when the
 // daemon would use it. TokenFromEnv gives the inline token precedence, so an
 // inherited file pointer is not a credential when both variables are set.
+//
+// The pointer is used verbatim, mirroring remote.TokenFilePathFromEnv: the
+// daemon reads whatever bytes the variable names, so trimming whitespace here
+// would leave a token file whose name begins or ends with a space unprotected
+// while the daemon still reads it. Only a value that is entirely whitespace
+// counts as unset.
 func selectedDaemonRemoteTokenFile() string {
 	if strings.TrimSpace(os.Getenv(daemonRemoteTokenEnv)) != "" {
 		return ""
 	}
-	return strings.TrimSpace(os.Getenv(daemonRemoteTokenFileEnv))
+	configured := os.Getenv(daemonRemoteTokenFileEnv)
+	if strings.TrimSpace(configured) == "" {
+		return ""
+	}
+	return configured
 }
 
 // protectedCredentialPaths returns credential files that Zero's own in-process

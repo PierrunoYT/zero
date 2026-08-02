@@ -80,6 +80,28 @@ func TestProtectedCredentialPathsResolveLikeTheDaemonReader(t *testing.T) {
 		}
 	})
 
+	t.Run("filename whitespace is part of the pathname", func(t *testing.T) {
+		// The daemon reads exactly the bytes the variable names, so trimming the
+		// pointer here would protect "<dir>/token" while the bearer file is
+		// "<dir>/token " — leaving the real credential readable and replaceable.
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows filenames cannot end in a space")
+		}
+		spaced := filepath.Join(base, "token ")
+		if err := os.WriteFile(spaced, []byte("secret\n"), 0o600); err != nil {
+			t.Fatalf("write token: %v", err)
+		}
+		t.Setenv(daemonRemoteTokenEnv, "")
+		t.Setenv(daemonRemoteTokenFileEnv, spaced)
+		got := protectedCredentialPaths()
+		if !stringSliceContains(got, spaced) {
+			t.Fatalf("protected paths = %#v, want %q", got, spaced)
+		}
+		if stringSliceContains(got, token) {
+			t.Fatalf("protected paths = %#v, must not protect the trimmed name %q", got, token)
+		}
+	})
+
 	t.Run("a symlinked pathname protects the link and its target", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("symlink creation needs elevation on Windows")

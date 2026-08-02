@@ -67,13 +67,30 @@ func (a *TokenAuthenticator) Authenticate(token string) error {
 	return ErrUnauthorized
 }
 
+// TokenFilePathFromEnv returns the configured token-file pointer exactly as the
+// operator set it, or "" when the variable is unset or holds only whitespace.
+//
+// The value is a PATHNAME, and every consumer of it — os.ReadFile here, the
+// canonicalization below, the sandbox's protected-credential list — must agree
+// on which bytes name the file. A filename may legitimately begin or end with a
+// space, so trimming the value would make this boundary read one file while the
+// deny rules protect another. A value that is only whitespace still reads as
+// unset, which is what a blank variable means.
+func TokenFilePathFromEnv() string {
+	configured := os.Getenv(EnvTokenFile)
+	if strings.TrimSpace(configured) == "" {
+		return ""
+	}
+	return configured
+}
+
 // TokenFromEnv resolves the bridge token from EnvToken, or a file named by
 // EnvTokenFile. It never logs the token.
 func TokenFromEnv() (string, error) {
 	if t := strings.TrimSpace(os.Getenv(EnvToken)); t != "" {
 		return t, nil
 	}
-	if file := strings.TrimSpace(os.Getenv(EnvTokenFile)); file != "" {
+	if file := TokenFilePathFromEnv(); file != "" {
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return "", fmt.Errorf("remote: read token file: %w", err)
@@ -108,7 +125,7 @@ func CanonicalizeTokenFileEnv() error {
 	if strings.TrimSpace(os.Getenv(EnvToken)) != "" {
 		return nil
 	}
-	configured := strings.TrimSpace(os.Getenv(EnvTokenFile))
+	configured := TokenFilePathFromEnv()
 	if configured == "" {
 		return nil
 	}
