@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -612,6 +613,50 @@ func TestPermissionProfileDeniesDaemonTokenFile(t *testing.T) {
 	profile = PermissionProfileFromPolicy(t.TempDir(), DefaultPolicy(), nil)
 	if stringSliceContains(profile.FileSystem.DenyRead, want) {
 		t.Fatalf("DenyRead = %#v, must not protect unused token file %q when the inline token takes precedence", profile.FileSystem.DenyRead, want)
+	}
+}
+
+// TestPermissionProfileDeniesAbsentDaemonTokenFile covers the window an external
+// secret rotation opens: the token file is gone, but the pathname is still the
+// one the next `serve-remote` start will read. Existence-filtering it out of the
+// profile would let a sandboxed process recreate it with an attacker-chosen
+// bearer, so the mandatory entry survives the file's absence for backend
+// enforcement.
+func TestPermissionProfileDeniesAbsentDaemonTokenFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credential deny-read paths are disabled on Windows pending the ACL model")
+	}
+	workspace := t.TempDir()
+	tokenFile := filepath.Join(workspace, "daemon-token")
+	if err := os.WriteFile(tokenFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, tokenFile)
+
+	// Rotation removes the file after the bridge has already loaded its token.
+	if err := os.Remove(tokenFile); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil)
+	want := normalizeProfilePaths([]string{tokenFile})[0]
+	if !stringSliceContains(profile.FileSystem.DenyRead, want) {
+		t.Fatalf("DenyRead = %#v, want the absent token path %q still denied", profile.FileSystem.DenyRead, want)
+	}
+
+	// Seatbelt must also deny writes because the workspace root is otherwise
+	// writable. The replacement is read by the next bridge start, not this one.
+	rules := credentialDenyWriteRules(profile.FileSystem, DefaultPolicy())
+	if !slices.ContainsFunc(rules, func(rule string) bool { return strings.Contains(rule, want) }) {
+		t.Fatalf("seatbelt credential write rules = %#v, want a deny for %q", rules, want)
+	}
+
+	// Bubblewrap has no target to bind for a missing path, so the fallback must
+	// still produce an unreadable, unwritable mount rather than nothing.
+	args := appendUnreadableLinuxPathArgs(nil, want)
+	if !slices.Contains(args, "--tmpfs") || !slices.Contains(args, want) {
+		t.Fatalf("bubblewrap args for the absent token = %#v, want an unreadable tmpfs at %q", args, want)
 	}
 }
 

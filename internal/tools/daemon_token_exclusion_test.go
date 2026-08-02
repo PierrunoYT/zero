@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -331,6 +332,49 @@ func TestApplyPatchDeniesHeaderOnlyAndBinaryDaemonTokenPatches(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestApplyPatchDeniesTrailingSpaceDaemonTokenPath pins the unified-diff form
+// git leaves unquoted: a header operand whose last byte is an ordinary space.
+// The parser must keep that byte rather than trim it as header formatting.
+func TestApplyPatchDeniesTrailingSpaceDaemonTokenPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot end in a space")
+	}
+	const original = "bridge-secret\n"
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(ws, "bridge-token ")
+	if err := os.WriteFile(token, []byte(original), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	t.Setenv(remote.EnvToken, "")
+	// CanonicalizeTokenFileEnv is the production daemon boundary and preserves
+	// filename whitespace while converting the selected path to an absolute one.
+	t.Setenv(remote.EnvTokenFile, filepath.Join(ws, ".", "bridge-token "))
+	if err := remote.CanonicalizeTokenFileEnv(); err != nil {
+		t.Fatalf("CanonicalizeTokenFileEnv: %v", err)
+	}
+
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: ws, Policy: sandbox.DefaultPolicy()})
+	registry := NewRegistry()
+	registry.Register(NewScopedApplyPatchTool(ws, nil))
+	result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{
+		"patch": "--- a/bridge-token \n" +
+			"+++ b/bridge-token \n" +
+			"@@ -1 +1 @@\n" +
+			"-bridge-secret\n" +
+			"+attacker-controlled\n",
+	}, RunOptions{Sandbox: engine, PermissionGranted: true})
+	if result.Status == StatusOK || !strings.Contains(result.Output, "remote bridge token") {
+		t.Fatalf("apply_patch on the selected token: status=%s output=%q, want bridge-token denial", result.Status, result.Output)
+	}
+	if contents, err := os.ReadFile(token); err != nil || string(contents) != original {
+		t.Fatalf("token changed after denied patch: contents=%q err=%v", contents, err)
 	}
 }
 

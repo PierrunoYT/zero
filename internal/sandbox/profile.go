@@ -307,14 +307,16 @@ func credentialDenyReadPathsForEnvironment(env credentialPathEnvironment, allowR
 			out = append(out, path)
 		}
 	}
-	for _, path := range mandatory {
-		// Existence filtering still applies: a deny rule for a path that is not
-		// there protects nothing, and Bubblewrap cannot bind a missing target.
-		if _, err := os.Stat(path); err != nil {
-			continue
-		}
-		out = append(out, path)
-	}
+	// Unlike the candidates above, the token path is NOT existence-filtered. The
+	// entry protects a future write target as much as a current secret: after an
+	// external rotation deletes the file, dropping the rule would let a sandboxed
+	// process recreate it with an attacker-chosen bearer that the next
+	// `serve-remote` start would then accept. Each enforcing backend materializes
+	// a missing target fail-closed — bubblewrap mounts an unreadable tmpfs
+	// (appendUnreadableLinuxPathArgs), seatbelt names the path both literally and
+	// as a subpath, and Landlock refuses deny-read profiles outright — which is
+	// also why protectedCredentialPaths keeps the configured lexical path.
+	out = append(out, mandatory...)
 	return dedupeStrings(out)
 }
 

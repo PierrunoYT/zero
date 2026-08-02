@@ -33,6 +33,23 @@ func TestPatchHeaderPathsUnspacedStillWorks(t *testing.T) {
 	}
 }
 
+// git only C-quotes names containing characters it must escape, so a filename
+// whose last byte is an ordinary space reaches the header raw. git apply reads
+// it to the tab or newline and patches that exact file, so trimming the operand
+// here would leave the token gate comparing against a neighbouring pathname.
+func TestPatchHeaderPathsPreservesSurroundingSpacesInNames(t *testing.T) {
+	patch := "--- a/bridge-token \t2024-01-01 00:00:00\n" +
+		"+++ b/bridge-token \n" +
+		"@@ -1 +1 @@\n-old\n+new\n"
+	got := sandbox.PatchHeaderPaths(patch)
+	if !slices.Contains(got, "bridge-token ") {
+		t.Fatalf("trailing-space path not preserved: %q", got)
+	}
+	if slices.Contains(got, "bridge-token") {
+		t.Fatalf("trailing space trimmed off the header path: %q", got)
+	}
+}
+
 func TestPatchHeaderPathsHandlesCQuotedDiffGitOperands(t *testing.T) {
 	patch := "diff --git \"a/bridge\\040token\" \"b/exposed\\tcopy\"\n"
 	got := sandbox.PatchHeaderPaths(patch)

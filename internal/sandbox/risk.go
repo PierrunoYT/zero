@@ -471,15 +471,22 @@ func consumeGitPath(input string) (string, string, bool) {
 // patchFileHeaderPath mirrors the apply_patch parser's handling of unified-diff
 // file headers: paths may be C-quoted and may contain spaces, while an optional
 // timestamp is separated by a tab.
+//
+// Only the tab is header formatting. Git's own parser takes every remaining byte
+// of an unquoted operand as pathname data, so a name with a leading or trailing
+// space is written verbatim; trimming here would make the token gate evaluate
+// `bridge-token` while git patches the live `bridge-token ` beside it.
 func patchFileHeaderPath(line string) string {
 	rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
 	if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
 		rest = rest[:tab]
 	}
-	rest = strings.TrimSpace(rest)
-	if len(rest) >= 2 && rest[0] == '"' && rest[len(rest)-1] == '"' {
-		if unquoted, err := strconv.Unquote(rest); err == nil {
-			return unquoted
+	if strings.HasPrefix(rest, `"`) {
+		// A quoted operand ends at its closing quote; git allows nothing but the
+		// (already removed) timestamp after it, so a trailing remainder means the
+		// line is not the quoted form and the raw bytes are the pathname.
+		if path, remainder, ok := consumeGitPath(rest); ok && remainder == "" {
+			return path
 		}
 	}
 	return rest
