@@ -123,11 +123,11 @@ func PreflightCatalogProviderLogin(path, catalogID string) error {
 // baseURL: "https://corp.example/v1"}; adopting it for `zero providers add
 // openrouter` would hand that row to UpsertProvider, whose merge overwrites the
 // catalog id, endpoint, model, transport and headers with OpenRouter's defaults
-// while a stored-key marker survives the rewrite. So the row's catalog identity
-// must agree too, and a row that declares no catalog id at all is accepted only
-// because its name is the sole identity it has (the legacy shape this function
-// exists for). Anything else keeps the requested name and lets the write report
-// the collision instead of mutating a different profile.
+// while a stored-key marker survives the rewrite. So the row's non-empty catalog
+// identity must agree too; a missing catalog id is absence of ownership evidence,
+// not proof that the row belongs to the requested descriptor. Anything else keeps
+// the requested name and lets the write report the collision instead of mutating
+// a different profile.
 func AdoptPersistedCatalogProviderName(path string, profile ProviderProfile) (ProviderProfile, error) {
 	catalogID := strings.TrimSpace(profile.CatalogID)
 	name := strings.TrimSpace(profile.Name)
@@ -148,7 +148,7 @@ func AdoptPersistedCatalogProviderName(path string, profile ProviderProfile) (Pr
 		if rowName == name {
 			return profile, nil
 		}
-		if rowCatalogID := strings.TrimSpace(row.CatalogID); rowCatalogID != "" &&
+		if rowCatalogID := strings.TrimSpace(row.CatalogID); rowCatalogID == "" ||
 			!sameProviderIdentity(rowCatalogID, catalogID) {
 			// A different provider that happens to carry this name.
 			return profile, nil

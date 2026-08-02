@@ -1332,9 +1332,9 @@ func TestAdoptPersistedCatalogProviderNameIgnoresForeignCatalogRow(t *testing.T)
 	}
 }
 
-// TestAdoptPersistedCatalogProviderNameFollowsNameOnlyRow keeps the legacy shape
-// adoption exists for: a row whose only identity is its name.
-func TestAdoptPersistedCatalogProviderNameFollowsNameOnlyRow(t *testing.T) {
+// TestAdoptPersistedCatalogProviderNameIgnoresNameOnlyRow pins that a matching
+// display name is not proof that a custom profile belongs to a catalog provider.
+func TestAdoptPersistedCatalogProviderNameIgnoresNameOnlyRow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	writeConfigFixture(t, path, FileConfig{
 		Providers: []ProviderProfile{
@@ -1346,8 +1346,11 @@ func TestAdoptPersistedCatalogProviderNameFollowsNameOnlyRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
-	if adopted.Name != "OpenRouter" {
-		t.Fatalf("Name = %q, want the persisted case variant adopted", adopted.Name)
+	if adopted.Name != "openrouter" {
+		t.Fatalf("Name = %q, want the requested spelling kept without positive catalog ownership", adopted.Name)
+	}
+	if err := PreflightProviderWrite(path, adopted.Name); err == nil {
+		t.Fatal("PreflightProviderWrite accepted a name-only collision; want the custom row preserved")
 	}
 }
 

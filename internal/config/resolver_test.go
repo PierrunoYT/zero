@@ -434,6 +434,19 @@ func TestNormalizeProvidersSelectsActiveSourceBeforeNormalization(t *testing.T) 
 	})
 }
 
+func TestNormalizeProvidersActiveFallbackUsesCredentialIdentity(t *testing.T) {
+	providers, active, err := normalizeProviders([]ProviderProfile{
+		{Name: "s", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://s.example/v1", Model: "s-model"},
+		{Name: "ſ", ProviderKind: ProviderKindOpenAICompatible, BaseURL: "https://long-s.example/v1", Model: "long-s-model"},
+	}, "S")
+	if err != nil {
+		t.Fatalf("normalizeProviders() error = %v", err)
+	}
+	if len(providers) != 2 || active.Name != "s" || active.Model != "s-model" {
+		t.Fatalf("providers=%#v active=%#v, want credential identity s selected", providers, active)
+	}
+}
+
 func TestResolveCrossLayerActiveProviderCaseMatching(t *testing.T) {
 	valid := func(name string) string {
 		return fmt.Sprintf(`{"providers":[{"name":%q,"providerKind":"openai","model":"gpt-4.1"}]}`, name)

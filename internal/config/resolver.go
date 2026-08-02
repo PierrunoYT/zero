@@ -926,8 +926,9 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 	}
 
 	// Select the active source row before normalizing anything. An exact name
-	// always wins; folding is only a fallback when it identifies one row. This
-	// prevents an invalid case-variant sibling from making an exact target fail.
+	// always wins; credential-store identity is only a fallback when it identifies
+	// one row. This prevents an invalid case-variant sibling from making an exact
+	// target fail while keeping distinct identities such as "s" and "ſ" separate.
 	activeIndex := -1
 	if activeName != "" {
 		for index := range providers {
@@ -938,7 +939,7 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 		}
 		if activeIndex < 0 {
 			for index := range providers {
-				if !strings.EqualFold(strings.TrimSpace(providers[index].Name), activeName) {
+				if !sameProviderIdentity(providers[index].Name, activeName) {
 					continue
 				}
 				if activeIndex >= 0 {
