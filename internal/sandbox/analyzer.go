@@ -352,6 +352,7 @@ var gitTerminalGlobalOptions = map[string]bool{
 	"-h": true, "--help": true,
 	"-v": true, "--version": true,
 	"--html-path": true, "--man-path": true, "--info-path": true,
+	"--list-cmds": true,
 }
 
 // parseGitInvocation resolves what a git command line actually does, past git's
@@ -372,8 +373,9 @@ func parseGitInvocation(words []string) gitInvocation {
 		if word == "" {
 			continue
 		}
-		if gitTerminalGlobalOptions[strings.ToLower(word)] {
-			return gitInvocation{kind: gitCommandTerminalGlobal, terminalOption: strings.ToLower(word)}
+		lowered := strings.ToLower(word)
+		if gitTerminalGlobalOptions[lowered] || strings.HasPrefix(lowered, "--list-cmds=") {
+			return gitInvocation{kind: gitCommandTerminalGlobal, terminalOption: lowered}
 		}
 		if strings.HasPrefix(word, "-") {
 			// A joined value (--git-dir=/x, -C/x) is one token and needs no skip;

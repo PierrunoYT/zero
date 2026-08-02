@@ -506,6 +506,14 @@ func TestClassifyUnparseableCMDInvocationFormsFailClosed(t *testing.T) {
 		`if defined PROXY curl https://evil.test & rem '`,
 		`if %retries% gtr 0 curl https://evil.test & rem '`,
 		`for %i in (x) do call curl https://evil.test & rem '`,
+		`cu^rl https://evil.test & rem '`,
+		`cmd /c cu^rl https://evil.test & rem '`,
+		`%ComSpec% /c curl https://evil.test & rem '`,
+		`start "x" curl https://evil.test & rem '`,
+		`cmd /c start "x" curl https://evil.test & rem '`,
+		`start /b /wait "x" curl https://evil.test & rem '`,
+		`if cmdextversion 1 curl https://evil.test & rem '`,
+		`if not cmdextversion 1 git push origin main & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
@@ -546,6 +554,8 @@ func TestGitGlobalOptionsResolveIdenticallyOnBothPaths(t *testing.T) {
 		{"--info-path push", false},
 		{"-C repo --help push", false},
 		{"-C repo -h push", false},
+		{"--list-cmds=main push", false},
+		{"-C repo --list-cmds=main push", false},
 		{"-C repo --version push", false},
 		{"status", false},
 		{"", false},
@@ -567,6 +577,25 @@ func TestGitGlobalOptionsResolveIdenticallyOnBothPaths(t *testing.T) {
 			}
 			if got := HasRiskCategory(classifyCommand(unparseable), "network"); got != testCase.network {
 				t.Errorf("fallback Classify(%q) network = %v, want %v", unparseable, got, testCase.network)
+			}
+		})
+	}
+}
+
+func TestClassifyUnparseableCommandBearingWrapperValuesFailClosed(t *testing.T) {
+	for _, command := range []string{
+		`env -S 'curl https://evil.test' && "unterminated`,
+		`env --split-string 'git push origin main' && "unterminated`,
+		`exec -a harmless curl https://evil.test && "unterminated`,
+		`exec --argv0 harmless git push origin main && "unterminated`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if analysis := AnalyzeCommand(command); !analysis.TooComplex {
+				t.Fatalf("AnalyzeCommand(%q) parsed; this case must exercise the fallback", command)
+			}
+			risk := classifyCommand(command)
+			if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+				t.Fatalf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
 			}
 		})
 	}

@@ -92,11 +92,15 @@ func matchesUnparseableNetwork(command string) bool {
 // `echo https://example.com/repo.git push` out: a network verb only counts when
 // it belongs to a program actually being invoked.
 func matchesUnparseableNetworkAt(command string, depth int) bool {
-	for _, tokens := range fallbackCommandTokens(command) {
+	for _, tokenInfo := range fallbackCommandTokenInfo(command) {
+		tokens := fallbackTokenValues(tokenInfo)
 		for _, body := range fallbackCommandBodies(tokens) {
 			if fallbackBodyUsesNetwork(body, depth) {
 				return true
 			}
+		}
+		if body := cmdCommandBodyTokenInfo(tokenInfo); len(body) > 0 && fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+			return true
 		}
 	}
 	return false
@@ -127,6 +131,9 @@ func fallbackCommandBodies(tokens []string) [][]string {
 // the payloads of launchers that run command text of their own.
 func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	program, args := executableTokenBase(body[0]), body[1:]
+	if program == "%comspec%" {
+		program = "cmd"
+	}
 	if program == "git" && matchesUnparseableGitNetwork(args) {
 		return true
 	}
@@ -138,6 +145,17 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	// invocation behind eval would hide it from this fail-closed path.
 	if depth < maxUnparseableShellDepth && program == "eval" {
 		if matchesUnparseableNetworkAt(strings.Join(args, " "), depth+1) {
+			return true
+		}
+	}
+	if depth < maxUnparseableShellDepth && program == "env" {
+		if payload := fallbackEnvSplitPayload(args); payload != "" && matchesUnparseableNetworkAt(payload, depth+1) {
+			return true
+		}
+	}
+	if program == "exec" {
+		args = fallbackExecCommandArgs(args)
+		if len(args) > 0 && fallbackBodyUsesNetwork(args, depth) {
 			return true
 		}
 	}
@@ -157,9 +175,36 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 	// sent us here cannot parse it (for example, `cmd /c curl ... & rem '`).
 	if depth < maxUnparseableShellDepth {
 		if payload := fallbackCommandInterpreterPayload(program, args); payload != "" {
-			if matchesUnparseableNetworkAt(payload, depth+1) {
+			if matchesUnparseableNetworkAt(payload, depth+1) ||
+				fallbackPayloadUsesNetwork(strings.Join(fallbackCommandInterpreterArgs(program, args), " "), depth+1) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func fallbackPayloadUsesNetwork(payload string, depth int) bool {
+	fields := strings.Fields(payload)
+	if len(fields) > 0 && strings.EqualFold(fields[0], "start") {
+		// Command-interpreter recursion can lose quote provenance when the outer
+		// tokenizer has already removed cmd's title quotes. START always treats the
+		// first quoted operand as a title, so conservatively evaluate both possible
+		// payload positions rather than dropping the launched command.
+		for _, candidate := range [][]string{fields[1:], fields[2:]} {
+			if len(candidate) > 0 && fallbackBodyUsesNetwork(candidate, depth) {
+				return true
+			}
+		}
+	}
+	for _, tokenInfo := range fallbackCommandTokenInfo(payload) {
+		if len(tokenInfo) > 0 && strings.EqualFold(tokenInfo[0].value, "start") {
+			if body := cmdStartPayloadTokenInfo(tokenInfo[1:]); len(body) > 0 && fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+				return true
+			}
+		}
+		if body := cmdCommandBodyTokenInfo(tokenInfo); len(body) > 0 && fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+			return true
 		}
 	}
 	return false
@@ -250,6 +295,55 @@ func cmdCommandBodyFields(fields []string) []string {
 	return nil
 }
 
+type fallbackCommandToken struct {
+	value  string
+	quoted bool
+}
+
+func fallbackTokenValues(tokens []fallbackCommandToken) []string {
+	values := make([]string, len(tokens))
+	for index := range tokens {
+		values[index] = tokens[index].value
+	}
+	return values
+}
+
+func cmdCommandBodyTokenInfo(fields []fallbackCommandToken) []fallbackCommandToken {
+	fields = append([]fallbackCommandToken(nil), fields...)
+	if len(fields) > 0 {
+		fields[0].value = strings.TrimPrefix(fields[0].value, "@")
+		if fields[0].value == "" {
+			fields = fields[1:]
+		}
+	}
+	for len(fields) > 0 {
+		switch strings.ToLower(fields[0].value) {
+		case "call", "else", "then", "do":
+			fields = fields[1:]
+		case "start":
+			fields = cmdStartPayloadTokenInfo(fields[1:])
+		case "if":
+			values := cmdConditionPayload(fallbackTokenValues(fields[1:]))
+			if len(values) == 0 {
+				return nil
+			}
+			fields = fields[len(fields)-len(values):]
+		case "for":
+			values := cmdForPayload(fallbackTokenValues(fields[1:]))
+			if len(values) == 0 {
+				return nil
+			}
+			fields = fields[len(fields)-len(values):]
+		default:
+			if len(fields) > 0 {
+				fields[0].value = normalizeCMDToken(fields[0].value)
+			}
+			return fields
+		}
+	}
+	return nil
+}
+
 // cmdStartPayload skips START's own options and its optional window title so
 // the launched command is what gets classified. The title is recognized by the
 // space it contains: the fallback tokenizer already dropped the quotes that
@@ -273,6 +367,24 @@ func cmdStartPayload(fields []string) []string {
 	return fields
 }
 
+func cmdStartPayloadTokenInfo(fields []fallbackCommandToken) []fallbackCommandToken {
+	for len(fields) > 0 && strings.HasPrefix(fields[0].value, "/") {
+		switch strings.ToLower(fields[0].value) {
+		case "/d", "/node", "/affinity":
+			if len(fields) < 2 {
+				return nil
+			}
+			fields = fields[2:]
+		default:
+			fields = fields[1:]
+		}
+	}
+	if len(fields) > 0 && fields[0].quoted {
+		fields = fields[1:]
+	}
+	return fields
+}
+
 // cmdConditionPayload skips an IF condition and returns the guarded command.
 func cmdConditionPayload(fields []string) []string {
 	for len(fields) > 0 {
@@ -282,7 +394,7 @@ func cmdConditionPayload(fields []string) []string {
 			fields = fields[1:]
 		case word == "not":
 			fields = fields[1:]
-		case word == "errorlevel" || word == "exist" || word == "defined":
+		case word == "errorlevel" || word == "exist" || word == "defined" || word == "cmdextversion":
 			// Keyword plus its single operand.
 			if len(fields) < 2 {
 				return nil
@@ -298,9 +410,8 @@ func cmdConditionPayload(fields []string) []string {
 			// The whole comparison arrived as one token (`1==1`).
 			return fields[1:]
 		default:
-			// An unrecognized condition shape. Assume it was one token rather
-			// than guessing further; the caller still has the POSIX resolution.
-			return fields[1:]
+			// Unknown condition grammar cannot establish a command boundary.
+			return nil
 		}
 	}
 	return nil
@@ -371,6 +482,56 @@ func fallbackCommandInterpreterPayload(program string, args []string) string {
 	return ""
 }
 
+func fallbackCommandInterpreterArgs(program string, args []string) []string {
+	for index, arg := range args {
+		flag := strings.ToLower(arg)
+		if program == "cmd" && (flag == "/c" || flag == "/k") && index+1 < len(args) {
+			return args[index+1:]
+		}
+	}
+	return nil
+}
+
+func fallbackEnvSplitPayload(args []string) string {
+	for index := 0; index < len(args); index++ {
+		if (args[index] == "-S" || args[index] == "--split-string") && index+1 < len(args) {
+			return args[index+1]
+		}
+	}
+	return ""
+}
+
+func fallbackExecCommandArgs(args []string) []string {
+	for index := 0; index < len(args); index++ {
+		if args[index] == "--" {
+			return args[index+1:]
+		}
+		if args[index] == "-a" || args[index] == "--argv0" {
+			if index+1 >= len(args) {
+				return nil
+			}
+			index++
+			continue
+		}
+		if strings.HasPrefix(args[index], "-") {
+			continue
+		}
+		return args[index:]
+	}
+	return nil
+}
+
+func normalizeCMDToken(token string) string {
+	var out strings.Builder
+	for index := 0; index < len(token); index++ {
+		if token[index] == '^' && index+1 < len(token) {
+			index++
+		}
+		out.WriteByte(token[index])
+	}
+	return out.String()
+}
+
 // executableTokenBase reduces a raw fallback token to a comparable program name.
 // It strips quoting, any directory prefix, and a Windows executable suffix, so
 // this path recognizes curl.exe and git.cmd exactly as normalizeProgramToken does
@@ -399,19 +560,30 @@ type fallbackDelimiterFrame struct {
 // It preserves quoted spaces even when the command's trailing quote is
 // unmatched (the condition that sends classification down this fallback).
 func fallbackCommandTokens(command string) [][]string {
+	infos := fallbackCommandTokenInfo(command)
+	commands := make([][]string, len(infos))
+	for index := range infos {
+		commands[index] = fallbackTokenValues(infos[index])
+	}
+	return commands
+}
+
+func fallbackCommandTokenInfo(command string) [][]fallbackCommandToken {
 	// Command strings commonly preserve cmd.exe's escaped quote spelling.
 	command = strings.ReplaceAll(command, `\"`, `"`)
-	var commands [][]string
-	var tokens []string
+	var commands [][]fallbackCommandToken
+	var tokens []fallbackCommandToken
 	var word strings.Builder
 	var quote rune
+	wordQuoted := false
 	var delimiters []fallbackDelimiterFrame
 	backtick := false
 	escaped := false
 	flush := func() {
 		if word.Len() > 0 {
-			tokens = append(tokens, word.String())
+			tokens = append(tokens, fallbackCommandToken{value: word.String(), quoted: wordQuoted})
 			word.Reset()
+			wordQuoted = false
 		}
 	}
 	flushCommand := func() {
@@ -454,6 +626,7 @@ func fallbackCommandTokens(command string) [][]string {
 			switch quote {
 			case 0:
 				quote = r
+				wordQuoted = true
 			case r:
 				quote = 0
 			default:
@@ -473,7 +646,7 @@ func fallbackCommandTokens(command string) [][]string {
 			// `if 1==1 (curl ...)`; the opening parenthesis is still a command
 			// boundary even though it is not the segment's first token.
 			grouping := quote == 0 && word.Len() == 0 &&
-				(len(tokens) == 0 || startsCMDCommandGroup(tokens))
+				(len(tokens) == 0 || startsCMDCommandGroup(fallbackTokenValues(tokens)))
 			if substitution || grouping {
 				flushCommand()
 				delimiters = append(delimiters, fallbackDelimiterFrame{opener: '(', quote: quote})
@@ -489,7 +662,7 @@ func fallbackCommandTokens(command string) [][]string {
 		}
 		// A case pattern's closing parenthesis starts the command body. It is not
 		// paired with an opening command-group parenthesis.
-		if r == ')' && quote == 0 && len(tokens) > 0 && tokens[0] == "case" {
+		if r == ')' && quote == 0 && len(tokens) > 0 && tokens[0].value == "case" {
 			flushCommand()
 			continue
 		}
