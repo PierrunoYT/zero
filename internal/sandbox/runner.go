@@ -843,16 +843,15 @@ func denyWriteRulesFromPaths(paths []string) []string {
 // legitimately writes (a cache or generated directory) stays writable — only
 // Zero's own credential entries lose the write direction.
 func credentialDenyWriteRules(fs FileSystemPolicy, policy Policy) []string {
-	automatic := normalizeProfilePaths(append(credentialDenyReadPaths(policy), protectedCredentialPaths()...))
+	automatic := dedupeStrings(append(credentialDenyReadPaths(policy), protectedCredentialPaths()...))
 	if len(automatic) == 0 {
 		return nil
 	}
-	denied := normalizeProfilePaths(fs.DenyRead)
 	paths := make([]string, 0, len(automatic))
 	for _, path := range automatic {
 		// Only paths the profile actually read-denies: credentialDenyReadPaths
 		// already drops AllowRead opt-outs, and this keeps the two lists in step.
-		if slices.Contains(denied, path) {
+		if slices.Contains(fs.DenyRead, path) {
 			paths = append(paths, path)
 		}
 	}
@@ -860,7 +859,16 @@ func credentialDenyWriteRules(fs FileSystemPolicy, policy Policy) []string {
 }
 
 func denySeatbeltPathRules(action string, paths []string) []string {
-	resolved := normalizeProfilePaths(paths)
+	protected := protectedCredentialPaths()
+	resolved := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if slices.Contains(protected, path) {
+			resolved = append(resolved, path)
+		} else if normalized := normalizeProfilePath(path); normalized != "" {
+			resolved = append(resolved, normalized)
+		}
+	}
+	resolved = dedupeStrings(resolved)
 	if len(resolved) == 0 {
 		return nil
 	}

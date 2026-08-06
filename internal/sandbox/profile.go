@@ -285,10 +285,7 @@ func credentialDenyReadPathsForEnvironment(env credentialPathEnvironment, allowR
 	// The bridge bearer token grants control of this daemon, so unlike the
 	// opt-outable credential stores above it stays denied even when AllowRead
 	// covers it — matching protectedCredentialPaths at the in-process boundary.
-	var mandatory []string
-	if target := strings.TrimSpace(env.DaemonTokenFile); target != "" {
-		mandatory = normalizeProfilePaths([]string{target})
-	}
+	mandatory := daemonTokenDenyPaths(env.DaemonTokenFile)
 	allowRoots := normalizeProfilePaths(allowRead)
 	out := make([]string, 0, len(candidates)+len(mandatory))
 	for _, path := range normalizeProfilePaths(candidates) {

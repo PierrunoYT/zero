@@ -315,7 +315,7 @@ func protectedCredentialInWritableMacOSRoot(profile PermissionProfile, protected
 		writeRoots = append(writeRoots, normalizeProfilePaths(sandboxWritableSubpaths)...)
 	}
 	for _, credential := range protected {
-		credential = filepath.Clean(strings.TrimSpace(credential))
+		credential = filepath.Clean(credential)
 		if credential == "." || credential == "" {
 			continue
 		}

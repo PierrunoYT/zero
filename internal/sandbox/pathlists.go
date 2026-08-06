@@ -95,8 +95,14 @@ func protectedCredentialPaths() []string {
 	// os.ReadFile — the daemon's own reader — treats the value literally, so a
 	// relative path resolves against the working directory and a leading "~" is
 	// NOT expanded. resolvePolicyPath would expand it and protect the wrong file.
-	configured := selectedDaemonRemoteTokenFile()
-	if configured == "" {
+	return daemonTokenDenyPaths(selectedDaemonRemoteTokenFile())
+}
+
+// daemonTokenDenyPaths is the shared pathname authority for both the
+// in-process boundary and OS sandbox profiles. Filename whitespace is data:
+// only an entirely blank setting is unset, matching the daemon reader.
+func daemonTokenDenyPaths(configured string) []string {
+	if strings.TrimSpace(configured) == "" {
 		return nil
 	}
 	absolute, err := filepath.Abs(configured)

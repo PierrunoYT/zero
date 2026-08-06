@@ -244,6 +244,65 @@ func TestProtectedCredentialsDenyReadAndWriteInSeatbeltProfile(t *testing.T) {
 	}
 }
 
+func TestProtectedCredentialFilenameWhitespaceReachesOSSandbox(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot end in a space")
+	}
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	token := filepath.Join(workspace, "bridge-token ")
+	t.Setenv(daemonRemoteTokenEnv, "")
+	t.Setenv(daemonRemoteTokenFileEnv, token)
+
+	profile := PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil)
+	if !stringSliceContains(profile.FileSystem.DenyRead, token) {
+		t.Fatalf("DenyRead = %#v, want exact token pathname %q", profile.FileSystem.DenyRead, token)
+	}
+
+	sbpl := seatbeltProfileFromPermissionProfile(profile, DefaultPolicy(), "")
+	escaped := sandboxProfileString(token)
+	for _, want := range []string{
+		`(deny file-read* (literal "` + escaped + `"))`,
+		`(deny file-write* (literal "` + escaped + `"))`,
+	} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
+		}
+	}
+
+	args := appendUnreadableLinuxPathArgs(nil, token)
+	if !stringSliceContains(args, "--tmpfs") || !stringSliceContains(args, token) {
+		t.Fatalf("bubblewrap args = %#v, want unreadable tmpfs at exact pathname %q", args, token)
+	}
+
+	if !protectedCredentialInWritableMacOSRoot(profile, protectedCredentialPaths()) {
+		t.Fatalf("spaced token %q under writable root %q must fail macOS preflight", token, workspace)
+	}
+}
+
+func TestUnreadableLinuxPathSkipsProtectedSymlinkDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "token")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "token-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if got := appendUnreadableLinuxPathArgs(nil, link); len(got) != 0 {
+		t.Fatalf("bubblewrap args for symlink destination = %#v, want no mount", got)
+	}
+	if got := appendUnreadableLinuxPathArgs(nil, target); !stringSliceContains(got, target) {
+		t.Fatalf("bubblewrap args for resolved target = %#v, want target bind", got)
+	}
+}
+
 // TestProtectedCredentialsSurviveDisabledPolicy covers the one route that skips
 // validatePathWithPolicy entirely: ModeDisabled drops every user-configured
 // restriction, but the bridge token authenticates the caller driving these tools.
