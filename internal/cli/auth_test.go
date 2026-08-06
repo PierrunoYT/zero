@@ -859,6 +859,45 @@ func TestRunAuthLogoutLeavesSharedCatalogCredentialsAlone(t *testing.T) {
 	}
 }
 
+func TestRunAuthLogoutRejectsAmbiguousCatalogAddress(t *testing.T) {
+	storePath := withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	configData := []byte(`{"providers":[` +
+		`{"name":"work-xai","catalogId":"xai"},` +
+		`{"name":"personal-xai","catalogId":"xai"}]}`)
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenStore, err := oauth.NewStore(oauth.StoreOptions{FilePath: storePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tokenStore.Save(oauth.ProviderKey("xai"), oauth.Token{AccessToken: "shared"}); err != nil {
+		t.Fatal(err)
+	}
+	keyStore, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyStore.Set("xai", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "logout", "xai"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}); code == exitSuccess || !strings.Contains(stderr.String(), "ambiguous") {
+		t.Fatalf("exit succeeded or ambiguity was not reported: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if _, ok, err := tokenStore.Load(oauth.ProviderKey("xai")); err != nil || !ok {
+		t.Fatalf("ambiguous catalog token was deleted: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := keyStore.Get("xai"); err != nil || !ok {
+		t.Fatalf("ambiguous catalog key was deleted: ok=%v err=%v", ok, err)
+	}
+}
+
 // TestRunAuthLogoutPrefersTheExactlyNamedProfile is the other half of the same
 // finding: identity resolution took the first row matching name OR catalog id,
 // so `zero auth logout xai` retargeted an earlier {name:"work-xai",

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -540,6 +541,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	credentialCandidates, _, err := config.ProviderCredentialDeletionCandidates(configPath, name)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	// Decide up front whether a sibling row will survive this removal holding
 	// the SAME credential-store identity, because that decides what happens to
 	// the shared secret: hand the marker over, or delete the key outright.
@@ -571,8 +576,17 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 				markerTransferFailed = true
 			}
 		}
-	} else {
-		keyRemoved, keyErr = removeStoredProviderKeyAt(configPath, name)
+		credentialCandidates = slices.DeleteFunc(credentialCandidates, func(candidate string) bool {
+			return config.SameProviderIdentity(candidate, name)
+		})
+	}
+	keyRemoved, cleanupErr := removeStoredProviderKeysAt(configPath, credentialCandidates)
+	if cleanupErr != nil {
+		if keyErr != nil {
+			keyErr = fmt.Errorf("%v; credential cleanup: %w", keyErr, cleanupErr)
+		} else {
+			keyErr = cleanupErr
+		}
 	}
 	if options.json {
 		payload := map[string]any{
@@ -626,15 +640,23 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 	return exitSuccess
 }
 
-// removeStoredProviderKeyAt deletes a provider's API key from the credential
+// removeStoredProviderKeysAt deletes provider API keys from the credential
 // store co-located with configPath (the store SecureProviderProfile captured
-// it into and RenameProvider migrates within).
-func removeStoredProviderKeyAt(configPath string, provider string) (bool, error) {
+// them into and RenameProvider migrates within).
+func removeStoredProviderKeysAt(configPath string, providers []string) (bool, error) {
 	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		return false, err
 	}
-	return store.Delete(provider)
+	removed := false
+	for _, provider := range providers {
+		candidateRemoved, err := store.Delete(provider)
+		if err != nil {
+			return removed, err
+		}
+		removed = removed || candidateRemoved
+	}
+	return removed, nil
 }
 
 // survivingCaseVariantProviderName returns the exact name of another persisted
@@ -719,14 +741,9 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 // apart from a real, env-derived provider that just has no config.json row.
 func providerResolvedByName(providers []config.ProviderProfile, name string) bool {
 	name = strings.TrimSpace(name)
-	for _, provider := range providers {
-		if strings.TrimSpace(provider.Name) == name || strings.TrimSpace(provider.CatalogID) == name {
-			return true
-		}
-	}
 	matches := 0
 	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) || strings.EqualFold(strings.TrimSpace(provider.CatalogID), name) {
+		if config.SameProviderIdentity(provider.Name, name) || config.SameProviderIdentity(provider.CatalogID, name) {
 			matches++
 		}
 	}

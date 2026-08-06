@@ -884,7 +884,7 @@ func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	seed := `{"activeProvider":"gw","providers":[{"name":"gw","provider_kind":"openai-compatible","baseURL":"https://gw.example.com/v1","apiKeyStored":true,"model":"m1"},{"name":"other","provider_kind":"openai-compatible","baseURL":"https://o.example.com/v1","model":"m2"}]}`
+	seed := `{"activeProvider":"gw","providers":[{"name":"gw","catalogId":"catalog-gw","provider_kind":"openai-compatible","baseURL":"https://gw.example.com/v1","apiKeyStored":true,"model":"m1"},{"name":"other","provider_kind":"openai-compatible","baseURL":"https://o.example.com/v1","model":"m2"}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
@@ -892,7 +892,7 @@ func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	if err := store.Set("gw", "sk-secret"); err != nil {
+	if err := store.Set("catalog-gw", "sk-secret"); err != nil {
 		t.Fatalf("seed key: %v", err)
 	}
 
@@ -917,8 +917,24 @@ func TestRunProvidersRemoveDeletesKeyBesideConfig(t *testing.T) {
 	if payload.ActiveProvider != "other" {
 		t.Fatalf("active must hand off, got %q", payload.ActiveProvider)
 	}
-	if _, ok, _ := store.Get("gw"); ok {
-		t.Fatalf("stored key must be deleted from the store beside the config")
+	if _, ok, _ := store.Get("catalog-gw"); ok {
+		t.Fatalf("stored key under the catalog alias must be deleted from the store beside the config")
+	}
+}
+
+func TestProviderResolvedByNameRequiresOneCredentialStoreIdentity(t *testing.T) {
+	providers := []config.ProviderProfile{
+		{Name: "work-xai", CatalogID: "xai"},
+		{Name: "personal-xai", CatalogID: "xai"},
+	}
+	if providerResolvedByName(providers, "xai") {
+		t.Fatal("a shared catalog id must not be attributed to the first resolved provider")
+	}
+	if providerResolvedByName([]config.ProviderProfile{{Name: "s"}}, "ſ") {
+		t.Fatal("Unicode long-s is distinct from the credential store identity s")
+	}
+	if !providerResolvedByName([]config.ProviderProfile{{Name: "work"}}, "WORK") {
+		t.Fatal("ASCII case variants should resolve to the same credential-store identity")
 	}
 }
 
@@ -963,7 +979,7 @@ func TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant(t *testing.T
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	seed := `{"activeProvider":"WORK","providers":[{"name":"work","apiKeyStored":true},{"name":"WORK"}]}`
+	seed := `{"activeProvider":"WORK","providers":[{"name":"work","catalogId":"xai","apiKeyStored":true},{"name":"WORK"}]}`
 	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -972,6 +988,9 @@ func TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant(t *testing.T
 		t.Fatal(err)
 	}
 	if err := store.Set("work", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("xai", "alias-key"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -983,11 +1002,14 @@ func TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant(t *testing.T
 	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
 		t.Fatalf("shared provider key = %q, %v, %v; want retained", key, ok, err)
 	}
+	if _, ok, err := store.Get("xai"); err != nil || ok {
+		t.Fatalf("exclusive catalog-alias key survived removal: ok=%v err=%v", ok, err)
+	}
 	var payload struct {
 		KeyRemoved bool `json:"keyRemoved"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || payload.KeyRemoved {
-		t.Fatalf("payload = %s, err = %v; shared key must not be reported removed", stdout.String(), err)
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || !payload.KeyRemoved {
+		t.Fatalf("payload = %s, err = %v; deleted catalog-alias key must be reported removed", stdout.String(), err)
 	}
 	after, err := os.ReadFile(configPath)
 	if err != nil {

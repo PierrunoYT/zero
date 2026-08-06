@@ -10,6 +10,7 @@ package tui
 
 import (
 	"os"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -365,6 +366,11 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	var activeAfter string
 	var cleanup tea.Cmd
 	if persisted {
+		credentialCandidates, _, err := config.ProviderCredentialDeletionCandidates(m.userConfigPath, name)
+		if err != nil {
+			wizard.manageStatus = "Delete failed: " + err.Error()
+			return m, nil
+		}
 		cfg, err := config.RemoveProvider(m.userConfigPath, name)
 		if err != nil {
 			wizard.manageStatus = "Delete failed: " + err.Error()
@@ -404,7 +410,12 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 				}
 			}
 		}
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, retainStoredKey)
+		if retainStoredKey {
+			credentialCandidates = slices.DeleteFunc(credentialCandidates, func(candidate string) bool {
+				return config.SameProviderIdentity(candidate, name)
+			})
+		}
+		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile, credentialCandidates)
 		// reloadProviderManagerRows (below, via the caller) rebuilds the manager
 		// list from savedProviders, so the on-disk marker transfer above must be
 		// mirrored here too — otherwise the survivor reads APIKeyStored: false in
@@ -432,9 +443,9 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 	// must not replace the resolved/filtered savedProviders wholesale.
 	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
-	if strings.EqualFold(strings.TrimSpace(m.providerName), strings.TrimSpace(name)) {
+	if config.SameProviderIdentity(m.providerName, name) {
 		notes = append(notes, "This session keeps running on it until you switch.")
-	} else if activeAfter != "" && !strings.EqualFold(activeAfter, name) {
+	} else if activeAfter != "" && !config.SameProviderIdentity(activeAfter, name) {
 		notes = append(notes, "Active provider: "+activeAfter+".")
 	}
 
@@ -494,15 +505,19 @@ type providerManagerCleanupMsg struct {
 // reads the token store — blocking work the confirm keypress must not wait on.
 // A failed key delete is surfaced rather than letting a lingering secret read
 // as a clean removal.
-func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile, retainStoredKey bool) tea.Cmd {
+func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile, credentialCandidates []string) tea.Cmd {
 	name := profile.Name
 	catalogID := profile.CatalogID
 	return func() tea.Msg {
 		notes := []string{}
-		if !retainStoredKey {
+		if len(credentialCandidates) > 0 {
 			keyStore, storeErr := providerKeyStoreForPath(configPath)
 			if storeErr == nil {
-				_, storeErr = keyStore.Delete(name)
+				for _, candidate := range credentialCandidates {
+					if _, storeErr = keyStore.Delete(candidate); storeErr != nil {
+						break
+					}
+				}
 			}
 			if storeErr != nil {
 				notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
@@ -683,7 +698,7 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		wizard.err = "name cannot be empty"
 		return m, nil
 	}
-	if !strings.EqualFold(newName, oldName) {
+	if !config.SameProviderIdentity(newName, oldName) {
 		if err := config.PreflightProviderWrite(m.userConfigPath, newName); err != nil {
 			wizard.err = err.Error()
 			return m, nil
@@ -781,7 +796,7 @@ func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit
 // in-memory saved list (replace by name, else append).
 func upsertSavedProviderProfile(saved []config.ProviderProfile, profile config.ProviderProfile) []config.ProviderProfile {
 	for index := range saved {
-		if strings.EqualFold(strings.TrimSpace(saved[index].Name), strings.TrimSpace(profile.Name)) {
+		if strings.TrimSpace(saved[index].Name) == strings.TrimSpace(profile.Name) {
 			saved[index] = profile
 			return saved
 		}
@@ -817,7 +832,7 @@ func (wizard *providerWizardState) renderManageStep(width int) []string {
 			marker = surface(zeroTheme.accent).Render("❯ ")
 		}
 		active := ""
-		if strings.EqualFold(strings.TrimSpace(row.profile.Name), strings.TrimSpace(wizard.manageActiveName)) {
+		if config.SameProviderIdentity(row.profile.Name, wizard.manageActiveName) {
 			active = surface(zeroTheme.accent).Render(" ● active")
 		}
 		name := padProviderManagerCell(row.profile.Name, nameWidth)
@@ -857,7 +872,7 @@ func providerManagerRowMeta(profile config.ProviderProfile) string {
 	if kind == "" {
 		kind = strings.TrimSpace(profile.Provider)
 	}
-	if catalog := strings.TrimSpace(profile.CatalogID); catalog != "" && !strings.EqualFold(catalog, profile.Name) {
+	if catalog := strings.TrimSpace(profile.CatalogID); catalog != "" && !config.SameProviderIdentity(catalog, profile.Name) {
 		kind = catalog
 	}
 	model := strings.TrimSpace(profile.Model)

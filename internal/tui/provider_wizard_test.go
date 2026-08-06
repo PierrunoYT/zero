@@ -1130,6 +1130,9 @@ func TestWizardProviderStoredKey(t *testing.T) {
 	if _, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "nokey"}); ok {
 		t.Fatal("provider without a stored key must not match")
 	}
+	if _, ok := (model{savedProviders: []config.ProviderProfile{{Name: "s", APIKeyStored: true}}}).wizardProviderStoredKey(providercatalog.Descriptor{ID: "ſ", Name: "ſ"}); ok {
+		t.Fatal("Unicode long-s must not reuse the distinct s profile's key")
+	}
 }
 
 func TestProviderWizardManageKeyRemove(t *testing.T) {
@@ -1138,14 +1141,14 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","apiKeyStored":true}]}`), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Set("acme", "sk-secret"); err != nil {
+	if err := store.Set("acme-cloud", "sk-secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1155,8 +1158,8 @@ func TestProviderWizardManageKeyRemove(t *testing.T) {
 	if next.providerWizard != nil {
 		t.Fatal("remove should close the wizard")
 	}
-	if _, ok, _ := store.Get("acme"); ok {
-		t.Fatal("remove should delete the key from the credential store")
+	if _, ok, _ := store.Get("acme-cloud"); ok {
+		t.Fatal("remove should delete the catalog-alias key from the credential store")
 	}
 }
 

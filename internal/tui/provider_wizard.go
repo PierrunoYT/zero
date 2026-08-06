@@ -235,8 +235,8 @@ func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) 
 		return saved
 	}
 	for _, profile := range saved {
-		if strings.EqualFold(strings.TrimSpace(profile.CatalogID), descriptor.ID) ||
-			strings.EqualFold(strings.TrimSpace(profile.Name), descriptor.ID) {
+		if config.SameProviderIdentity(profile.CatalogID, descriptor.ID) ||
+			config.SameProviderIdentity(profile.Name, descriptor.ID) {
 			return saved
 		}
 	}
@@ -1361,9 +1361,9 @@ func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (str
 		if !profile.APIKeyStored {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.Name)) ||
-			strings.EqualFold(strings.TrimSpace(profile.CatalogID), strings.TrimSpace(provider.ID)) ||
-			strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.ID)) {
+		if config.SameProviderIdentity(profile.Name, provider.Name) ||
+			config.SameProviderIdentity(profile.CatalogID, provider.ID) ||
+			config.SameProviderIdentity(profile.Name, provider.ID) {
 			return profile.Name, true
 		}
 	}
@@ -1391,16 +1391,35 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 				wizard.err = err.Error()
 				return m, nil
 			}
-			if store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath)); err == nil {
-				_, _ = store.Delete(name)
+			credentialCandidates, _, err := config.ProviderCredentialDeletionCandidates(m.userConfigPath, name)
+			if err != nil {
+				wizard.err = err.Error()
+				return m, nil
+			}
+			store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath))
+			if err != nil {
+				wizard.err = "remove stored key: " + err.Error()
+				return m, nil
+			}
+			for _, candidate := range credentialCandidates {
+				if _, err := store.Delete(candidate); err != nil {
+					wizard.err = "remove stored key: " + err.Error()
+					return m, nil
+				}
 			}
 			// The credential store keys secrets case-folded, so a case-variant
 			// sibling row (e.g. "work" beside the deleted key's "WORK") pointed at
 			// the same now-gone entry — clear the marker on every folded match,
 			// not just the exact row the user picked.
-			_, _ = config.ClearProviderKeyStoredCaseVariants(m.userConfigPath, name)
+			if _, err := config.ClearProviderKeyStoredCaseVariants(m.userConfigPath, name); err != nil {
+				wizard.err = "stored key removed, but its config marker could not be cleared: " + err.Error()
+				return m, nil
+			}
 		} else {
-			_, _ = config.ForgetProviderKey(name)
+			if _, err := config.ForgetProviderKey(name); err != nil {
+				wizard.err = "remove stored key: " + err.Error()
+				return m, nil
+			}
 		}
 		m.providerWizard = nil
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + name + ". Re-add it any time with /provider."})

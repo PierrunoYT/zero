@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -40,7 +39,7 @@ func ensureLoginProviderProfile(deps appDeps, provider string) string {
 	if err != nil {
 		return "warning: login saved, but no provider profile was written: " + err.Error()
 	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name)
@@ -166,7 +165,7 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 		_, _ = store.Delete(ensured.Name)
 		return "", err
 	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name), nil
@@ -464,18 +463,6 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	return exitSuccess
 }
 
-// appendUniqueOAuthCandidate appends candidate to candidates if it is
-// non-blank and not already present. The OAuth token store is a
-// case-sensitive map, so comparison here is exact, matching
-// ProviderProfile.OAuthLoginCandidates.
-func appendUniqueOAuthCandidate(candidates []string, candidate string) []string {
-	candidate = strings.TrimSpace(candidate)
-	if candidate == "" || slices.Contains(candidates, candidate) {
-		return candidates
-	}
-	return append(candidates, candidate)
-}
-
 func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	parsed, err := parseAuthArgs("logout", args)
 	if err != nil {
@@ -515,14 +502,11 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// first row that matched either field let `logout xai` retarget a
 	// {name:"work-xai", catalogId:"xai"} row — a different profile, with
 	// different credentials, than the one named.
-	configProvider := provider
-	target, identityMatch, identityErr := config.ResolvePersistedProviderIdentity(configPath, provider)
+	credentialCandidates, configProvider, identityErr := config.ProviderCredentialDeletionCandidates(configPath, provider)
 	if identityErr != nil {
 		if configErr == nil {
 			configErr = identityErr
 		}
-	} else if identityMatch != config.PersistedIdentityNone {
-		configProvider = strings.TrimSpace(target.Name)
 	}
 	manager, err := newAuthManager(deps, stdout, nil)
 	if err != nil {
@@ -543,21 +527,6 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// "xai" token and the "xai" profile's API key while clearing only
 	// work-xai's marker. When the id is shared, the user has to name the
 	// profile whose credential they mean.
-	credentialCandidates := []string{provider}
-	if configProvider != provider {
-		credentialCandidates = append(credentialCandidates, configProvider)
-	}
-	if identityMatch != config.PersistedIdentityNone {
-		catalogID := strings.TrimSpace(target.CatalogID)
-		exclusive, exclusiveErr := config.CatalogIdentityExclusive(configPath, catalogID, configProvider)
-		if exclusiveErr != nil {
-			if configErr == nil {
-				configErr = exclusiveErr
-			}
-		} else if exclusive {
-			credentialCandidates = appendUniqueOAuthCandidate(credentialCandidates, catalogID)
-		}
-	}
 	removed := false
 	for _, candidate := range credentialCandidates {
 		candidateRemoved, err := manager.Logout(candidate)

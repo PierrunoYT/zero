@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1485,4 +1486,40 @@ func TestCatalogIdentityExclusive(t *testing.T) {
 	if exclusive, err := CatalogIdentityExclusive(sole, "openrouter", "my-router"); err != nil || !exclusive {
 		t.Fatalf("exclusive = %v err = %v, want true when only the owner claims the id", exclusive, err)
 	}
+}
+
+func TestProviderCredentialDeletionCandidates(t *testing.T) {
+	t.Run("includes the persisted name and exclusive catalog alias", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+			{Name: "my-router", CatalogID: "openrouter"},
+		}}, 0o600)
+		candidates, canonical, err := ProviderCredentialDeletionCandidates(path, "MY-ROUTER")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"MY-ROUTER", "my-router", "openrouter"}
+		if !slices.Equal(candidates, want) || canonical != "my-router" {
+			t.Fatalf("candidates = %q canonical = %q, want %q and my-router", candidates, canonical, want)
+		}
+	})
+
+	t.Run("does not claim a shared catalog alias", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		writeConfigFixture(t, path, FileConfig{Providers: []ProviderProfile{
+			{Name: "work-xai", CatalogID: "xai"},
+			{Name: "personal-xai", CatalogID: "xai"},
+		}}, 0o600)
+		candidates, canonical, err := ProviderCredentialDeletionCandidates(path, "work-xai")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"work-xai"}; !slices.Equal(candidates, want) || canonical != "work-xai" {
+			t.Fatalf("candidates = %q canonical = %q, want %q and work-xai", candidates, canonical, want)
+		}
+		candidates, _, err = ProviderCredentialDeletionCandidates(path, "xai")
+		if err == nil || len(candidates) != 0 {
+			t.Fatalf("ambiguous alias candidates = %q err = %v, want no destructive candidates and an error", candidates, err)
+		}
+	})
 }

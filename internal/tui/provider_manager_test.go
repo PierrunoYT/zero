@@ -153,6 +153,18 @@ func TestProviderManagerDeleteConfirmsAndRemoves(t *testing.T) {
 	}
 }
 
+func TestProviderManagerIdentityListsKeepLongSDistinct(t *testing.T) {
+	saved := []config.ProviderProfile{{Name: "s", Model: "ascii"}}
+	saved = upsertSavedProviderProfile(saved, config.ProviderProfile{Name: "ſ", Model: "long-s"})
+	if len(saved) != 2 {
+		t.Fatalf("upsert merged distinct credential-store identities: %+v", saved)
+	}
+	m := model{savedProviders: saved[:1]}
+	if profile, ok := m.savedProviderByName("ſ"); ok {
+		t.Fatalf("lookup returned unrelated ASCII profile: %+v", profile)
+	}
+}
+
 // TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant mirrors
 // the CLI's TestRunProvidersRemoveTransfersKeyMarkerToSurvivingCaseVariant:
 // deleting the case-variant row that owns apiKeyStored must carry the marker
@@ -167,7 +179,7 @@ func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testin
 	seed := config.FileConfig{
 		ActiveProvider: "WORK",
 		Providers: []config.ProviderProfile{
-			{Name: "work", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v1", APIKeyStored: true, Model: "work-model"},
+			{Name: "work", CatalogID: "xai", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v1", APIKeyStored: true, Model: "work-model"},
 			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "https://work.example.com/v2", Model: "work-model-2"},
 		},
 	}
@@ -183,6 +195,9 @@ func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testin
 		t.Fatal(err)
 	}
 	if err := store.Set("work", "shared-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("xai", "alias-key"); err != nil {
 		t.Fatal(err)
 	}
 	m := newModel(context.Background(), Options{
@@ -201,7 +216,11 @@ func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testin
 	m, _ = m.openProviderManager()
 
 	m = managerKey(t, m, testKeyText("d")) // select "work" (row 0)
-	next, _ := m.handleProviderWizardKey(testKeyText("y"))
+	next, cleanup := m.handleProviderWizardKey(testKeyText("y"))
+	if cleanup == nil {
+		t.Fatal("delete did not schedule credential cleanup")
+	}
+	next = drainProviderManagerCmds(t, next, cleanup)
 
 	persisted := readManagerConfig(t, next.userConfigPath)
 	if len(persisted.Providers) != 1 || persisted.Providers[0].Name != "WORK" || !persisted.Providers[0].APIKeyStored {
@@ -209,6 +228,9 @@ func TestProviderManagerDeleteTransfersKeyMarkerToSurvivingCaseVariant(t *testin
 	}
 	if key, ok, err := store.Get("work"); err != nil || !ok || key != "shared-key" {
 		t.Fatalf("shared provider key = %q, %v, %v; want retained", key, ok, err)
+	}
+	if _, ok, err := store.Get("xai"); err != nil || ok {
+		t.Fatalf("exclusive catalog-alias key survived removal: ok=%v err=%v", ok, err)
 	}
 	// The marker transfer must be mirrored into the in-memory savedProviders
 	// too — reloadProviderManagerRows rebuilds the manager list from it, and

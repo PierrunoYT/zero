@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -49,6 +50,13 @@ func ValidatePersistedProviderNames(cfg FileConfig) error {
 // precisely what ValidatePersistedProviderNames permits as a distinct pair.
 func sameProviderIdentity(a string, b string) bool {
 	return credstore.NormalizeProvider(a) == credstore.NormalizeProvider(b)
+}
+
+// SameProviderIdentity exposes the credential store's provider-name identity
+// rule to UI and CLI list operations. It deliberately differs from
+// strings.EqualFold for Unicode spellings such as "s" and long-s.
+func SameProviderIdentity(a string, b string) bool {
+	return sameProviderIdentity(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // PreflightUserConfig validates existing user config before any command makes
@@ -316,6 +324,55 @@ func CatalogIdentityExclusive(path, catalogID, owner string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// ProviderCredentialDeletionCandidates returns every credential-store key that
+// can belong exclusively to the addressed persisted profile. The requested
+// spelling and canonical row name are always included; a catalog id is included
+// only when no sibling row can own credentials under it.
+//
+// The canonical name is returned separately for marker mutations. On a config
+// read error, callers still receive the requested spelling so logout can delete
+// the credential it was explicitly asked to clear before reporting the error.
+func ProviderCredentialDeletionCandidates(path, addressedName string) (candidates []string, canonicalName string, err error) {
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" && !slices.Contains(candidates, candidate) {
+			candidates = append(candidates, candidate)
+		}
+	}
+	canonicalName = strings.TrimSpace(addressedName)
+	add(canonicalName)
+	row, match, err := ResolvePersistedProviderIdentity(path, addressedName)
+	if err != nil {
+		return candidates, canonicalName, err
+	}
+	if match == PersistedIdentityNone {
+		providers, err := persistedProviders(path)
+		if err != nil {
+			return candidates, canonicalName, err
+		}
+		catalogMatches := 0
+		for _, provider := range providers {
+			if sameProviderIdentity(provider.CatalogID, addressedName) {
+				catalogMatches++
+			}
+		}
+		if catalogMatches > 1 {
+			return nil, canonicalName, fmt.Errorf("provider identity %q is ambiguous: %d saved profiles use it as a catalog id", addressedName, catalogMatches)
+		}
+		return candidates, canonicalName, nil
+	}
+	canonicalName = strings.TrimSpace(row.Name)
+	add(canonicalName)
+	exclusive, err := CatalogIdentityExclusive(path, row.CatalogID, canonicalName)
+	if err != nil {
+		return candidates, canonicalName, err
+	}
+	if exclusive {
+		add(row.CatalogID)
+	}
+	return candidates, canonicalName, nil
 }
 
 // PreflightProviderWrite also rejects a new spelling that would share a
