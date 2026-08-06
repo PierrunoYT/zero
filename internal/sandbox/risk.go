@@ -99,8 +99,10 @@ func matchesUnparseableNetworkAt(command string, depth int) bool {
 				return true
 			}
 		}
-		if body := cmdCommandBodyTokenInfo(tokenInfo); len(body) > 0 && fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
-			return true
+		for _, body := range cmdCommandBodyTokenInfoCandidates(tokenInfo) {
+			if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+				return true
+			}
 		}
 	}
 	return false
@@ -135,6 +137,13 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 		program = "cmd"
 	}
 	if program == "git" && matchesUnparseableGitNetwork(args) {
+		return true
+	}
+	_, opaquePowerShellPayload := fallbackPowerShellPayload(args)
+	if (program == "powershell" || program == "pwsh") && opaquePowerShellPayload {
+		// Encoded commands and script files cannot be resolved safely after the
+		// outer command has already failed to parse. Preserve the network gate
+		// rather than treating an opaque executable payload as local.
 		return true
 	}
 	if unparseableNetworkPattern.MatchString(strings.Join(append([]string{program}, args...), " ")) {
@@ -186,12 +195,19 @@ func fallbackBodyUsesNetwork(body []string, depth int) bool {
 
 func fallbackPayloadUsesNetwork(payload string, depth int) bool {
 	fields := strings.Fields(payload)
+	for index := range fields {
+		fields[index] = normalizeCMDToken(fields[index])
+	}
 	if len(fields) > 0 && strings.EqualFold(fields[0], "start") {
 		// Command-interpreter recursion can lose quote provenance when the outer
 		// tokenizer has already removed cmd's title quotes. START always treats the
 		// first quoted operand as a title, so conservatively evaluate both possible
 		// payload positions rather than dropping the launched command.
-		for _, candidate := range [][]string{fields[1:], fields[2:]} {
+		candidates := [][]string{fields[1:]}
+		if len(fields) > 1 {
+			candidates = append(candidates, fields[2:])
+		}
+		for _, candidate := range candidates {
 			if len(candidate) > 0 && fallbackBodyUsesNetwork(candidate, depth) {
 				return true
 			}
@@ -203,8 +219,10 @@ func fallbackPayloadUsesNetwork(payload string, depth int) bool {
 				return true
 			}
 		}
-		if body := cmdCommandBodyTokenInfo(tokenInfo); len(body) > 0 && fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
-			return true
+		for _, body := range cmdCommandBodyTokenInfoCandidates(tokenInfo) {
+			if fallbackBodyUsesNetwork(fallbackTokenValues(body), depth) {
+				return true
+			}
 		}
 	}
 	return false
@@ -308,7 +326,7 @@ func fallbackTokenValues(tokens []fallbackCommandToken) []string {
 	return values
 }
 
-func cmdCommandBodyTokenInfo(fields []fallbackCommandToken) []fallbackCommandToken {
+func cmdCommandBodyTokenInfoCandidates(fields []fallbackCommandToken) [][]fallbackCommandToken {
 	fields = append([]fallbackCommandToken(nil), fields...)
 	if len(fields) > 0 {
 		fields[0].value = strings.TrimPrefix(fields[0].value, "@")
@@ -321,7 +339,15 @@ func cmdCommandBodyTokenInfo(fields []fallbackCommandToken) []fallbackCommandTok
 		case "call", "else", "then", "do":
 			fields = fields[1:]
 		case "start":
-			fields = cmdStartPayloadTokenInfo(fields[1:])
+			operands := cmdStartOperandsTokenInfo(fields[1:])
+			candidates := make([][]fallbackCommandToken, 0, 2)
+			if len(operands) > 0 {
+				candidates = append(candidates, normalizeCMDProgramToken(operands))
+			}
+			if len(operands) > 1 {
+				candidates = append(candidates, normalizeCMDProgramToken(operands[1:]))
+			}
+			return candidates
 		case "if":
 			values := cmdConditionPayload(fallbackTokenValues(fields[1:]))
 			if len(values) == 0 {
@@ -335,13 +361,18 @@ func cmdCommandBodyTokenInfo(fields []fallbackCommandToken) []fallbackCommandTok
 			}
 			fields = fields[len(fields)-len(values):]
 		default:
-			if len(fields) > 0 {
-				fields[0].value = normalizeCMDToken(fields[0].value)
-			}
-			return fields
+			return [][]fallbackCommandToken{normalizeCMDProgramToken(fields)}
 		}
 	}
 	return nil
+}
+
+func normalizeCMDProgramToken(fields []fallbackCommandToken) []fallbackCommandToken {
+	fields = append([]fallbackCommandToken(nil), fields...)
+	if len(fields) > 0 {
+		fields[0].value = normalizeCMDToken(fields[0].value)
+	}
+	return fields
 }
 
 // cmdStartPayload skips START's own options and its optional window title so
@@ -368,6 +399,14 @@ func cmdStartPayload(fields []string) []string {
 }
 
 func cmdStartPayloadTokenInfo(fields []fallbackCommandToken) []fallbackCommandToken {
+	fields = cmdStartOperandsTokenInfo(fields)
+	if len(fields) > 0 && fields[0].quoted {
+		fields = fields[1:]
+	}
+	return fields
+}
+
+func cmdStartOperandsTokenInfo(fields []fallbackCommandToken) []fallbackCommandToken {
 	for len(fields) > 0 && strings.HasPrefix(fields[0].value, "/") {
 		switch strings.ToLower(fields[0].value) {
 		case "/d", "/node", "/affinity":
@@ -378,9 +417,6 @@ func cmdStartPayloadTokenInfo(fields []fallbackCommandToken) []fallbackCommandTo
 		default:
 			fields = fields[1:]
 		}
-	}
-	if len(fields) > 0 && fields[0].quoted {
-		fields = fields[1:]
 	}
 	return fields
 }
@@ -473,11 +509,17 @@ func isShellCommandFlag(token string) bool {
 func fallbackCommandInterpreterPayload(program string, args []string) string {
 	for index, arg := range args {
 		flag := strings.ToLower(arg)
-		isCommandFlag := program == "cmd" && (flag == "/c" || flag == "/k") ||
-			(program == "powershell" || program == "pwsh") && (flag == "-c" || flag == "-command")
-		if isCommandFlag && index+1 < len(args) {
-			return strings.Join(args[index+1:], " ")
+		if program == "cmd" && (flag == "/c" || flag == "/k") {
+			index++
+			for index < len(args) && isCMDInterpreterSwitch(args[index]) {
+				index++
+			}
+			return strings.Join(args[index:], " ")
 		}
+	}
+	if program == "powershell" || program == "pwsh" {
+		payload, _ := fallbackPowerShellPayload(args)
+		return payload
 	}
 	return ""
 }
@@ -485,11 +527,49 @@ func fallbackCommandInterpreterPayload(program string, args []string) string {
 func fallbackCommandInterpreterArgs(program string, args []string) []string {
 	for index, arg := range args {
 		flag := strings.ToLower(arg)
-		if program == "cmd" && (flag == "/c" || flag == "/k") && index+1 < len(args) {
-			return args[index+1:]
+		if program == "cmd" && (flag == "/c" || flag == "/k") {
+			index++
+			for index < len(args) && isCMDInterpreterSwitch(args[index]) {
+				index++
+			}
+			return args[index:]
 		}
 	}
 	return nil
+}
+
+func isCMDInterpreterSwitch(arg string) bool {
+	flag := strings.ToLower(arg)
+	switch flag {
+	case "/d", "/s", "/q", "/a", "/u":
+		return true
+	default:
+		return strings.HasPrefix(flag, "/e:") || strings.HasPrefix(flag, "/f:") || strings.HasPrefix(flag, "/v:")
+	}
+}
+
+func fallbackPowerShellPayload(args []string) (payload string, opaque bool) {
+	for index, arg := range args {
+		flag := strings.TrimPrefix(strings.ToLower(arg), "-")
+		switch {
+		case powerShellFlagAbbreviates(flag, "command"):
+			if index+1 < len(args) {
+				return strings.Join(args[index+1:], " "), false
+			}
+			return "", false
+		case flag == "ec" || powerShellFlagAbbreviates(flag, "encodedcommand"),
+			powerShellFlagAbbreviates(flag, "file"):
+			if index+1 < len(args) {
+				return strings.Join(args[index+1:], " "), true
+			}
+			return "", true
+		}
+	}
+	return "", false
+}
+
+func powerShellFlagAbbreviates(flag, fullName string) bool {
+	return flag != "" && strings.HasPrefix(fullName, flag)
 }
 
 func fallbackEnvSplitPayload(args []string) string {
@@ -629,6 +709,9 @@ func fallbackCommandTokenInfo(command string) [][]fallbackCommandToken {
 				wordQuoted = true
 			case r:
 				quote = 0
+				if word.Len() == 0 {
+					wordQuoted = false
+				}
 			default:
 				word.WriteRune(r)
 			}

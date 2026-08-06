@@ -300,21 +300,16 @@ func gitUsesNetwork(words []string) bool {
 
 // gitTargetsRemoteArchive reports whether a git archive invocation carries the
 // --remote option, in either its joined (--remote=<repo>) or separated
-// (--remote <repo>) spelling. The whole argument list is scanned rather than
-// only the part after the subcommand, so option order cannot hide it.
-//
-// Scanning stops at a standalone `--`: everything after it is a pathspec, so
-// `git archive HEAD -- --remote` archives a tree entry NAMED --remote from the
-// local object store and never touches the network. Treating that as remote
-// would cost a network prompt — and a network grant — on a purely local
-// command. Same end-of-options rule hasRecursiveForce applies to `rm -- -rf`.
+// (--remote <repo>) spelling. Git accepts archive options after the tree-ish,
+// so scanning stops only at a standalone `--`; everything after that separator
+// is a pathspec rather than an option.
 func gitTargetsRemoteArchive(words []string) bool {
-	for _, word := range words {
+	for _, arg := range words {
+		word := strings.ToLower(arg)
 		if word == "--" {
 			return false
 		}
-		lowered := strings.ToLower(word)
-		if lowered == "--remote" || strings.HasPrefix(lowered, "--remote=") {
+		if word == "--remote" || strings.HasPrefix(word, "--remote=") {
 			return true
 		}
 	}
@@ -369,13 +364,12 @@ var gitTerminalGlobalOptions = map[string]bool{
 // resolves the same option set for its own prefix matching.
 func parseGitInvocation(words []string) gitInvocation {
 	for index := 0; index < len(words); index++ {
-		word := words[index]
+		word := strings.ToLower(words[index])
 		if word == "" {
 			continue
 		}
-		lowered := strings.ToLower(word)
-		if gitTerminalGlobalOptions[lowered] || strings.HasPrefix(lowered, "--list-cmds=") {
-			return gitInvocation{kind: gitCommandTerminalGlobal, terminalOption: lowered}
+		if gitTerminalGlobalOptions[word] || strings.HasPrefix(word, "--list-cmds=") {
+			return gitInvocation{kind: gitCommandTerminalGlobal, terminalOption: word}
 		}
 		if strings.HasPrefix(word, "-") {
 			// A joined value (--git-dir=/x, -C/x) is one token and needs no skip;
@@ -406,7 +400,7 @@ func gitSubcommand(words []string) string {
 // SEPARATE token (mirrors gitOptionConsumesValue in internal/agent).
 func gitGlobalOptionConsumesValue(option string) bool {
 	switch option {
-	case "-C", "-c", "--attr-source", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
+	case "-c", "--attr-source", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
 		return true
 	default:
 		return false

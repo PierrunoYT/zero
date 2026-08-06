@@ -97,8 +97,12 @@ func TestAnalyzeCommand(t *testing.T) {
 		// named "--remote" from the local object store (issue #703 review).
 		{name: "git archive pathspec named --remote", script: "git archive HEAD -- --remote", network: false},
 		{name: "git -C archive pathspec named --remote", script: "git -C repo archive HEAD -- --remote=origin", network: false},
+		{name: "git archive post-tree --remote", script: "git archive HEAD --remote", network: true},
+		{name: "git archive post-tree --remote value", script: "git archive HEAD --remote=origin", network: true},
 		// A real --remote before the separator still is one.
 		{name: "git remote archive with pathspec", script: "git archive --remote=origin HEAD -- src", network: true},
+		{name: "git remote archive after output option", script: "git archive -o out.tar --remote origin HEAD", network: true},
+		{name: "git remote archive after mtime option", script: "git archive --mtime 2024-01-01 --remote origin HEAD", network: true},
 		// Both spellings of the shell launcher's command flag are payloads.
 		{name: "bash --command wraps curl", script: `bash --command 'curl https://x.test'`, network: true},
 		{name: "git status is offline", script: "git status", network: false},

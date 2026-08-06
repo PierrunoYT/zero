@@ -146,6 +146,15 @@ func TestEngineClassifiesCMDInvocationFormsAsNetwork(t *testing.T) {
 		`cmd.exe /c call curl https://evil.test & rem '`,
 		`if not 1==2 curl https://evil.test & rem '`,
 		`start "" curl https://evil.test & rem '`,
+		`start MyTitle curl https://evil.test & rem '`,
+		`start "" c^u^r^l https://evil.test & rem '`,
+		`call start MyTitle curl https://evil.test & rem '`,
+		`if 1==1 start MyTitle curl https://evil.test & rem '`,
+		`cmd /c /d curl https://evil.test & rem '`,
+		`powershell -EncodedCommand curl & rem '`,
+		`powershell -co curl https://evil.test & rem '`,
+		`powershell -e ZQB2AGkAbAA= & rem '`,
+		`pwsh -ec ZQB2AGkAbAA= & rem '`,
 		`if 1==1 (curl https://evil.test) & rem '`,
 	} {
 		t.Run(command, func(t *testing.T) {
