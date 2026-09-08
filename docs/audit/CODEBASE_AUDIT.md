@@ -4,6 +4,8 @@
 - **Audited revision:** `1b5db17` (`main`)
 - **Scope:** the complete Go repository, its build/release automation, and the
   Node wrapper dependencies that ship the Go binary.
+- **GitHub tracking check:** 2026-09-08 against `PierrunoYT/zero`; repository
+  issues are disabled and there were no open pull requests.
 - **Change policy:** audit documentation only; no production remediation or
   refactoring was performed.
 
@@ -125,15 +127,73 @@ criteria are in [Known Issues](KNOWN_ISSUES.md).
 
 - **Critical:** none confirmed. The audit found no demonstrated data corruption,
   exploitable unauthenticated remote service, deadlock, or race-detector failure.
-- **High:** SEC-01 and SEC-02. Both concern an authority boundary with plausible
-  credential disclosure or host write impact and require failing regressions
-  before remediation.
-- **Medium / medium-high:** SEC-03/04/05/06/07/08, TEST-01/02, DEP-01, ARCH-01/02/
-  03/04, and REL-01. Preconditions and confidence are explicit in
+- **High (2):** SEC-01 and SEC-02. Both concern an authority boundary with
+  plausible credential disclosure or host write impact and require failing
+  regressions before remediation.
+- **Medium-high (2):** SEC-03 and SEC-05.
+- **Medium (12):** SEC-04/06/07/08, TEST-01/02, DEP-01, ARCH-01/02/03/04, and
+  REL-01. Preconditions and confidence are explicit in
   [Known Issues](KNOWN_ISSUES.md).
-- **Low / low-medium:** SEC-09, CON-01/02, COR-01, QUAL-01, TEST-03/04, and
-  PERF-01. These are bounded lifecycle, protocol robustness, supply-chain
-  defense, and quality-debt items rather than confirmed severe failures.
+- **Low-medium (7):** CON-01/02, COR-01, QUAL-01, TEST-03/04, and PERF-01.
+- **Low (1):** SEC-09. The low and low-medium entries are bounded lifecycle,
+  protocol robustness, supply-chain defense, and quality-debt items rather than
+  confirmed severe failures.
+
+This produces **24 distinct findings**. CON-03 in the concurrency report is a
+cross-classification of SEC-02/03/04 as filesystem interleavings, not a 25th
+finding.
+
+## Complete finding report
+
+This table makes the main report self-contained. “Observed” describes the code
+or check result; “risk” states the consequence under its prerequisites, not a
+claim of demonstrated exploitation. Detailed evidence, test criteria, and
+qualifications remain in the linked specialist sections.
+
+| ID | Severity | Observed evidence | Risk and qualification | Recommended action |
+|---|---|---|---|---|
+| SEC-01 | High | Provider I/O can follow redirects after adapters attach configurable/custom headers ([detail](SECURITY_AUDIT.md#sec-01--cross-origin-redirects-may-retain-custom-authentication-headers)). | An endpoint-controlled cross-origin redirect may receive a non-standard credential header. Go strips recognized sensitive headers in common cases; no production exploit was demonstrated. | Default to same-origin redirects, reject HTTPS downgrade, and rebuild any explicitly allowed cross-origin request from a non-sensitive allowlist. |
+| SEC-02 | High | Workspace components are checked with `Lstat`, then write/edit opens the absolute pathname separately ([detail](SECURITY_AUDIT.md#sec-02--workspace-write-tools-have-a-check-to-use-pathname-window)). | A concurrent component swap could redirect an authorized write outside its root, subject to the effective OS sandbox. Static traversal and observed symlinks already fail. | Use rooted, handle-relative traversal/create/replace on every platform; prove the old mechanism with deterministic swap and Windows reparse tests first. |
+| SEC-03 | Medium-high | MCP canonicalizes and checks a resource path before a later stat/read by pathname ([detail](SECURITY_AUDIT.md#sec-03--mcp-resource-scope-decision-is-separated-from-file-open)). | A concurrent local swap can invalidate the scope decision and disclose another readable file to the MCP peer. Static traversal, external symlinks, non-regular files, and oversized resources already fail. | Open through a rooted authority, then type-check, limit, and read that same object. |
+| SEC-05 | Medium-high | Updater metadata/download streams and archive extraction have no explicit byte, entry, per-file, or total-expansion budgets ([detail](SECURITY_AUDIT.md#sec-05--go-updater-does-not-bound-downloaded-or-expanded-input)). | A bad or compromised source can consume disk, I/O, CPU, and update time. Context deadlines do not bound fast bytes. | Enforce streamed metadata/download and extraction budgets, handle overflow, clean only this run's staging, and never promote partial output. |
+| SEC-04 | Medium | Archive names are checked lexically before pathname-based directory, link, and file creation in private staging ([detail](SECURITY_AUDIT.md#sec-04--update-extraction-confinement-is-pathname-based)). | A same-account concurrent swap could redirect extraction. The audit did not demonstrate privilege expansion or a static archive-only escape; private staging and checksum verification reduce exposure. | Extract relative to one rooted destination authority and define a fail-closed archive-symlink policy with native reparse tests. |
+| SEC-06 | Medium | The updater obtains an archive and its SHA-256 sibling from the same release source ([detail](SECURITY_AUDIT.md#sec-06--sibling-checksums-do-not-independently-authenticate-releases)). | Checksums catch corruption/mismatch but not replacement of both assets by a compromised publisher/source. | Retain checksums and add independently verifiable signatures or attestations with pinned identity, rotation, and recovery tests. |
+| SEC-07 | Medium | Default OAuth storage is an atomic mode-0600 plaintext JSON file ([detail](SECURITY_AUDIT.md#sec-07--oauth-file-storage-defaults-to-plaintext)). | Same-account compromise, backups, or snapshots can expose bearer/refresh tokens. Restrictive directories/files already prevent ordinary cross-user reading. | Introduce a keyring/encrypted automatic default with explicit plaintext opt-in and a reversible, transactional migration. |
+| SEC-08 | Medium | Remote daemon `run`, `attach`, and `link` accept a literal bearer token through `--token` ([detail](SECURITY_AUDIT.md#sec-08--remote-daemon-bearer-tokens-are-accepted-in-argv)). | The optional value can enter shell history or process inspection. TLS, constant-time comparison, environment/token-file input, and secret-free link files are existing controls. | Add/document token-file or protected input, deprecate literal argv compatibly, and test that argv, errors, logs, and links remain secret-free. |
+| TEST-01 | Medium | CI runs plain tests although `make test` enables `-race` ([detail](CONCURRENCY_AUDIT.md#test-01--race-detection-is-not-a-ci-gate)). | A future memory race can merge despite this audit's full race run passing. | Require a full Linux race job while retaining plain native-platform tests. |
+| TEST-02 | Medium | Redirect, pathname-swap, update-limit, daemon-token, short-write, OAuth-shutdown, and cleanup failure mechanisms lack direct adversarial regressions ([detail](TESTING_AUDIT.md#test-02--missing-adversarial-boundary-cases)). | A remediation may test the wrong layer or regress silently. | Add deterministic tests that fail on the unfixed mechanism for the claimed reason before production changes. |
+| DEP-01 | Medium | npm audit reports moderate findings in `@hono/node-server@1.19.14` and `hono@4.12.27` through `tuistory@0.10.0` ([detail](TESTING_AUDIT.md#dependency-and-supply-chain-testing)). | Dependency exposure exists, but use of the affected Hono paths by Zero was not established. | Map reachability, test the supported helper/platform matrix, then upgrade or record a time-bounded evidence-backed exception. |
+| ARCH-01 | Medium | `tui/model.go`, `agent/loop.go`, and `cli/app.go` are 6,064, 3,487, and 1,589 lines; CLI/TUI dependency fan-out is high ([detail](CURRENT_ARCHITECTURE.md#current-pressure-points)). | Change review, state ownership, regression analysis, and lifecycle reasoning are expensive; size alone is not a correctness defect. | Preserve root facades and extract one behavior-compatible command service, agent collaborator, or feature-owned TUI model per review. |
+| ARCH-02 | Medium | Config resolution imports runtime feature packages and performs domain-specific validation ([`resolver.go`](../../internal/config/resolver.go#L1-L17)). | Configuration layering is coupled to the features it configures, increasing fan-out and import-cycle pressure. | Separate parse/layer/trust normalization from narrow cycle-free validators without changing precedence or fail-closed restrictions. |
+| ARCH-03 | Medium | Permission names, aliases, parsing, and ordering are mirrored across agent, swarm, specialist, and CLI surfaces ([detail](TARGET_ARCHITECTURE.md#2-canonical-runtime-contracts)). | Vocabulary can drift and unknown values may behave inconsistently across boundaries. | Establish one cycle-free canonical enum/order; convert legacy aliases only at ingress and fail closed on unknown values. |
+| ARCH-04 | Medium | `tools.Result` and `agent.ToolResult` overlap and retain transitional fields ([`tools/types.go`](../../internal/tools/types.go#L95-L152), [`agent/types.go`](../../internal/agent/types.go#L73-L128)). | Multiple internal outcomes complicate redaction, persistence, and cross-surface compatibility. | Inventory encodings/callers, choose one registry-finalized internal outcome, and adapt legacy fields only at persistence/external boundaries. |
+| REL-01 | Medium | Several deferred or shutdown paths discard or only partly expose cleanup failures ([detail](CONCURRENCY_AUDIT.md#rel-01--stateful-cleanup-errors-are-inconsistently-observable)). | Unlock, persistence, process, or transport cleanup failure can be invisible or lose another actionable cause. | Classify cleanup as stateful/actionable or best-effort; join actionable errors and emit bounded redaction-safe diagnostics for advisory cleanup. |
+| CON-01 | Low-medium | MCP registry timeout can return while a client-factory goroutine remains if that implementation ignores context ([detail](CONCURRENCY_AUDIT.md#con-01--mcp-timeout-may-leave-a-goroutine-if-a-factory-ignores-context)). | A nonconforming pluggable factory can leak bounded-per-attempt goroutines/resources. No leak from current built-ins was demonstrated. | Require and test context compliance or add an independently closable/bounded ownership mechanism. |
+| CON-02 | Low-medium | Three loopback OAuth servers lack explicit I/O timeouts and do not join or report terminal `Serve`/`Shutdown` results ([detail](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle)). | A local slow-header connection can survive a failed bounded shutdown. Exposure is loopback-only, and state/PKCE controls remain strong. | Add conservative server bounds and idempotent close/wait with observable completion; test cancellation and slow headers. |
+| COR-01 | Low-medium | Daemon framing and ACP newline writers do not reject a legal nil-error short write ([detail](TESTING_AUDIT.md#cor-01--daemon-and-acp-writers-assume-complete-writes)). | A generic writer can silently emit a truncated protocol record, although common production writers normally return an error. | Retry to completion or return `io.ErrShortWrite`; add partial and zero-progress writer tests without changing schemas. |
+| QUAL-01 | Low-medium | `make deadcode` exits successfully but reports 76 unreachable declarations ([detail](TESTING_AUDIT.md#qual-01--advisory-dead-code-backlog)). | Unclassified dormant/platform/compatibility code raises maintenance cost; bulk deletion could break supported variants. | Classify each result and enforce a no-new-unexplained baseline; remove only separately evidenced dead code. |
+| TEST-03 | Low-medium | No Go fuzz targets were found ([detail](TESTING_AUDIT.md#test-03--no-fuzzing)). | Parser and protocol edge cases rely entirely on example-based coverage. | Seed focused fuzzers for high-risk parsers, archive names, protocol frames, and redaction while retaining deterministic regressions. |
+| TEST-04 | Low-medium | Node action-summary tests and npm advisory policy are not visible as main-CI gates ([detail](TESTING_AUDIT.md#test-04--node-helper-checks-are-not-visibly-part-of-main-ci)). | A shipped wrapper or lockfile regression can bypass the primary Go quality path. | Add a small lockfile/helper job or document and enforce the separate release gate. |
+| PERF-01 | Low-medium | The uncached suite took 3m35s and the race suite 4m11s, dominated by provider tests with real-time waits ([detail](TESTING_AUDIT.md#perf-01--slow-full-suite-feedback)). | Slow feedback discourages frequent full/race execution; no production hot-path defect was established. | Introduce clocks/short test durations while retaining one realistic integration case per timeout class and scenario benchmarks for extracted hot paths. |
+| SEC-09 | Low | Release workflow checkouts retain Actions' persisted Git credential by default while CI disables it ([detail](SECURITY_AUDIT.md#sec-09--release-checkouts-retain-workflow-credentials)). | Trusted release steps receive avoidable credential availability; no exfiltration was observed. | Set `persist-credentials: false` unless a documented later Git operation requires it; continue explicit step-scoped publication tokens. |
+
+## Open GitHub issue and pull-request reconciliation
+
+The audit findings above use local IDs; they are not GitHub issue numbers. A
+live GitHub check on 2026-09-08 established:
+
+| Repository evidence | Result |
+|---|---|
+| Repository metadata | `PierrunoYT/zero`, active, default branch `main`; remote `main` was `1b5db1765672820caac1684b168c9898b5ba3593`, exactly the audited source revision. |
+| Issue tracker | `has_issues=false`; `gh issue list --state open` reports that issues are disabled. There is therefore no repository open-issue set to match. |
+| Open pull requests | GitHub pulls API and `gh pr list --state open` both returned an empty list. |
+| Finding coverage | **0 of 24** findings are represented by an open repository issue or covered by an open pull request. This does not rule out private work, draft work outside this repository, or external-tracker work. |
+
+Before remediation begins, maintainers should choose an approved tracking venue,
+create one scoped item per independently reviewable phase, and preserve the audit
+IDs in titles/descriptions. Do not infer that a finding is accepted merely
+because it is documented here. The same point-in-time status is recorded in
+[Known Issues](KNOWN_ISSUES.md#github-tracking-status).
 
 ## Cross-cutting assessment
 

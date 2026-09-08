@@ -5,6 +5,18 @@ All entries are **open audit findings** unless explicitly marked otherwise; no
 remediation was implemented. Severity expresses potential impact under the
 listed preconditions, not proof of exploitation.
 
+## GitHub tracking status
+
+As of 2026-09-08, GitHub reports `has_issues=false` for `PierrunoYT/zero`, so its
+issue tracker is disabled. Both the open-pulls API and `gh pr list --state open`
+returned no pull requests. Consequently, none of the 24 audit findings is
+represented by an open repository issue or covered by an open pull request.
+Audit IDs are local identifiers, not GitHub issue numbers. Private work and work
+in an external tracker cannot be inferred from the public repository state.
+
+The command-level evidence and recommended tracking action are in
+[Codebase Audit](CODEBASE_AUDIT.md#open-github-issue-and-pull-request-reconciliation).
+
 ## Ranking method
 
 Rank combines impact, plausible exposure, confidence in the observed mechanism,
