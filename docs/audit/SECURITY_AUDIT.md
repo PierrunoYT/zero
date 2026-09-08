@@ -14,6 +14,7 @@ The review considered:
 - an untrusted repository and processes it starts while Zero is operating;
 - a configured or compromised provider/MCP endpoint;
 - a remote MCP client with access to Zero's MCP server;
+- a remote daemon client or local shell/process able to inspect command lines;
 - another process running as the same local user and able to race writable
   workspace or temporary paths;
 - a compromised release source/publisher or maliciously large release response;
@@ -145,7 +146,7 @@ component swap between validation and open, including Windows reparse semantics.
 
 ### SEC-04 — Update extraction confinement is pathname-based
 
-- **Severity:** High
+- **Severity:** Medium
 - **Confidence:** high in the window; practical exposure is reduced by updater
   staging.
 
@@ -157,10 +158,12 @@ uses pathname `MkdirAll`, `Symlink`, and `OpenFile`
 contain symlinks whose target is lexically inside the destination. No rooted
 handle binds the later operations to the destination object.
 
-**Risk.** A same-user actor able to swap a staging descendant at the right time
-could redirect extraction outside its destination. This is a pathname TOCTOU
-risk, not a claim that the reviewed static `../` checks are bypassable by a
-single ordinary archive entry.
+**Risk.** A same-account actor able to discover and swap a staging descendant at
+the right time could redirect extraction outside its destination. That actor
+normally already has the account's filesystem authority, so this audit did not
+demonstrate privilege or sandbox-boundary expansion. This is confinement
+hardening against a concurrent pathname race, not a claim that one ordinary
+archive bypasses the reviewed static `../` checks.
 
 **Preconditions/limits.** Standalone update creates a private temporary parent
 and verifies the archive checksum before extraction
@@ -250,6 +253,55 @@ macOS or encrypted file elsewhere
 existing plaintext explicitly and reversibly, retain an opt-in plaintext mode,
 and ensure headless/keyring-unavailable failures have actionable recovery.
 
+### SEC-08 — Remote daemon bearer tokens are accepted in argv
+
+- **Severity:** Medium
+- **Confidence:** high in exposure; impact depends on host process/history
+  visibility.
+
+Remote daemon `run` and `attach` parse both `--token value` and `--token=value`
+([`daemon.go`](../../internal/cli/daemon.go#L276-L317),
+[`daemon.go`](../../internal/cli/daemon.go#L371-L410)); `link` advertises and
+parses the same form before constructing the authenticated client
+([`daemon.go`](../../internal/cli/daemon.go#L52-L75),
+[`daemon.go`](../../internal/cli/daemon.go#L587-L639)). A literal supplied this
+way can remain in shell history and can be visible in process-argument
+inspection while the client runs.
+
+The bridge itself correctly requires TLS, compares a nonempty token in constant
+time, does not log it, and supports `ZERO_DAEMON_REMOTE_TOKEN` or
+`ZERO_DAEMON_REMOTE_TOKEN_FILE`
+([`auth.go`](../../internal/daemon/remote/auth.go#L1-L17),
+[`auth.go`](../../internal/daemon/remote/auth.go#L33-L86)). Saved session links
+explicitly omit tokens
+([`sessionlink.go`](../../internal/daemon/remote/sessionlink.go#L10-L30)). The
+risk is therefore an optional client-input path, not wire plaintext or link-file
+persistence.
+
+**Recommendation/tests.** Deprecate and remove literal `--token` after a
+compatibility window; make environment/token-file input the documented path and
+consider an explicit `--token-file`. Until removal, warn without echoing the
+value. Tests should inspect spawned argv/help/diagnostics, verify token-file
+permissions/error redaction, and prove saved links remain secret-free.
+
+### SEC-09 — Release checkouts retain workflow credentials
+
+- **Severity:** Low
+- **Confidence:** high as defense-in-depth.
+
+CI explicitly configures `actions/checkout` with `persist-credentials: false`
+([`ci.yml`](../../.github/workflows/ci.yml#L20-L26)), but package and npm release
+checkouts retain checkout's default Git credential persistence
+([`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L33-L43),
+[`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L126-L133)).
+The package matrix has `contents: write`; later publication already receives
+`GH_TOKEN` explicitly. This is avoidable token availability to trusted build
+steps, not evidence that a current script exfiltrates it.
+
+**Recommendation/tests.** Set `persist-credentials: false` on every release
+checkout unless a specific later Git operation proves it is required. Keep
+least-privilege job permissions and explicit step-scoped publication tokens.
+
 ## Dependency advisory exposure
 
 `npm audit --package-lock-only --omit=dev` reported two moderate vulnerable
@@ -287,19 +339,31 @@ vulnerability. See [Testing Audit](TESTING_AUDIT.md#dependency-and-supply-chain-
    ([`update/apply.go`](../../internal/update/apply.go#L258-L329)).
 7. **Release workflow controls.** Actions are SHA pinned; package tests/checksums
    run before upload; npm publication uses OIDC/provenance and a reviewed
-   environment
+   environment. Release checkout credential persistence is the narrower SEC-09
+   exception
    ([`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L33-L81),
    [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L115-L145)).
+8. **Remote daemon boundary.** The bridge is opt-in TLS-only, refuses missing
+   authentication, caps connection count/handshake time/bundle bytes, and closes
+   unauthenticated peers
+   ([`bridge.go`](../../internal/daemon/remote/bridge.go#L18-L117),
+   [`bridge.go`](../../internal/daemon/remote/bridge.go#L156-L225)).
+9. **Action output normalization.** The fixed multiline-output delimiter is not
+   reachable from the current summary value: structured summaries collapse all
+   whitespace and text summaries select one line before truncation
+   ([`action-summary.mjs`](../../scripts/action-summary.mjs#L9-L55)). Preserve
+   this invariant or adopt a random delimiter if multiline summaries are added.
 
 ## Priority order
 
 1. Reproduce and fix SEC-01 and SEC-02.
-2. Introduce one rooted read/write/extraction primitive and use it for SEC-03/04.
-3. Add updater limits (SEC-05) before expanding update-source flexibility.
-4. Add independent release authenticity (SEC-06) and encrypted OAuth default
+2. Remove/deprecate literal daemon token argv input (SEC-08).
+3. Introduce one rooted read/write/extraction primitive and use it for SEC-03/04.
+4. Add updater limits (SEC-05) before expanding update-source flexibility.
+5. Add independent release authenticity (SEC-06) and encrypted OAuth default
    (SEC-07) with migration/compatibility plans.
-5. Resolve or formally dismiss DEP-01 based on helper reachability and upgrade
-   testing.
+6. Disable persisted release checkout credentials (SEC-09), then resolve or
+   formally dismiss DEP-01 based on helper reachability and upgrade testing.
 
 See [Migration Plan](MIGRATION_PLAN.md) and the canonical acceptance criteria in
 [Known Issues](KNOWN_ISSUES.md).

@@ -15,18 +15,19 @@ typed provider boundary, a centralized tool-result redaction/budget boundary,
 native sandbox adapters, workspace-trust gates, atomic state publication, and a
 large regression suite. The main risk is not a generally unsafe design; it is a
 small set of security boundaries that still validate a pathname and later use
-that pathname, plus a redirect policy that does not explicitly account for
-custom authentication headers.
+that pathname, a redirect policy that does not explicitly account for custom
+authentication headers, and an optional remote-daemon token flag that exposes a
+secret through process arguments.
 
 **Health score: 71/100 — serviceable, with priority security hardening needed.**
 This is a review rubric, not a coverage percentage or vulnerability probability.
 
 | Dimension | Score | Evidence-based rationale |
 |---|---:|---|
-| Security | 13/20 | Strong sandbox, trust, redaction, and secure-publication controls; four pathname/redirect boundaries need hardening. |
+| Security | 13/20 | Strong sandbox, trust, redaction, TLS bridge, and secure-publication controls; redirect/pathname authority and token argv need hardening. |
 | Architecture & maintainability | 11/20 | Clear packages and interfaces, but composition and state concentrate in three very large files; transitional contracts are duplicated. |
-| Correctness & reliability | 15/20 | Extensive validation, bounded provider/process behavior, and atomic stores; updater limits and cleanup-error reporting are incomplete. |
-| Concurrency & lifecycle | 12/15 | Full race run passed; ownership is generally explicit. CI does not run `-race`, and some abandoned/cleanup paths are only best effort. |
+| Correctness & reliability | 15/20 | Extensive validation, bounded provider/process behavior, and atomic stores; updater limits, generic short writes, and cleanup-error reporting need attention. |
+| Concurrency & lifecycle | 12/15 | Full race run passed; ownership is generally explicit. CI does not run `-race`, and OAuth/cleanup lifecycles have boundedness/observability gaps. |
 | Testing & quality gates | 12/15 | 749 test files and cross-platform CI; no fuzz targets and important adversarial boundary cases are absent. |
 | Dependencies, release & performance | 8/10 | Reproducible Go module state, pinned Actions, release smoke/performance jobs; npm audit reports two transitive moderate vulnerabilities and release checksums share the artifact trust source. |
 
@@ -108,17 +109,31 @@ demonstrated. Preconditions are documented in the specialist audits.
 |---:|---|---|---|---|
 | 1 | SEC-01 | High | Cross-origin provider redirects may retain custom authentication headers. | Credential disclosure is high impact; redirect following and custom auth headers are both supported, but exploitability depends on redirect and provider configuration. |
 | 2 | SEC-02 | High | `write_file`/`edit_file` perform pathname checks before pathname writes. | A concurrently swapped workspace component could redirect an authorized write; a handle-relative primitive already exists elsewhere. |
-| 3 | SEC-04 | High | Update extraction uses lexical/pathname containment rather than rooted operations. | A same-user concurrent swap could redirect an updater write; extraction runs on checksum-verified release input in a private temp parent, reducing exposure. |
-| 4 | SEC-03 | Medium-high | MCP resource reads canonicalize, then later stat/read by pathname. | A concurrent swap can invalidate the scope decision; static traversal and symlink escapes are already rejected. |
-| 5 | SEC-05 | Medium-high | Go update downloads and archive extraction have no byte/entry expansion limits. | A bad or compromised source can consume disk/time; context timeout alone is not a size bound. |
-| 6 | SEC-06 | Medium | Release archive and checksum come from the same source without an independent signature. | Checksums detect corruption and mismatches, not replacement of both assets by a compromised publisher/source. |
-| 7 | SEC-07 | Medium | OAuth tokens default to mode-0600 plaintext JSON. | Permissions and atomic publication are strong, but local at-rest confidentiality is weaker than the API-key credential store default. |
-| 8 | TEST-01 | Medium | CI runs plain `go test ./...`, not the repository's race-enabled `make test`. | Concurrency is extensive; the manual full race run passed, but regressions are not continuously gated. |
-| 9 | DEP-01 | Medium | npm audit reports two transitive moderate vulnerable packages through `tuistory`. | Fixes are available; applicability to Zero's helper use was not proven, so this is dependency exposure rather than a confirmed Zero exploit. |
-| 10 | ARCH-01 | Medium | Runtime behavior is concentrated in large CLI/TUI/agent units. | It increases review and regression cost and compounds duplicated permission/result concepts; it is an incremental-maintainability issue, not a rewrite mandate. |
+| 3 | SEC-03 | Medium-high | MCP resource reads canonicalize, then later stat/read by pathname. | A concurrent swap can invalidate the scope decision; static traversal and symlink escapes are already rejected. |
+| 4 | SEC-05 | Medium-high | Go update downloads and archive extraction have no byte/entry expansion limits. | A bad or compromised source can consume disk/time; context timeout alone is not a size bound. |
+| 5 | SEC-08 | Medium | Remote daemon clients accept bearer tokens in command-line arguments. | Literal tokens can enter shell history/process inspection; TLS, token-file/env input, and token-free link files otherwise provide strong controls. |
+| 6 | SEC-04 | Medium | Update extraction uses lexical/pathname containment rather than rooted operations. | A same-account concurrent swap could redirect extraction, but no privilege expansion or static archive-only escape was demonstrated. |
+| 7 | SEC-06 | Medium | Release archive and checksum come from the same source without an independent signature. | Checksums detect corruption and mismatches, not replacement of both assets by a compromised publisher/source. |
+| 8 | SEC-07 | Medium | OAuth tokens default to mode-0600 plaintext JSON. | Permissions and atomic publication are strong, but local at-rest confidentiality is weaker than the API-key credential store default. |
+| 9 | TEST-01 | Medium | CI runs plain `go test ./...`, not the repository's race-enabled `make test`. | Concurrency is extensive; the manual full race run passed, but regressions are not continuously gated. |
+| 10 | DEP-01 | Medium | npm audit reports two transitive moderate vulnerable packages through `tuistory`. | Fixes are available; applicability to Zero's helper use was not proven, so this is dependency exposure rather than a confirmed Zero exploit. |
 
 The canonical registry, lower-ranked items, evidence links, and acceptance
 criteria are in [Known Issues](KNOWN_ISSUES.md).
+
+## Findings by severity
+
+- **Critical:** none confirmed. The audit found no demonstrated data corruption,
+  exploitable unauthenticated remote service, deadlock, or race-detector failure.
+- **High:** SEC-01 and SEC-02. Both concern an authority boundary with plausible
+  credential disclosure or host write impact and require failing regressions
+  before remediation.
+- **Medium / medium-high:** SEC-03/04/05/06/07/08, TEST-01/02, DEP-01, ARCH-01/02/
+  03/04, and REL-01. Preconditions and confidence are explicit in
+  [Known Issues](KNOWN_ISSUES.md).
+- **Low / low-medium:** SEC-09, CON-01/02, COR-01, QUAL-01, TEST-03/04, and
+  PERF-01. These are bounded lifecycle, protocol robustness, supply-chain
+  defense, and quality-debt items rather than confirmed severe failures.
 
 ## Cross-cutting assessment
 
@@ -128,7 +143,8 @@ Strong controls include fail-closed project trust gates, policy-versioned
 execution approvals, centralized result redaction, default workspace/network
 sandboxing, and atomic mode-0600/0700 state publication. Priority work should
 make redirect authority and filesystem authority object-bound rather than
-pathname/policy-by-convention. Details: [Security Audit](SECURITY_AUDIT.md).
+pathname/policy-by-convention, and remove literal bearer tokens from argv.
+Details: [Security Audit](SECURITY_AUDIT.md).
 
 ### Concurrency and lifecycle
 
@@ -136,7 +152,8 @@ The process manager bounds retained processes and output, MCP stdio uses one
 reader with synchronized pending calls, registry startup separates concurrent
 I/O from deterministic commit, and swarm scheduling uses cancellation plus
 wait groups. The full Linux race suite reported no race. Improve continuous
-race coverage and make stateful teardown failures observable. Details:
+race coverage, bound/join OAuth loopback servers, and make stateful teardown
+failures observable. Details:
 [Concurrency Audit](CONCURRENCY_AUDIT.md).
 
 ### Testing
@@ -154,6 +171,8 @@ Details: [Testing Audit](TESTING_AUDIT.md).
 Actions are commit-SHA pinned, and npm publication uses OIDC/provenance plus a
 reviewed environment. The Node lockfile currently resolves vulnerable transitive
 Hono packages through `tuistory`; the audit did not change dependency versions.
+Release checkouts also retain checkout's Git credential by default, a low-
+severity defense-in-depth exception to otherwise strong workflow controls.
 
 ### Performance
 
@@ -164,6 +183,28 @@ smoke harness. The main maintainability/performance risks are large hot-path
 units and a full test wall time dominated by provider packages (3m35s for the
 uncached non-race run in this orb). Preserve and expand scenario benchmarks when
 decomposing hot paths; do not optimize from file size alone.
+
+## Priorities, quick wins, and deliberate non-changes
+
+**Ordered priorities:** first reproduce/fix SEC-01 and SEC-02; then remove the
+SEC-08 argv secret path; next apply one rooted-I/O boundary to SEC-03/04 and add
+SEC-05 limits; then address lifecycle/contracts/architecture and supply-chain
+work in the phases in [Migration Plan](MIGRATION_PLAN.md).
+
+**Quick wins:** add `persist-credentials: false` to release checkouts (SEC-09),
+add deterministic short-writer tests/failures (COR-01), gate the existing full
+race target, and add OAuth server timeouts plus a joined shutdown result. These
+are small in code surface, though each still needs its own compatibility test.
+
+**High-risk changes:** rooted cross-platform write/extraction semantics,
+permission/result schema consolidation, OAuth-store default migration, release
+signature enforcement, and decomposition of agent/TUI/CLI state. Each crosses
+platform, persistence, or user-visible contracts and must remain incremental.
+
+**Leave deliberately alone:** the modular-monolith deployment model, narrow
+provider interface, centralized tool-result redaction/budgeting, typed execution
+contracts, atomic stores, fail-closed trust/sandbox gates, and the root TUI/
+`agent.Run` facades. File size alone does not justify replacing these controls.
 
 ## Audit limitations
 

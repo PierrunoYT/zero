@@ -25,6 +25,8 @@ cleanup is intentionally detached or errors are discarded.
 | Swarm scheduler | one timer loop per job | parent/job context + `WaitGroup` | Strong cancel/recheck/non-overlap behavior. |
 | Swarm coordinator | task map, colors, change notification | RWMutex and replace-on-change channel | Snapshots avoid pointer escape; wait is context-bound. |
 | Daemon pool | bounded worker slots and active handles | drain grace then kill stragglers | Bounded retries/slots; kill errors on drain are advisory. |
+| Remote daemon bridge | TLS listener, bounded connection slots, per-connection goroutines | listener close; each handler closes its connection | Handshake is bounded; accepted sessions intentionally clear the deadline and follow daemon protocol lifetime. |
+| OAuth loopback callbacks | HTTP listener, one serving goroutine, callback channel | caller timeout + one-second `Shutdown` | Loopback/state controls are strong; server I/O and goroutine completion are not explicitly bounded/joined. |
 
 ## Strong controls
 
@@ -142,7 +144,31 @@ caller can act; otherwise emit bounded, redaction-safe structured diagnostics.
 Change cleanup callbacks to return errors only at ownership boundaries where
 failure matters; avoid noisy blanket handling.
 
-### CON-02 — Pathname races are also concurrency correctness issues
+### CON-02 — OAuth loopback servers lack I/O bounds and a joined lifecycle
+
+**Severity:** Low-medium. Three production OAuth callback implementations bind
+only to `127.0.0.1` and place the overall login under a caller timeout, but build
+`http.Server` without `ReadHeaderTimeout`, `ReadTimeout`, `IdleTimeout`, or an
+explicit header cap. Their Serve goroutines discard the terminal error, shutdown
+is bounded to one second, shutdown errors are discarded, and no completion
+channel is joined
+([`oauth/loopback.go`](../../internal/oauth/loopback.go#L30-L55),
+[`oauth/loopback.go`](../../internal/oauth/loopback.go#L97-L107),
+[`mcp/oauth.go`](../../internal/mcp/oauth.go#L497-L522),
+[`provideroauth/openrouter.go`](../../internal/provideroauth/openrouter.go#L72-L109)).
+A local slow-header connection can therefore outlive a failed bounded shutdown.
+
+Exposure is local-machine only. The shared listener rejects empty CSRF state and
+validates it on callback, MCP uses generated state/PKCE, and OpenRouter uses
+PKCE; these controls materially reduce security impact. This is lifecycle and
+local resource robustness, not a remotely exposed web-server finding.
+
+**Recommendation.** Configure conservative header/read/idle bounds, retain a
+Serve completion result, and make close/wait idempotent and observable. Add
+slow-header, caller-cancel, repeated-close, and goroutine-completion tests for
+all three flows without weakening loopback/state/PKCE behavior.
+
+### CON-03 — Pathname races are also concurrency correctness issues
 
 SEC-02/03/04 are not Go data races; `-race` cannot detect them. They are
 filesystem interleavings between a scope check and kernel path resolution. They
@@ -174,5 +200,7 @@ require deterministic adversarial swap tests and rooted APIs. See
    loops.
 6. Leak/ownership tests with a context-ignoring fake at each pluggable transport
    seam.
+7. Loopback slow-header and close/wait tests that prove accepted OAuth
+   connections cannot survive owner shutdown.
 
 The implementation order and exit gates are in [Migration Plan](MIGRATION_PLAN.md).

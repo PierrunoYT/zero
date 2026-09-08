@@ -6,12 +6,16 @@ for the intended direction and [Codebase Audit](CODEBASE_AUDIT.md) for scoring.
 
 ## System shape
 
-Zero is a single-process Go modular monolith with several executable entry
-points and optional child processes. `internal/cli` is the primary composition
-root. Lower packages expose typed contracts for providers, execution, tools,
-storage, and extension transports. The same core is presented through an
-interactive TUI, headless execution, ACP, daemon workers, cron, MCP server mode,
-and release/diagnostic commands.
+Zero is a Go modular-monolith codebase. Interactive and one-shot execution
+normally run in one process, but command execution, specialists, MCP stdio
+servers, and daemon mode supervise child processes; detached daemon mode is
+itself another Zero process supervising a pool of `zero exec` workers
+([`daemon.go`](../../internal/cli/daemon.go#L104-L170),
+[`protocol.go`](../../internal/daemon/protocol.go#L1-L16)). `internal/cli` is the
+primary composition root. Lower packages expose typed contracts for providers,
+execution, tools, storage, and extension transports. The same core is presented
+through an interactive TUI, headless execution, ACP, daemon workers, cron, MCP
+server mode, and release/diagnostic commands.
 
 ```text
 +---------------------------- entry programs -----------------------------+
@@ -54,11 +58,31 @@ and release/diagnostic commands.
 
 [`cmd/zero/main.go`](../../cmd/zero/main.go#L1-L11) returns the exit code from
 `cli.Run`. `Run` enters a dependency-injected composition root
-([`internal/cli/app.go`](../../internal/cli/app.go#L131-L145)); command routing
-selects the interactive default or subcommands
-([`app.go`](../../internal/cli/app.go#L287-L503)). The broad `appDeps` seam
+([`internal/cli/app.go`](../../internal/cli/app.go#L131-L145)). Before ordinary
+routing, it self-dispatches hidden Windows sandbox helpers, installs panic-to-
+crash-report recovery, fills dependencies, enables the process-global
+models.dev overlay, and rewrites leading `--add-dir`/`--theme` flags
+([`app.go`](../../internal/cli/app.go#L287-L329)). It then selects the interactive
+default or a public subcommand
+([`app.go`](../../internal/cli/app.go#L331-L503)). The broad `appDeps` seam
 ([`app.go`](../../internal/cli/app.go#L52-L114)) makes CLI tests hermetic but is
 also a concentration point.
+
+Public command families are grouped below; aliases route to the same handler and
+share its output/exit-code contract.
+
+| Family | Commands/aliases | Main boundary and state |
+|---|---|---|
+| Run surfaces | default TUI, `-p`/`--prompt`, `exec`, `acp`, `serve --mcp` | Agent/provider/tool composition; sessions; stdio text/JSON/ACP/MCP. |
+| Discovery/setup | `config`, `models`, `providers`, `doctor`, `setup`, `context`, `repo-map`, `search`, `repo-info` | Config/catalog/workspace inspection; mostly stdout plus config writes where explicit. |
+| Durable work | `sessions`, `spec`, `changes`, `usage`, `cron`, `worktrees` | Session JSON/JSONL, schedule/run records, change/worktree state. |
+| Extensions | `specialists`, `plugins`, `backends`, `skills`, `tools`, `hooks`, `mcp` | Trust-gated manifests, external processes/transports, permission records. |
+| Security/account | `auth`, `sandbox`, `trust`, `verify` | OAuth/credential stores, sandbox grants, workspace trust, integrity checks. |
+| Operations | `daemon`, `update`, `upgrade`, `eval`, completions/version/help | Local/remote worker control, release installation, evaluation, machine/TTY output contracts. |
+
+The switch and aliases are authoritative
+([`app.go`](../../internal/cli/app.go#L350-L503)); this table describes families,
+not a separate routing registry.
 
 ### Interactive path
 
@@ -78,6 +102,27 @@ events to text/JSON/stream-JSON and invokes the common loop
 ([`exec.go`](../../internal/cli/exec.go#L650-L875)). ACP follows a parallel
 composition path per workspace
 ([`internal/cli/acp.go`](../../internal/cli/acp.go#L32-L85)).
+
+### Daemon and remote bridge paths
+
+Local daemon mode binds an owner-only local control socket and supervises a
+bounded pool of headless `zero exec` workers. `start` detaches by default,
+`run` creates/routes a session, `attach` follows it, and stop/status use the
+framed control protocol
+([`internal/cli/daemon.go`](../../internal/cli/daemon.go#L20-L49),
+[`internal/daemon/protocol.go`](../../internal/daemon/protocol.go#L24-L145)).
+The protocol is a versioned 4-byte-length + kind + JSON frame with a 1 MiB cap;
+agent events inside it remain stream-JSON.
+
+`daemon serve-remote` is an opt-in raw TLS bridge, not an HTTP API. It requires
+a certificate/key and nonempty bearer token before serving, bounds concurrent
+connections and authentication handshakes, and optionally accepts capped Git
+bundle uploads into linked worktrees
+([`internal/cli/daemon.go`](../../internal/cli/daemon.go#L451-L568),
+[`internal/daemon/remote/bridge.go`](../../internal/daemon/remote/bridge.go#L18-L117),
+[`internal/daemon/remote/bridge.go`](../../internal/daemon/remote/bridge.go#L156-L225)).
+Saved session links are mode-0600 atomic JSON and deliberately omit the bearer
+token ([`sessionlink.go`](../../internal/daemon/remote/sessionlink.go#L10-L59)).
 
 ### Agent/provider/tool path
 
@@ -142,9 +187,16 @@ couples the data/config layer to features it configures.
 - Config is layered user -> project -> environment -> provider command -> CLI
   overrides, with trust-sensitive restrictions in the merge
   ([`resolver.go`](../../internal/config/resolver.go#L67-L110)).
-- Session events are durable JSONL under a session store; exec session creation,
-  resume, and fork share this layer
-  ([`internal/sessions/exec_session.go`](../../internal/sessions/exec_session.go#L39-L115)).
+- Session metadata is `metadata.json` and events are `events.jsonl`; their JSON
+  fields are compatibility-sensitive. Exec creation, resume, and fork share
+  this layer
+  ([`internal/sessions/store.go`](../../internal/sessions/store.go#L20-L24),
+  [`internal/sessions/store.go`](../../internal/sessions/store.go#L94-L124),
+  [`internal/sessions/exec_session.go`](../../internal/sessions/exec_session.go#L39-L115)).
+- Cron owns per-job metadata and append-only `runs.jsonl`; background tasks own
+  separate JSON metadata and retained output under the user data root
+  ([`internal/cron/store.go`](../../internal/cron/store.go#L27-L89),
+  [`internal/background/manager.go`](../../internal/background/manager.go#L26-L109)).
 - Provider calls emit normalized stream events; the agent loop owns turn state.
 - Tool registration is snapshot-based; the registry owns the result security and
   output boundary.
@@ -155,6 +207,41 @@ couples the data/config layer to features it configures.
   ([`internal/mcp/registry.go`](../../internal/mcp/registry.go#L47-L57)).
 - TUI and headless surfaces own presentation and persistence callbacks, not
   provider protocol details.
+
+## Network, API, and persistence boundaries
+
+- Provider, OAuth, updater, MCP SSE, model-catalog, and helper integrations are
+  outbound HTTP clients. Provider streaming has content/idle watchdogs; each
+  caller also supplies cancellation policy.
+- The only inbound TCP listeners are short-lived loopback OAuth callbacks and
+  the opt-in raw-TLS daemon bridge. Zero has no conventional REST/JSON HTTP
+  application server, HTTP middleware stack, CORS policy, CSRF cookie/session
+  layer, or rate-limited web API. OAuth callbacks use state/PKCE and loopback
+  binding; their lifecycle gap is recorded in
+  [Concurrency Audit](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle).
+- ACP and `serve --mcp` are stdio JSON-RPC boundaries. Local daemon control is an
+  owner-only Unix/local socket; remote daemon control is framed TLS, not HTTP.
+- There is no SQL driver, ORM, database connection pool, transaction layer,
+  schema migration system, top-level `pkg/` public library, Dockerfile, or
+  container-runtime configuration at this revision. Persistence is filesystem
+  JSON/JSONL, credentials/keyrings, locks, caches, worktrees, and retained
+  output. Database/SQL migration checks are therefore not applicable.
+
+## Compatibility and error propagation
+
+There is no supported importable public Go library: implementation packages are
+under Go's `internal` boundary and `cmd/zero` is an executable entry point.
+Compatibility surfaces are nevertheless broad: CLI flags/aliases/output/exit
+codes; environment and config fields; session, cron, background, trust, OAuth,
+and permission files; stream-JSON; ACP/MCP JSON-RPC; daemon framing/control JSON;
+plugin/hook/skill manifests; and release/npm wrapper behavior.
+
+Errors normally accumulate context with wrapping inside subsystem packages,
+then map at a surface boundary to an exit code, JSON-RPC error, stream event, or
+redacted user message. Unexpected CLI panics are persisted as crash reports
+rather than dumping a raw stack to the terminal
+([`app.go`](../../internal/cli/app.go#L301-L305)). Cleanup errors that cannot
+currently cross those contracts are the exception documented as REL-01.
 
 ## Current strengths
 

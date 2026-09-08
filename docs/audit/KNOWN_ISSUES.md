@@ -18,14 +18,14 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 |---:|---|---|---|---|---|
 | 1 | SEC-01 | High | Providers | Cross-origin redirects may retain custom authentication headers. | Open; regression needed |
 | 2 | SEC-02 | High | Tools/filesystem | Workspace write/edit checks are separated from pathname writes. | Open; regression needed |
-| 3 | SEC-04 | High | Updater | Archive extraction confinement is pathname-based. | Open; regression needed |
-| 4 | SEC-03 | Medium-high | MCP/filesystem | Resource scope is decided before a separate pathname read. | Open; regression needed |
-| 5 | SEC-05 | Medium-high | Updater | Downloads and expanded archives lack byte/entry limits. | Open; limits undecided |
-| 6 | SEC-06 | Medium | Release | Sibling SHA-256 assets do not independently authenticate artifacts. | Open; signing design needed |
-| 7 | SEC-07 | Medium | OAuth | File token storage defaults to mode-0600 plaintext. | Open; migration needed |
-| 8 | TEST-01 | Medium | CI | Full race detection is not a required CI gate. | Open |
-| 9 | DEP-01 | Medium | Node helper | npm reports two moderate vulnerable transitive packages. | Open; applicability unproven |
-| 10 | ARCH-01 | Medium | CLI/TUI/agent | Runtime behavior is concentrated in three very large units. | Open; incremental only |
+| 3 | SEC-03 | Medium-high | MCP/filesystem | Resource scope is decided before a separate pathname read. | Open; regression needed |
+| 4 | SEC-05 | Medium-high | Updater | Downloads and expanded archives lack byte/entry limits. | Open; limits undecided |
+| 5 | SEC-08 | Medium | Remote daemon | Client bearer tokens are accepted in process arguments. | Open; compatibility deprecation needed |
+| 6 | SEC-04 | Medium | Updater | Archive extraction confinement is pathname-based. | Open; regression needed |
+| 7 | SEC-06 | Medium | Release | Sibling SHA-256 assets do not independently authenticate artifacts. | Open; signing design needed |
+| 8 | SEC-07 | Medium | OAuth | File token storage defaults to mode-0600 plaintext. | Open; migration needed |
+| 9 | TEST-01 | Medium | CI | Full race detection is not a required CI gate. | Open |
+| 10 | DEP-01 | Medium | Node helper | npm reports two moderate vulnerable transitive packages. | Open; applicability unproven |
 
 ## Detailed registry
 
@@ -69,6 +69,8 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 ### SEC-04 — Update extraction pathname TOCTOU
 
+- **Severity:** Medium.
+
 - **Evidence:** names are checked lexically, then directories, links, and files
   are created by pathname
   ([`extract.go`](../../internal/update/extract.go#L38-L85),
@@ -76,9 +78,11 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 - **Preconditions:** a same-user actor can mutate descendants in the private
   update staging tree during extraction.
 - **Potential impact:** archive content written outside the intended extraction
-  root.
-- **Qualification:** checksum verification and a private temporary parent lower
-  practical exposure; no static single-archive escape was demonstrated.
+  root under a successful concurrent swap.
+- **Qualification:** the actor normally already has the same account's
+  filesystem authority; checksum verification and a private temporary parent
+  further lower exposure. No privilege expansion or static single-archive escape
+  was demonstrated.
 - **Remediation:** extract through one rooted destination authority; reject
   symlinks or guarantee they can never redirect later traversal.
 - **Acceptance:** adversarial order/swap/symlink-chain tests, native reparse
@@ -157,6 +161,27 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
   logs never include tokens.
 - **Detail:** [Security Audit, SEC-07](SECURITY_AUDIT.md#sec-07--oauth-file-storage-defaults-to-plaintext).
 
+### SEC-08 — Remote daemon token accepted in argv
+
+- **Evidence:** `daemon run`, `attach`, and `link` parse literal `--token`
+  arguments
+  ([`daemon.go`](../../internal/cli/daemon.go#L276-L317),
+  [`daemon.go`](../../internal/cli/daemon.go#L371-L410),
+  [`daemon.go`](../../internal/cli/daemon.go#L587-L639)).
+- **Preconditions:** the operator selects the optional flag and command history
+  or process arguments are visible to another local principal/process.
+- **Potential impact:** disclosure of a bearer token that authorizes remote
+  daemon sessions or bundle upload.
+- **Qualification:** TLS is mandatory, token comparison is constant-time,
+  environment/token-file alternatives already exist, and session links never
+  persist the token.
+- **Remediation:** deprecate literal token arguments; document environment/file
+  input and optionally add `--token-file`; warn without echoing secrets.
+- **Acceptance:** help and examples contain no literal-token recommendation;
+  token-free argv is proven; errors/logs/link files contain no token; old flag
+  removal follows a documented compatibility window.
+- **Detail:** [Security Audit, SEC-08](SECURITY_AUDIT.md#sec-08--remote-daemon-bearer-tokens-are-accepted-in-argv).
+
 ### TEST-01 — Race detector absent from CI
 
 - **Evidence:** `make test` includes `-race`, but the CI matrix runs plain tests
@@ -206,8 +231,11 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 | ARCH-04 | Medium | `tools.Result` and `agent.ToolResult` overlap and carry legacy fields. | [`tools/types.go`](../../internal/tools/types.go#L95-L152), [`agent/types.go`](../../internal/agent/types.go#L73-L128); one canonical internal outcome after persisted/API compatibility inventory. |
 | REL-01 | Medium | Stateful cleanup errors are discarded or only partly reported. | Agent/MCP/execution/daemon examples in [Concurrency Audit](CONCURRENCY_AUDIT.md#rel-01--stateful-cleanup-errors-are-inconsistently-observable); classify, join actionable errors, otherwise redact-safe diagnostics. |
 | CON-01 | Low-medium | MCP timeout reaper can remain if a client factory ignores context forever. | [`registry.go`](../../internal/mcp/registry.go#L115-L143); require/test context compliance or an independently closable/bounded worker. |
+| CON-02 | Low-medium | OAuth loopback HTTP servers have no I/O bounds or joined Serve completion. | Three loopback implementations and mitigations are detailed in [Concurrency Audit](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle); add slow-header and close/wait tests. |
+| COR-01 | Low-medium | Daemon and ACP generic writers do not detect nil-error short writes. | [`daemon/protocol.go`](../../internal/daemon/protocol.go#L51-L71), [`acp/jsonrpc.go`](../../internal/acp/jsonrpc.go#L440-L454); write completely or return `io.ErrShortWrite`, with partial-writer tests. |
+| SEC-09 | Low | Release checkout retains workflow Git credentials by default. | [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L33-L43), [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L126-L133); disable persistence unless a later Git step requires it. |
 | QUAL-01 | Low-medium | Advisory deadcode reports 76 unreachable functions. | Classify each by platform/compatibility/dormancy/removability; permit no new unexplained entries rather than bulk deletion. |
-| TEST-02 | Medium | Critical redirect/path/update negative interleavings lack regression tests. | Add direct deterministic tests and prove each fails for the claimed reason before remediation. |
+| TEST-02 | Medium | Priority redirect/path/update negative interleavings lack regression tests. | Add direct deterministic tests and prove each fails for the claimed reason before remediation. |
 | TEST-03 | Low-medium | No Go fuzz targets were found. | Seed high-risk parsers; preserve deterministic regression for every finding. |
 | TEST-04 | Low-medium | Node action-summary tests and npm audit are not main-CI gates. | Add a small shipped-wrapper job or document why that surface is released elsewhere. |
 | PERF-01 | Low-medium | Full test feedback is dominated by real-time provider tests. | Baseline was 3m35s plain and 4m11s race in this orb; introduce clocks/short constants without erasing real-time integration coverage. |
@@ -224,6 +252,11 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
   at-rest defense depth with the stronger credential-store default.
 - Sibling checksums remain valuable corruption and attribution checks despite
   SEC-06.
+- Remote daemon TLS, constant-time authentication, bounded handshakes/
+  connections/bundles, and token-free mode-0600 link files remain strong despite
+  the optional argv input in SEC-08.
+- The GitHub Action summary is currently normalized to one line before the fixed
+  output delimiter, so delimiter injection was not retained as a finding.
 - `tools.Registry` central redaction/output budgeting, rooted `pathjail`, atomic
   store publication, fail-closed trust gates, and bounded process/MCP output are
   sound patterns to extend, not replace.

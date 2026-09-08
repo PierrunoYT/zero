@@ -28,11 +28,13 @@ Zero product failure.
 | Command | Outcome | Evidence/notes |
 |---|---|---|
 | `go version` | PASS | `go version go1.26.6 linux/amd64`; matches `go.mod`. |
+| `go env` | PASS | Exit 0; `GOOS=linux`, `GOARCH=amd64`, `GOVERSION=go1.26.6`, and `GOMOD` resolved to the repository `go.mod`. |
 | `go mod verify` | PASS | `all modules verified`. |
 | `go mod tidy -diff` | PASS | Exit 0, no diff. |
+| `gofmt -l .` | PASS | Exit 0, no listed files. |
 | `make fmt-check` | PASS | No unformatted Go files. |
 | `go vet ./...` | PASS | Exit 0, no diagnostics. |
-| `go build ./...` | PASS | Exit 0, no diagnostics. |
+| `go build ./...` | PASS | Supplemental package compilation check; not a substitute for the repository release build command below. |
 | `GIT_CONFIG_COUNT=1 ... go test ./... -count=1` | PASS | All 91 packages; elapsed 3m35.35s, max RSS 720,768 KiB. `anthropic` reported 120.189s and `openai` 180.496s. |
 | `GIT_CONFIG_COUNT=1 ... go test -race ./... -count=1` | PASS | All 91 packages; no race report; elapsed 4m11.57s, max RSS 656,724 KiB. `anthropic` reported 121.243s and `openai` 181.584s. |
 | `go run ./cmd/zero-release build` | PASS | Built `zero` for linux/amd64, version 0.8.0. |

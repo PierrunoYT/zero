@@ -7,8 +7,9 @@ a normal ADR/design review before production work.
 ## D-01 — Evolve the modular monolith; do not rewrite
 
 - **Status:** Proposed
-- **Decision:** retain a single-process Go modular monolith and current entry
-  surfaces. Improve dependency direction through stable facades and small
+- **Decision:** retain one Go modular-monolith codebase and current entry
+  surfaces, including the deliberately supervised daemon/worker and extension
+  process modes. Improve dependency direction through stable facades and small
   application services.
 - **Why:** provider, execution, registry, storage, sandbox, and extension
   boundaries are already meaningful and test-rich. The primary architecture
@@ -164,6 +165,33 @@ a normal ADR/design review before production work.
 - **Consequence:** aliases and adapters can outlive internal migration; remove
   them only after telemetry/evidence available to maintainers and native checks
   demonstrate safety.
+
+## D-13 — Secrets are not accepted as literal command arguments
+
+- **Status:** Proposed
+- **Decision:** bearer tokens and future credentials enter through a restrictive
+  file, credential store, protected prompt/FD, or explicitly scoped environment;
+  public CLI examples and steady-state flows do not place secret bytes in argv.
+- **Why:** argv may be copied to shell history, process inspection, diagnostics,
+  wrappers, and audit logs. Remote daemon clients currently accept `--token`.
+- **Rejected:** relying on redaction after parsing; history/process exposure
+  occurs before Zero can redact it.
+- **Consequence:** introduce/document token-file input, deprecate the literal
+  flag compatibly, and preserve TLS, constant-time comparison, and token-free
+  session-link storage.
+
+## D-14 — Protocol writers complete a record or fail
+
+- **Status:** Proposed
+- **Decision:** every framed/newline protocol write either emits the complete
+  record or returns an error; a nil-error short write becomes
+  `io.ErrShortWrite` or is retried through a small `writeAll` helper.
+- **Why:** generic `io.Writer` permits short progress, while a truncated daemon
+  or ACP record desynchronizes the peer.
+- **Rejected:** documenting that current production writers “usually” return an
+  error. The exposed generic contract should be correct and directly testable.
+- **Consequence:** add partial/zero-progress writer tests without changing wire
+  schema, message ordering, or public protocol versions.
 
 Execution order: [Migration Plan](MIGRATION_PLAN.md). Current and target system
 maps: [Current Architecture](CURRENT_ARCHITECTURE.md) and

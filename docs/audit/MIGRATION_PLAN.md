@@ -25,7 +25,8 @@ until the owning maintainers approve its scope.
 **Goal:** prevent fixes from being accepted for the wrong mechanism.
 
 - Record event/session/output compatibility fixtures for CLI, agent, and TUI.
-- Add direct tests for SEC-01 through SEC-05 and REL-01 listed in
+- Add direct tests for SEC-01 through SEC-05, SEC-08, COR-01, CON-02, and REL-01
+  listed in
   [Testing Audit](TESTING_AUDIT.md#test-02--missing-adversarial-boundary-cases).
 - Add controllable open/extract seams only in tests or at a narrow existing
   boundary so path swaps are deterministic, not timing loops.
@@ -67,6 +68,20 @@ policy tests remain fail-closed, and stale-write UX is unchanged. **Rollback:**
 retain old implementation behind an internal fallback only until native parity
 is proven; do not expose a user “unsafe path” switch.
 
+### 1C. SEC-08 daemon token argv deprecation
+
+- Stop recommending `--token`; add/document token-file and existing environment
+  input without placing token bytes in arguments or diagnostics.
+- Warn on the legacy flag for a release window, then remove it under the normal
+  CLI compatibility policy.
+- Keep TLS, constant-time comparison, authentication-before-dispatch, and
+  token-free session-link persistence unchanged.
+
+**Exit gate:** process-argument and redaction tests prove no recommended/current
+path exposes the token; remote run/attach/link remain compatible through the
+documented transition. **Rollback:** retain the deprecated parser for another
+release, never fall back to unauthenticated operation.
+
 ## Phase 2 — Unify confined I/O and bound update input
 
 ### 2A. SEC-03 rooted MCP reads
@@ -105,6 +120,10 @@ do not silently disable limits.
   bounded strategy.
 - Classify cleanup as stateful/actionable or best-effort. Join stateful failures;
   emit bounded, redaction-safe diagnostics for intentionally advisory cleanup.
+- Add header/read/idle bounds and joined Serve completion to all three OAuth
+  loopback implementations; preserve loopback binding, state, and PKCE.
+- Make daemon/ACP generic writes complete or fail with `io.ErrShortWrite` and
+  add deterministic partial-writer tests.
 - Stress agent parallel tools, MCP calls, process manager, daemon, LSP, swarm,
   and shared stores under `-race -count=20` in focused jobs as runtime permits.
 
@@ -175,10 +194,12 @@ move; revert it independently if parity or performance fails.
    before making verification mandatory.
 3. **SEC-07:** add encrypted/keyring auto default, explicit plaintext opt-in,
    transactional migration, rollback, and headless UX.
-4. **TEST-03/04:** seed fuzzers and gate shipped Node helper tests/audit policy.
-5. **QUAL-01:** classify 76 deadcode findings. Remove only separately evidenced
+4. **SEC-09:** disable persisted credentials on every release checkout unless a
+   documented Git operation requires them.
+5. **TEST-03/04:** seed fuzzers and gate shipped Node helper tests/audit policy.
+6. **QUAL-01:** classify 76 deadcode findings. Remove only separately evidenced
    entries; set a no-new-unexplained baseline.
-6. **PERF-01:** replace avoidable real-time waits with clocks/short test values
+7. **PERF-01:** replace avoidable real-time waits with clocks/short test values
    while retaining one realistic integration case per timeout class.
 
 **Exit gate:** release authenticity failure is fail-closed and recoverable;
@@ -191,13 +212,16 @@ deadcode/test duration improve without platform or behavioral coverage loss.
 |---|---|---|
 | 1 | SEC-01 failing tests | policy implementation |
 | 2 | SEC-01 provider redirect policy | filesystem or architecture work |
-| 3 | SEC-02 swap tests/rooted write API | MCP/updater migration |
-| 4 | SEC-02 tool migration | unrelated tool result cleanup |
-| 5 | SEC-03 rooted read migration | extraction changes |
-| 6 | SEC-04 tests and rooted extraction | updater limits/signing |
-| 7 | SEC-05 limits | signing or OAuth changes |
-| 8 | race gate + focused lifecycle contract | large refactors |
-| 9+ | one canonical-contract consumer or one facade extraction | cross-surface rewrites |
+| 3 | SEC-08 token-file path + legacy warning | unrelated daemon protocol changes |
+| 4 | SEC-02 swap tests/rooted write API | MCP/updater migration |
+| 5 | SEC-02 tool migration | unrelated tool result cleanup |
+| 6 | SEC-03 rooted read migration | extraction changes |
+| 7 | SEC-04 tests and rooted extraction | updater limits/signing |
+| 8 | SEC-05 limits | signing or OAuth changes |
+| 9 | race gate + focused lifecycle contract | large refactors |
+| 10 | OAuth loopback bounds/join | OAuth storage migration |
+| 11 | protocol short-write correctness | protocol schema changes |
+| 12+ | one canonical-contract consumer or one facade extraction | cross-surface rewrites |
 
 The exact ranking and acceptance criteria are in [Known Issues](KNOWN_ISSUES.md);
 architectural invariants are in [Target Architecture](TARGET_ARCHITECTURE.md).

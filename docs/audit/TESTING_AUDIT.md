@@ -70,6 +70,9 @@ fail for the intended reason:
 - update extraction component swap and symlink/reparse entry ordering (SEC-04);
 - chunked oversized updater body, compression bomb, too many entries, and
   cleanup/no-promotion assertions (SEC-05);
+- remote daemon commands never require or echo a bearer token in argv (SEC-08);
+- partial/short writers cannot silently truncate daemon or ACP frames (COR-01);
+- slow-header OAuth callback connections terminate on cancel/close (CON-02);
 - multiple teardown failures retained/joined or diagnostically reported
   (REL-01).
 
@@ -103,6 +106,22 @@ but the reviewed CI workflow has no Node test step. Likewise `npm audit` is not 
 gate. Add a small lockfile/Node job if the wrapper/action remains a shipped
 surface. Keep vulnerability scanning separate from applicability decisions so a
 temporary advisory does not encourage blind dependency changes.
+
+### COR-01 — Daemon and ACP writers assume complete writes
+
+**Severity:** Low-medium. `daemon.WriteFrame` makes separate generic `io.Writer`
+writes for header and payload but does not reject `n < len(p)` with a nil error
+([`daemon/protocol.go`](../../internal/daemon/protocol.go#L51-L71)). ACP's
+newline-delimited JSON writer has the same assumption
+([`acp/jsonrpc.go`](../../internal/acp/jsonrpc.go#L440-L454)). Most production
+`net.Conn`/`os.File` writers return a non-nil error on a short write, and MCP's
+path is wrapped in `bufio.Writer`; no observed production truncation was
+reproduced. The generic interfaces nevertheless permit a legal short writer,
+which can silently produce a corrupt frame.
+
+Use `writeAll`/`io.Copy` semantics or return `io.ErrShortWrite` whenever progress
+is short without an error. Add deterministic one-byte/partial writers for the
+daemon header, daemon payload, and ACP record, including zero-progress writers.
 
 ### PERF-01 — Slow full-suite feedback
 
@@ -159,13 +178,15 @@ did not modify `package-lock.json`.
 
 ### Release
 
-Actions are commit-SHA pinned, checkout generally disables persisted credentials,
-artifacts are built/smoked natively, checksum sets are verified, and npm uses
-OIDC trusted publishing/provenance with a required-reviewer environment
+Actions are commit-SHA pinned, artifacts are built/smoked natively, checksum
+sets are verified, and npm uses OIDC trusted publishing/provenance with a
+required-reviewer environment
 ([`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L33-L81),
 [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L108-L145)).
 Add an independent signature/attestation verification test for downloaded GitHub
-release assets; sibling SHA-256 files remain useful but share the source.
+release assets; sibling SHA-256 files remain useful but share the source. CI
+checkout disables persisted credentials, but release checkouts do not; SEC-09
+recommends aligning them.
 
 ## Compatibility assessment
 
@@ -178,6 +199,11 @@ release assets; sibling SHA-256 files remain useful but share the source.
 - Host `git` is invoked throughout Zero. Any future new flag/subcommand must
   document its minimum exact-command version and provide a fallback/gate, per
   repository policy.
+- There is no supported importable public Go package: application code is under
+  `internal`, and `cmd/zero` is an executable. Compatibility review must instead
+  cover CLI flags/aliases/output/exit codes, config/environment fields, session/
+  cron/background JSON, stream-JSON, ACP/MCP, daemon protocol/control fields,
+  extension manifests, and release/npm behavior.
 - Transitional `tools.Result` and `agent.ToolResult` fields are compatibility
   evidence; removal needs persisted-session and all-surface tests.
 
@@ -216,6 +242,8 @@ policy.
    fix, native path semantics, focused race where relevant.
 6. Release changes: native package/verify/smoke plus signature/provenance and
    downloader limit tests.
+7. Protocol/lifecycle changes: short-writer tests and OAuth slow-header/
+   owner-shutdown tests.
 
 See [Migration Plan](MIGRATION_PLAN.md) for sequencing and
 [Known Issues](KNOWN_ISSUES.md) for acceptance criteria.

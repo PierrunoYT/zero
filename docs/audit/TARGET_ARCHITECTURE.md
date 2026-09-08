@@ -17,6 +17,8 @@ ordered, reversible sequence is in [Migration Plan](MIGRATION_PLAN.md).
 5. Split UI and agent behavior by state machine/capability without changing
    persisted session formats or command behavior.
 6. Preserve fast local iteration and cross-platform testability throughout.
+7. Keep daemon/ACP/MCP wire compatibility explicit, make protocol writes
+   complete-or-error, and keep secret material out of argv.
 
 ## Non-goals
 
@@ -138,18 +140,26 @@ Adopt a common internal lifecycle convention:
 
 This is a convention and a small helper where useful, not a universal framework.
 
+OAuth loopback listeners should apply the same convention: loopback-only bind,
+state/PKCE validation, conservative HTTP I/O bounds, and owner close/wait with an
+observable terminal Serve result. The daemon remains a supervised multi-process
+mode inside the modular-monolith architecture rather than being hidden behind a
+false single-process assumption.
+
 ## Target invariants
 
 | Boundary | Required invariant |
 |---|---|
 | Filesystem scope | The same rooted handle used to decide containment is used to open/create the object; no descendant pathname is re-resolved outside it. |
 | Provider redirects | Credentials cross origins only under an explicit, tested policy; custom headers are classified, not assumed harmless. |
+| Secret input | Bearer tokens and credentials do not appear in process arguments, logs, diagnostics, or persisted link metadata. |
 | Update input | Download bytes, archive entry count, per-entry bytes, and cumulative expansion are bounded before promotion. |
 | Release authenticity | Artifact authenticity is anchored independently of a sibling checksum asset where the release channel supports it. |
 | Permissions | One canonical enum and ordering define all surfaces; unknown values fail closed at ingress. |
 | Tool results | One canonical outcome is redacted/budgeted once and adapted only at external compatibility boundaries. |
 | Concurrency | Every goroutine is owner-cancelled and owner-waited, or explicitly finite with a tested upper bound. |
 | Persistence | Shared state is written completely, synchronized, and atomically replaced; tests redirect all real user directories. |
+| Wire protocols | Daemon, ACP, MCP, and stream-JSON records are emitted completely or fail; schema/version compatibility is tested at adapters. |
 
 ## Mapping from current to target
 
@@ -172,13 +182,15 @@ The target is reached incrementally when:
 1. swap-driven tests for SEC-02/03/04 fail on old code and pass through rooted
    operations on Linux, macOS, and Windows semantics;
 2. cross-origin custom-auth redirect tests cover allow, strip, and reject cases;
-3. `go list` shows config no longer importing feature adapters, and command
+3. daemon token inputs are argv-free, OAuth loopback owners wait for Serve, and
+   daemon/ACP short-writer tests cannot produce silent truncation;
+4. `go list` shows config no longer importing feature adapters, and command
    composition fan-out is distributed without introducing cycles;
-4. `agent.Run` and the TUI root retain stable public behavior while no single
+5. `agent.Run` and the TUI root retain stable public behavior while no single
    extracted feature owns unrelated state;
-5. all race, platform, release, smoke, vulnerability, and performance gates stay
+6. all race, platform, release, smoke, vulnerability, and performance gates stay
    green after every step;
-6. deadcode and compatibility fields decline only with call-site/persistence
+7. deadcode and compatibility fields decline only with call-site/persistence
    evidence, not through bulk deletion.
 
 The rationale for these choices is recorded in [Decisions](DECISIONS.md).
