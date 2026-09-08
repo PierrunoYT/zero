@@ -5,7 +5,8 @@
 - **Scope:** the complete Go repository, its build/release automation, and the
   Node wrapper dependencies that ship the Go binary.
 - **GitHub tracking check:** 2026-09-08 against upstream `Gitlawb/zero`; 60 open
-  issues and 71 open pull requests were reconciled by title and body.
+  issues and 71 open pull requests were reconciled by title and body, and the
+  two High findings were submitted through private vulnerability reporting.
 - **Change policy:** audit documentation only; no production remediation or
   refactoring was performed.
 
@@ -185,6 +186,17 @@ issues and 71 open pull requests. Titles and bodies were compared with each
 finding's mechanism and acceptance criteria, not matched by broad keywords
 alone.
 
+### Private reports for the High findings
+
+Upstream [requires potential vulnerabilities to be reported privately](../../SECURITY.md).
+No public security issue was opened. These links are visible only to advisory
+participants until maintainers coordinate disclosure.
+
+| Audit finding | Private upstream report | Verification submitted |
+|---|---|---|
+| SEC-01 | [GHSA-f484-43mf-99v6](https://github.com/Gitlawb/zero/security/advisories/GHSA-f484-43mf-99v6) (`triage`) | An isolated two-server test on `1b5db17` confirmed that a custom `X-Provider-Key` reaches a cross-origin HTTP 307 target. No real provider was tested. |
+| SEC-02 | [GHSA-37cg-763q-376p](https://github.com/Gitlawb/zero/security/advisories/GHSA-37cg-763q-376p) (`triage`) | Source-level check/use interleaving, prerequisites, platform qualifications, and the required deterministic component-swap regression were reported. No timing-loop exploit was claimed. |
+
 ### Exact active matches
 
 | Audit finding | Upstream tracking | Coverage decision |
@@ -208,12 +220,14 @@ alone.
 | SEC-08 | [PR #685](https://github.com/Gitlawb/zero/pull/685) | This protects a daemon token file from agent/sandbox reads; it does not remove literal bearer tokens from client argv or shell history. |
 | SEC-09 | [PR #951](https://github.com/Gitlawb/zero/pull/951) | This hardens workflow token permissions and timeouts but does not set `persist-credentials: false` on release checkouts. |
 
-**Coverage result:** 2 of 24 findings have exact active upstream tracking, 2
-have partial tracking with explicit residuals, and 20 have no meaningful active
-match. In particular, neither High finding has an exact upstream issue or PR.
-Before remediation begins, create approved, scoped upstream issues for the
-untracked/residual mechanisms and reference the audit IDs. The same
-point-in-time status is recorded in
+**Coverage result across channels:** the 2 High findings now have private
+reports; 2 other findings have exact public tracking; 2 have partial public
+tracking with explicit residuals; and 18 have no active tracking. Neither High
+finding has a public issue or PR, as required by upstream security policy.
+Potential vulnerabilities must stay in their private advisories until
+maintainers coordinate disclosure. For non-security and safely disclosable
+residual work, create approved, scoped upstream issues and reference the audit
+IDs. The same point-in-time status is recorded in
 [Known Issues](KNOWN_ISSUES.md#upstream-github-tracking-status).
 
 ## Cross-cutting assessment

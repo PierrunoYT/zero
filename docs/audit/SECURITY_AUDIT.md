@@ -38,6 +38,9 @@ process, or that mode-0600 files are readable by a different OS account.
 
 - **Severity:** High
 - **Confidence:** high in the mechanism; exploitability configuration-dependent.
+- **Private upstream report:**
+  [GHSA-f484-43mf-99v6](https://github.com/Gitlawb/zero/security/advisories/GHSA-f484-43mf-99v6)
+  (`triage`; advisory participants only until coordinated disclosure).
 
 **Observed behavior.** Provider I/O clones the caller's HTTP client and wraps
 `CheckRedirect`, but follows redirects by default
@@ -81,6 +84,9 @@ headers behave as designed; HTTPS-to-HTTP downgrade is refused.
 - **Severity:** High
 - **Confidence:** high in the race window; exploitation requires a concurrent
   filesystem actor.
+- **Private upstream report:**
+  [GHSA-37cg-763q-376p](https://github.com/Gitlawb/zero/security/advisories/GHSA-37cg-763q-376p)
+  (`triage`; advisory participants only until coordinated disclosure).
 
 **Observed behavior.** `write_file` resolves and checks a target, optionally
 reads current content, creates parent directories, rechecks each path component,

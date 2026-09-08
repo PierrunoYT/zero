@@ -10,6 +10,11 @@ listed preconditions, not proof of exploitation.
 As of 2026-09-08, upstream `Gitlawb/zero` has 60 open issues and 71 open pull
 requests. Review of their titles and bodies found:
 
+- private vulnerability reports for SEC-01
+  ([GHSA-f484-43mf-99v6](https://github.com/Gitlawb/zero/security/advisories/GHSA-f484-43mf-99v6))
+  and SEC-02
+  ([GHSA-37cg-763q-376p](https://github.com/Gitlawb/zero/security/advisories/GHSA-37cg-763q-376p)),
+  both in `triage` state;
 - exact active tracking for TEST-01 ([#939](https://github.com/Gitlawb/zero/issues/939),
   [PR #940](https://github.com/Gitlawb/zero/pull/940)) and PERF-01
   ([PR #955](https://github.com/Gitlawb/zero/pull/955));
@@ -17,12 +22,13 @@ requests. Review of their titles and bodies found:
   [PR #943](https://github.com/Gitlawb/zero/pull/943)) and QUAL-01
   ([#904](https://github.com/Gitlawb/zero/issues/904),
   [PR #975](https://github.com/Gitlawb/zero/pull/975)); and
-- no meaningful active match for the other 20 findings.
+- no active tracking for the other 18 findings.
 
 Related work on atomic tool writes, keyring capacity, daemon token-file
 protection, and workflow permissions does not cover SEC-02, SEC-07, SEC-08, or
 SEC-09 respectively. Audit IDs remain local identifiers, not GitHub issue
-numbers. Detailed overlap and residual-scope analysis is in
+numbers. The advisory links require participant access until coordinated
+disclosure. Detailed overlap and residual-scope analysis is in
 [Codebase Audit](CODEBASE_AUDIT.md#open-upstream-issue-and-pull-request-reconciliation).
 
 ## Ranking method
@@ -36,8 +42,8 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 | Rank | ID | Severity | Owner area | Finding | Status |
 |---:|---|---|---|---|---|
-| 1 | SEC-01 | High | Providers | Cross-origin redirects may retain custom authentication headers. | Open; regression needed |
-| 2 | SEC-02 | High | Tools/filesystem | Workspace write/edit checks are separated from pathname writes. | Open; #921/PR #941 address atomicity, not TOCTOU |
+| 1 | SEC-01 | High | Providers | Cross-origin redirects may retain custom authentication headers. | Private GHSA-f484-43mf-99v6; triage |
+| 2 | SEC-02 | High | Tools/filesystem | Workspace write/edit checks are separated from pathname writes. | Private GHSA-37cg-763q-376p; triage; #921/PR #941 address atomicity only |
 | 3 | SEC-03 | Medium-high | MCP/filesystem | Resource scope is decided before a separate pathname read. | Open; regression needed |
 | 4 | SEC-05 | Medium-high | Updater | Downloads and expanded archives lack byte/entry limits. | Open; limits undecided |
 | 5 | SEC-08 | Medium | Remote daemon | Client bearer tokens are accepted in process arguments. | Open; compatibility deprecation needed |
