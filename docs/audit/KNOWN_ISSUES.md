@@ -7,7 +7,7 @@ listed preconditions, not proof of exploitation.
 
 ## Upstream GitHub tracking status
 
-As of 2026-09-08, upstream `Gitlawb/zero` has 60 open issues and 71 open pull
+As of 2026-09-08, upstream `Gitlawb/zero` has 63 open issues and 71 open pull
 requests. Review of their titles and bodies found:
 
 - private vulnerability reports for SEC-01
@@ -17,12 +17,15 @@ requests. Review of their titles and bodies found:
   both in `triage` state;
 - exact active tracking for TEST-01 ([#939](https://github.com/Gitlawb/zero/issues/939),
   [PR #940](https://github.com/Gitlawb/zero/pull/940)) and PERF-01
-  ([PR #955](https://github.com/Gitlawb/zero/pull/955));
+  ([PR #955](https://github.com/Gitlawb/zero/pull/955)), plus newly filed exact
+  reports for COR-01 ([#1026](https://github.com/Gitlawb/zero/issues/1026),
+  [#1027](https://github.com/Gitlawb/zero/issues/1027)) and CON-02
+  ([#1028](https://github.com/Gitlawb/zero/issues/1028));
 - partial tracking for SEC-04 ([#920](https://github.com/Gitlawb/zero/issues/920),
   [PR #943](https://github.com/Gitlawb/zero/pull/943)) and QUAL-01
   ([#904](https://github.com/Gitlawb/zero/issues/904),
   [PR #975](https://github.com/Gitlawb/zero/pull/975)); and
-- no active tracking for the other 18 findings.
+- no active tracking for the other 16 findings.
 
 Related work on atomic tool writes, keyring capacity, daemon token-file
 protection, and workflow permissions does not cover SEC-02, SEC-07, SEC-08, or
@@ -30,6 +33,9 @@ SEC-09 respectively. Audit IDs remain local identifiers, not GitHub issue
 numbers. The advisory links require participant access until coordinated
 disclosure. Detailed overlap and residual-scope analysis is in
 [Codebase Audit](CODEBASE_AUDIT.md#open-upstream-issue-and-pull-request-reconciliation).
+Issues #1026-#1028 are open and currently unlabeled; an attempted `bug` label
+update returned HTTP 403 because only upstream maintainers can perform that
+triage.
 
 ## Ranking method
 
@@ -257,8 +263,8 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 | ARCH-04 | Medium | `tools.Result` and `agent.ToolResult` overlap and carry legacy fields. | [`tools/types.go`](../../internal/tools/types.go#L95-L152), [`agent/types.go`](../../internal/agent/types.go#L73-L128); one canonical internal outcome after persisted/API compatibility inventory. |
 | REL-01 | Medium | Stateful cleanup errors are discarded or only partly reported. | Agent/MCP/execution/daemon examples in [Concurrency Audit](CONCURRENCY_AUDIT.md#rel-01--stateful-cleanup-errors-are-inconsistently-observable); classify, join actionable errors, otherwise redact-safe diagnostics. |
 | CON-01 | Low-medium | MCP timeout reaper can remain if a client factory ignores context forever. | [`registry.go`](../../internal/mcp/registry.go#L115-L143); require/test context compliance or an independently closable/bounded worker. |
-| CON-02 | Low-medium | OAuth loopback HTTP servers have no I/O bounds or joined Serve completion. | Three loopback implementations and mitigations are detailed in [Concurrency Audit](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle); add slow-header and close/wait tests. |
-| COR-01 | Low-medium | Daemon and ACP generic writers do not detect nil-error short writes. | [`daemon/protocol.go`](../../internal/daemon/protocol.go#L51-L71), [`acp/jsonrpc.go`](../../internal/acp/jsonrpc.go#L440-L454); write completely or return `io.ErrShortWrite`, with partial-writer tests. |
+| CON-02 | Low-medium | OAuth loopback HTTP servers have no I/O bounds or joined Serve completion. | Exact [issue #1028](https://github.com/Gitlawb/zero/issues/1028); a temporary slow-header test confirmed an open accepted connection after the one-second close budget. Details: [Concurrency Audit](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle). |
+| COR-01 | Low-medium | Daemon and ACP generic writers do not detect nil-error short writes. | Exact [issue #1026](https://github.com/Gitlawb/zero/issues/1026) and [issue #1027](https://github.com/Gitlawb/zero/issues/1027); temporary tests confirmed silent incomplete records. Write completely or return `io.ErrShortWrite`. |
 | SEC-09 | Low | Release checkout retains workflow Git credentials by default. | [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L33-L43), [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L126-L133); disable persistence unless a later Git step requires it. |
 | QUAL-01 | Low-medium | Advisory deadcode reports 76 unreachable functions. | Partial #904/PR #975 concerns a smaller `-test` set; classify the repository target's 76 `-test=false` results by platform/compatibility/dormancy/removability. |
 | TEST-02 | Medium | Priority redirect/path/update negative interleavings lack regression tests. | Add direct deterministic tests and prove each fails for the claimed reason before remediation. |

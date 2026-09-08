@@ -44,6 +44,8 @@ Zero product failure.
 | `make vulncheck` | PASS | Version-pinned govulncheck: `No vulnerabilities found.` |
 | `node --test scripts/action-summary.test.mjs` | PASS | 12 tests passed, 0 failed. |
 | `npm audit --package-lock-only --omit=dev` | FAIL (dependency findings) | Exit 1; 2 moderate package results through `tuistory`; details below. No lockfile change. |
+| Temporary daemon/ACP short-writer reproductions | PASS (finding reproduced) | Both focused package tests confirmed nil return after incomplete protocol writes; combined run 0.003s. Filed as #1026/#1027; tests removed, not committed. |
+| Temporary OAuth slow-header reproduction | PASS (finding reproduced) | `Close` exhausted one second and returned while the accepted connection remained open; focused run 1.20s. Filed as #1028; test removed, not committed. |
 | `git diff --check` | PASS | Exit 0, no whitespace diagnostics. |
 | `git diff HEAD --check` | PASS | Exit 0, no whitespace diagnostics. |
 
@@ -88,9 +90,9 @@ QUAL-01 recommends classification rather than bulk deletion.
   unexercised paths, or platform code skipped on Linux.
 - `npm audit` uses current registry advisory metadata and may change after the
   audit date.
-- No remediation exploit test was added or run; this task forbade production
-  changes. Static findings state prerequisites and confidence in their
-  specialist documents.
+- Three temporary regression-style tests were run to verify COR-01 and CON-02,
+  then removed; no test or production remediation was committed. Other static
+  findings state prerequisites and confidence in their specialist documents.
 
 ## Final repository hygiene
 

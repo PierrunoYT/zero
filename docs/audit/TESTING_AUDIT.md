@@ -119,6 +119,14 @@ path is wrapped in `bufio.Writer`; no observed production truncation was
 reproduced. The generic interfaces nevertheless permit a legal short writer,
 which can silently produce a corrupt frame.
 
+Temporary package tests independently exercised both mechanisms: a daemon
+writer accepted fewer bytes than the complete frame, and an ACP writer omitted
+the newline delimiter; both methods returned nil. The combined focused run
+passed in 0.003s because it asserted the current incorrect behavior. The tests
+were removed after verification. The independent fixes are tracked in upstream
+[issue #1026](https://github.com/Gitlawb/zero/issues/1026) and
+[issue #1027](https://github.com/Gitlawb/zero/issues/1027).
+
 Use `writeAll`/`io.Copy` semantics or return `io.ErrShortWrite` whenever progress
 is short without an error. Add deterministic one-byte/partial writers for the
 daemon header, daemon payload, and ACP record, including zero-progress writers.

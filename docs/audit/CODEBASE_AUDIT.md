@@ -4,9 +4,10 @@
 - **Audited revision:** `1b5db17` (`main`)
 - **Scope:** the complete Go repository, its build/release automation, and the
   Node wrapper dependencies that ship the Go binary.
-- **GitHub tracking check:** 2026-09-08 against upstream `Gitlawb/zero`; 60 open
-  issues and 71 open pull requests were reconciled by title and body, and the
-  two High findings were submitted through private vulnerability reporting.
+- **GitHub tracking check:** 2026-09-08 against upstream `Gitlawb/zero`; 63 open
+  issues and 71 open pull requests were reconciled by title and body. The two
+  High findings were submitted through private vulnerability reporting, and
+  three independently reproduced engineering bugs were filed publicly.
 - **Change policy:** audit documentation only; no production remediation or
   refactoring was performed.
 
@@ -170,7 +171,7 @@ qualifications remain in the linked specialist sections.
 | ARCH-04 | Medium | `tools.Result` and `agent.ToolResult` overlap and retain transitional fields ([`tools/types.go`](../../internal/tools/types.go#L95-L152), [`agent/types.go`](../../internal/agent/types.go#L73-L128)). | Multiple internal outcomes complicate redaction, persistence, and cross-surface compatibility. | Inventory encodings/callers, choose one registry-finalized internal outcome, and adapt legacy fields only at persistence/external boundaries. |
 | REL-01 | Medium | Several deferred or shutdown paths discard or only partly expose cleanup failures ([detail](CONCURRENCY_AUDIT.md#rel-01--stateful-cleanup-errors-are-inconsistently-observable)). | Unlock, persistence, process, or transport cleanup failure can be invisible or lose another actionable cause. | Classify cleanup as stateful/actionable or best-effort; join actionable errors and emit bounded redaction-safe diagnostics for advisory cleanup. |
 | CON-01 | Low-medium | MCP registry timeout can return while a client-factory goroutine remains if that implementation ignores context ([detail](CONCURRENCY_AUDIT.md#con-01--mcp-timeout-may-leave-a-goroutine-if-a-factory-ignores-context)). | A nonconforming pluggable factory can leak bounded-per-attempt goroutines/resources. No leak from current built-ins was demonstrated. | Require and test context compliance or add an independently closable/bounded ownership mechanism. |
-| CON-02 | Low-medium | Three loopback OAuth servers lack explicit I/O timeouts and do not join or report terminal `Serve`/`Shutdown` results ([detail](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle)). | A local slow-header connection can survive a failed bounded shutdown. Exposure is loopback-only, and state/PKCE controls remain strong. | Add conservative server bounds and idempotent close/wait with observable completion; test cancellation and slow headers. |
+| CON-02 | Low-medium | Three loopback OAuth servers lack explicit I/O timeouts and do not join or report terminal `Serve`/`Shutdown` results ([detail](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle)). | A controlled test confirmed that a local partial-header client consumes the one-second close budget and remains open after `Close` returns. Exposure is loopback-only, and state/PKCE controls remain strong. | Add conservative server bounds and idempotent close/wait with observable completion; test cancellation and slow headers. |
 | COR-01 | Low-medium | Daemon framing and ACP newline writers do not reject a legal nil-error short write ([detail](TESTING_AUDIT.md#cor-01--daemon-and-acp-writers-assume-complete-writes)). | A generic writer can silently emit a truncated protocol record, although common production writers normally return an error. | Retry to completion or return `io.ErrShortWrite`; add partial and zero-progress writer tests without changing schemas. |
 | QUAL-01 | Low-medium | `make deadcode` exits successfully but reports 76 unreachable declarations ([detail](TESTING_AUDIT.md#qual-01--advisory-dead-code-backlog)). | Unclassified dormant/platform/compatibility code raises maintenance cost; bulk deletion could break supported variants. | Classify each result and enforce a no-new-unexplained baseline; remove only separately evidenced dead code. |
 | TEST-03 | Low-medium | No Go fuzz targets were found ([detail](TESTING_AUDIT.md#test-03--no-fuzzing)). | Parser and protocol edge cases rely entirely on example-based coverage. | Seed focused fuzzers for high-risk parsers, archive names, protocol frames, and redaction while retaining deterministic regressions. |
@@ -181,7 +182,7 @@ qualifications remain in the linked specialist sections.
 ## Open upstream issue and pull-request reconciliation
 
 The audit findings above use local IDs; they are not GitHub issue numbers. A
-live REST API check of upstream `Gitlawb/zero` on 2026-09-08 returned 60 open
+live REST API check of upstream `Gitlawb/zero` on 2026-09-08 returned 63 open
 issues and 71 open pull requests. Titles and bodies were compared with each
 finding's mechanism and acceptance criteria, not matched by broad keywords
 alone.
@@ -203,6 +204,8 @@ participants until maintainers coordinate disclosure.
 |---|---|---|
 | TEST-01 | [Issue #939](https://github.com/Gitlawb/zero/issues/939), [PR #940](https://github.com/Gitlawb/zero/pull/940) | Exact. Both identify the missing `make test`/race CI gate; the PR adds a dedicated Ubuntu race job. Requiring that check in branch protection remains an acceptance step outside the diff. |
 | PERF-01 | [PR #955](https://github.com/Gitlawb/zero/pull/955) | Exact remediation in progress. It parallelizes isolated provider tests and shrinks retry backoffs during tests while retaining assertions and race coverage. |
+| COR-01 | [Issue #1026](https://github.com/Gitlawb/zero/issues/1026), [Issue #1027](https://github.com/Gitlawb/zero/issues/1027) | Exact, split by protocol and call site. Temporary package tests confirmed that both daemon framing and ACP newline JSON return success after a legal nil-error short write. The tests were removed after verification. |
+| CON-02 | [Issue #1028](https://github.com/Gitlawb/zero/issues/1028) | Exact. A temporary package test confirmed that one accepted partial-header connection makes `Close` exhaust its one-second `Shutdown` context, after which a timed client read proves the connection remains open. The test was removed after verification. |
 
 ### Partial matches that must retain residual scope
 
@@ -221,13 +224,15 @@ participants until maintainers coordinate disclosure.
 | SEC-09 | [PR #951](https://github.com/Gitlawb/zero/pull/951) | This hardens workflow token permissions and timeouts but does not set `persist-credentials: false` on release checkouts. |
 
 **Coverage result across channels:** the 2 High findings now have private
-reports; 2 other findings have exact public tracking; 2 have partial public
-tracking with explicit residuals; and 18 have no active tracking. Neither High
+reports; 4 other findings have exact public tracking; 2 have partial public
+tracking with explicit residuals; and 16 have no active tracking. Neither High
 finding has a public issue or PR, as required by upstream security policy.
 Potential vulnerabilities must stay in their private advisories until
 maintainers coordinate disclosure. For non-security and safely disclosable
 residual work, create approved, scoped upstream issues and reference the audit
-IDs. The same point-in-time status is recorded in
+IDs. Issues #1026-#1028 are open without labels because this contributor lacks
+upstream label permissions; label/approval triage remains with maintainers. The
+same point-in-time status is recorded in
 [Known Issues](KNOWN_ISSUES.md#upstream-github-tracking-status).
 
 ## Cross-cutting assessment

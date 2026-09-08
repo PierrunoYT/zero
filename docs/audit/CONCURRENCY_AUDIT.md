@@ -156,7 +156,12 @@ channel is joined
 [`oauth/loopback.go`](../../internal/oauth/loopback.go#L97-L107),
 [`mcp/oauth.go`](../../internal/mcp/oauth.go#L497-L522),
 [`provideroauth/openrouter.go`](../../internal/provideroauth/openrouter.go#L72-L109)).
-A local slow-header connection can therefore outlive a failed bounded shutdown.
+A controlled package test confirmed the lifecycle: an accepted client sent a
+partial header, `Close` consumed the full one-second `Shutdown` budget, and a
+subsequent timed read proved the connection was still open after `Close`
+returned. The test passed in 1.20s with Go 1.26.6 and was removed after
+verification. This exact behavior is tracked in upstream
+[issue #1028](https://github.com/Gitlawb/zero/issues/1028).
 
 Exposure is local-machine only. The shared listener rejects empty CSRF state and
 validates it on callback, MCP uses generated state/PKCE, and OpenRouter uses
