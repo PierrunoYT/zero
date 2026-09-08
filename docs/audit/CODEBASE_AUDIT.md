@@ -4,8 +4,8 @@
 - **Audited revision:** `1b5db17` (`main`)
 - **Scope:** the complete Go repository, its build/release automation, and the
   Node wrapper dependencies that ship the Go binary.
-- **GitHub tracking check:** 2026-09-08 against `PierrunoYT/zero`; repository
-  issues are disabled and there were no open pull requests.
+- **GitHub tracking check:** 2026-09-08 against upstream `Gitlawb/zero`; 60 open
+  issues and 71 open pull requests were reconciled by title and body.
 - **Change policy:** audit documentation only; no production remediation or
   refactoring was performed.
 
@@ -177,23 +177,44 @@ qualifications remain in the linked specialist sections.
 | PERF-01 | Low-medium | The uncached suite took 3m35s and the race suite 4m11s, dominated by provider tests with real-time waits ([detail](TESTING_AUDIT.md#perf-01--slow-full-suite-feedback)). | Slow feedback discourages frequent full/race execution; no production hot-path defect was established. | Introduce clocks/short test durations while retaining one realistic integration case per timeout class and scenario benchmarks for extracted hot paths. |
 | SEC-09 | Low | Release workflow checkouts retain Actions' persisted Git credential by default while CI disables it ([detail](SECURITY_AUDIT.md#sec-09--release-checkouts-retain-workflow-credentials)). | Trusted release steps receive avoidable credential availability; no exfiltration was observed. | Set `persist-credentials: false` unless a documented later Git operation requires it; continue explicit step-scoped publication tokens. |
 
-## Open GitHub issue and pull-request reconciliation
+## Open upstream issue and pull-request reconciliation
 
 The audit findings above use local IDs; they are not GitHub issue numbers. A
-live GitHub check on 2026-09-08 established:
+live REST API check of upstream `Gitlawb/zero` on 2026-09-08 returned 60 open
+issues and 71 open pull requests. Titles and bodies were compared with each
+finding's mechanism and acceptance criteria, not matched by broad keywords
+alone.
 
-| Repository evidence | Result |
-|---|---|
-| Repository metadata | `PierrunoYT/zero`, active, default branch `main`; remote `main` was `1b5db1765672820caac1684b168c9898b5ba3593`, exactly the audited source revision. |
-| Issue tracker | `has_issues=false`; `gh issue list --state open` reports that issues are disabled. There is therefore no repository open-issue set to match. |
-| Open pull requests | GitHub pulls API and `gh pr list --state open` both returned an empty list. |
-| Finding coverage | **0 of 24** findings are represented by an open repository issue or covered by an open pull request. This does not rule out private work, draft work outside this repository, or external-tracker work. |
+### Exact active matches
 
-Before remediation begins, maintainers should choose an approved tracking venue,
-create one scoped item per independently reviewable phase, and preserve the audit
-IDs in titles/descriptions. Do not infer that a finding is accepted merely
-because it is documented here. The same point-in-time status is recorded in
-[Known Issues](KNOWN_ISSUES.md#github-tracking-status).
+| Audit finding | Upstream tracking | Coverage decision |
+|---|---|---|
+| TEST-01 | [Issue #939](https://github.com/Gitlawb/zero/issues/939), [PR #940](https://github.com/Gitlawb/zero/pull/940) | Exact. Both identify the missing `make test`/race CI gate; the PR adds a dedicated Ubuntu race job. Requiring that check in branch protection remains an acceptance step outside the diff. |
+| PERF-01 | [PR #955](https://github.com/Gitlawb/zero/pull/955) | Exact remediation in progress. It parallelizes isolated provider tests and shrinks retry backoffs during tests while retaining assertions and race coverage. |
+
+### Partial matches that must retain residual scope
+
+| Audit finding | Upstream tracking | Residual audit scope |
+|---|---|---|
+| SEC-04 | [Issue #920](https://github.com/Gitlawb/zero/issues/920), [PR #943](https://github.com/Gitlawb/zero/pull/943) | The issue reports a stronger static chained-symlink tar escape, and the PR adds pathname `Lstat`/`EvalSymlinks` checks. That addresses the archive-supplied chain but does not establish the audit's rooted, same-object invariant; a concurrent same-account pathname swap remains separate. The audit did not independently reproduce #920, so its own severity remains qualified. |
+| QUAL-01 | [Issue #904](https://github.com/Gitlawb/zero/issues/904), [PR #975](https://github.com/Gitlawb/zero/pull/975) | They track a handful of `deadcode -test` wrappers and remove two test exports. The audit's 76 findings came from the repository target using `-test=false`; those production-reachability results still require classification. |
+
+### Related upstream work that is not coverage
+
+| Audit finding | Related item | Why it is not the same finding |
+|---|---|---|
+| SEC-02 | [Issue #921](https://github.com/Gitlawb/zero/issues/921), [PR #941](https://github.com/Gitlawb/zero/pull/941) | Atomic temp-and-replace prevents partial-file publication, but it does not bind workspace authorization and the final write to one rooted filesystem object. The component-swap TOCTOU remains untracked. |
+| SEC-07 | [Issue #937](https://github.com/Gitlawb/zero/issues/937), [PR #1007](https://github.com/Gitlawb/zero/pull/1007) | These fix oversized multi-login keyring blobs, not the default selection of plaintext OAuth file storage. |
+| SEC-08 | [PR #685](https://github.com/Gitlawb/zero/pull/685) | This protects a daemon token file from agent/sandbox reads; it does not remove literal bearer tokens from client argv or shell history. |
+| SEC-09 | [PR #951](https://github.com/Gitlawb/zero/pull/951) | This hardens workflow token permissions and timeouts but does not set `persist-credentials: false` on release checkouts. |
+
+**Coverage result:** 2 of 24 findings have exact active upstream tracking, 2
+have partial tracking with explicit residuals, and 20 have no meaningful active
+match. In particular, neither High finding has an exact upstream issue or PR.
+Before remediation begins, create approved, scoped upstream issues for the
+untracked/residual mechanisms and reference the audit IDs. The same
+point-in-time status is recorded in
+[Known Issues](KNOWN_ISSUES.md#upstream-github-tracking-status).
 
 ## Cross-cutting assessment
 

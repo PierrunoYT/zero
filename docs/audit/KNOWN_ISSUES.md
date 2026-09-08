@@ -5,17 +5,25 @@ All entries are **open audit findings** unless explicitly marked otherwise; no
 remediation was implemented. Severity expresses potential impact under the
 listed preconditions, not proof of exploitation.
 
-## GitHub tracking status
+## Upstream GitHub tracking status
 
-As of 2026-09-08, GitHub reports `has_issues=false` for `PierrunoYT/zero`, so its
-issue tracker is disabled. Both the open-pulls API and `gh pr list --state open`
-returned no pull requests. Consequently, none of the 24 audit findings is
-represented by an open repository issue or covered by an open pull request.
-Audit IDs are local identifiers, not GitHub issue numbers. Private work and work
-in an external tracker cannot be inferred from the public repository state.
+As of 2026-09-08, upstream `Gitlawb/zero` has 60 open issues and 71 open pull
+requests. Review of their titles and bodies found:
 
-The command-level evidence and recommended tracking action are in
-[Codebase Audit](CODEBASE_AUDIT.md#open-github-issue-and-pull-request-reconciliation).
+- exact active tracking for TEST-01 ([#939](https://github.com/Gitlawb/zero/issues/939),
+  [PR #940](https://github.com/Gitlawb/zero/pull/940)) and PERF-01
+  ([PR #955](https://github.com/Gitlawb/zero/pull/955));
+- partial tracking for SEC-04 ([#920](https://github.com/Gitlawb/zero/issues/920),
+  [PR #943](https://github.com/Gitlawb/zero/pull/943)) and QUAL-01
+  ([#904](https://github.com/Gitlawb/zero/issues/904),
+  [PR #975](https://github.com/Gitlawb/zero/pull/975)); and
+- no meaningful active match for the other 20 findings.
+
+Related work on atomic tool writes, keyring capacity, daemon token-file
+protection, and workflow permissions does not cover SEC-02, SEC-07, SEC-08, or
+SEC-09 respectively. Audit IDs remain local identifiers, not GitHub issue
+numbers. Detailed overlap and residual-scope analysis is in
+[Codebase Audit](CODEBASE_AUDIT.md#open-upstream-issue-and-pull-request-reconciliation).
 
 ## Ranking method
 
@@ -29,14 +37,14 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 | Rank | ID | Severity | Owner area | Finding | Status |
 |---:|---|---|---|---|---|
 | 1 | SEC-01 | High | Providers | Cross-origin redirects may retain custom authentication headers. | Open; regression needed |
-| 2 | SEC-02 | High | Tools/filesystem | Workspace write/edit checks are separated from pathname writes. | Open; regression needed |
+| 2 | SEC-02 | High | Tools/filesystem | Workspace write/edit checks are separated from pathname writes. | Open; #921/PR #941 address atomicity, not TOCTOU |
 | 3 | SEC-03 | Medium-high | MCP/filesystem | Resource scope is decided before a separate pathname read. | Open; regression needed |
 | 4 | SEC-05 | Medium-high | Updater | Downloads and expanded archives lack byte/entry limits. | Open; limits undecided |
 | 5 | SEC-08 | Medium | Remote daemon | Client bearer tokens are accepted in process arguments. | Open; compatibility deprecation needed |
-| 6 | SEC-04 | Medium | Updater | Archive extraction confinement is pathname-based. | Open; regression needed |
+| 6 | SEC-04 | Medium | Updater | Archive extraction confinement is pathname-based. | Partial #920/PR #943; rooted-race residual open |
 | 7 | SEC-06 | Medium | Release | Sibling SHA-256 assets do not independently authenticate artifacts. | Open; signing design needed |
-| 8 | SEC-07 | Medium | OAuth | File token storage defaults to mode-0600 plaintext. | Open; migration needed |
-| 9 | TEST-01 | Medium | CI | Full race detection is not a required CI gate. | Open |
+| 8 | SEC-07 | Medium | OAuth | File token storage defaults to mode-0600 plaintext. | Open; #937/PR #1007 solve a different keyring limit |
+| 9 | TEST-01 | Medium | CI | Full race detection is not a required CI gate. | Exact #939; PR #940 open |
 | 10 | DEP-01 | Medium | Node helper | npm reports two moderate vulnerable transitive packages. | Open; applicability unproven |
 
 ## Detailed registry
@@ -246,11 +254,11 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 | CON-02 | Low-medium | OAuth loopback HTTP servers have no I/O bounds or joined Serve completion. | Three loopback implementations and mitigations are detailed in [Concurrency Audit](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle); add slow-header and close/wait tests. |
 | COR-01 | Low-medium | Daemon and ACP generic writers do not detect nil-error short writes. | [`daemon/protocol.go`](../../internal/daemon/protocol.go#L51-L71), [`acp/jsonrpc.go`](../../internal/acp/jsonrpc.go#L440-L454); write completely or return `io.ErrShortWrite`, with partial-writer tests. |
 | SEC-09 | Low | Release checkout retains workflow Git credentials by default. | [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L33-L43), [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L126-L133); disable persistence unless a later Git step requires it. |
-| QUAL-01 | Low-medium | Advisory deadcode reports 76 unreachable functions. | Classify each by platform/compatibility/dormancy/removability; permit no new unexplained entries rather than bulk deletion. |
+| QUAL-01 | Low-medium | Advisory deadcode reports 76 unreachable functions. | Partial #904/PR #975 concerns a smaller `-test` set; classify the repository target's 76 `-test=false` results by platform/compatibility/dormancy/removability. |
 | TEST-02 | Medium | Priority redirect/path/update negative interleavings lack regression tests. | Add direct deterministic tests and prove each fails for the claimed reason before remediation. |
 | TEST-03 | Low-medium | No Go fuzz targets were found. | Seed high-risk parsers; preserve deterministic regression for every finding. |
 | TEST-04 | Low-medium | Node action-summary tests and npm audit are not main-CI gates. | Add a small shipped-wrapper job or document why that surface is released elsewhere. |
-| PERF-01 | Low-medium | Full test feedback is dominated by real-time provider tests. | Baseline was 3m35s plain and 4m11s race in this orb; introduce clocks/short constants without erasing real-time integration coverage. |
+| PERF-01 | Low-medium | Full test feedback is dominated by real-time provider tests. | Exact remediation is open in PR #955; baseline was 3m35s plain and 4m11s race in this orb. Preserve realistic integration coverage while reviewing its test-time backoff/parallelism approach. |
 
 ## Not findings / controls to preserve
 
