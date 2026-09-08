@@ -283,4 +283,7 @@ currently cross those contracts are the exception documented as REL-01.
    that some may be compatibility or test seams.
 
 The ranked implications are in [Known Issues](KNOWN_ISSUES.md), and the ordered
-decomposition is in [Migration Plan](MIGRATION_PLAN.md).
+decomposition is in [Migration Plan](MIGRATION_PLAN.md). ARCH-01 through ARCH-04
+were added to the existing upstream architecture Ideas thread rather than
+opening a duplicate; see
+[discussion #1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742).

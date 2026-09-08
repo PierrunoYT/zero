@@ -20,6 +20,11 @@ until the owning maintainers approve its scope.
 6. Roll back only resources created by the current operation. Never report
    success when stateful cleanup or unlock failed.
 
+Upstream triage is recorded in [Known Issues](KNOWN_ISSUES.md). Security fixes
+must remain coordinated through their private reports; architecture, release
+authenticity, OAuth-storage, lifecycle-contract, and fuzzing choices remain
+Ideas discussions until maintainers approve implementation scope.
+
 ## Phase 0 — Freeze evidence and add failing regressions
 
 **Goal:** prevent fixes from being accepted for the wrong mechanism.
@@ -187,16 +192,21 @@ move; revert it independently if parity or performance fails.
 
 ## Phase 6 — Supply chain, secrets, and quality debt
 
-1. **DEP-01:** establish Hono API reachability, upgrade `tuistory`/lockfile with
-   helper tests, or document a time-bounded evidence-backed exception.
+1. **DEP-01:** source review found the affected Hono APIs unreachable through
+   `tuistory@0.10.0`; refresh the lockfile within compatible ranges and run the
+   helper matrix under [issue #1031](https://github.com/Gitlawb/zero/issues/1031).
 2. **SEC-06:** select a signing/attestation system whose verification identity is
    independent of mutable sibling assets; implement rotation/recovery and test
    before making verification mandatory.
 3. **SEC-07:** add encrypted/keyring auto default, explicit plaintext opt-in,
    transactional migration, rollback, and headless UX.
-4. **SEC-09:** disable persisted credentials on every release checkout unless a
-   documented Git operation requires them.
-5. **TEST-03/04:** seed fuzzers and gate shipped Node helper tests/audit policy.
+4. **SEC-09:** disable persisted credentials on every release checkout under
+   [issue #1029](https://github.com/Gitlawb/zero/issues/1029); no later Git
+   operation currently requires them.
+5. **TEST-03/04:** use
+   [discussion #1035](https://github.com/Gitlawb/zero/discussions/1035) to select
+   bounded fuzz pilots, and gate the shipped action-summary suite under
+   [issue #1030](https://github.com/Gitlawb/zero/issues/1030).
 6. **QUAL-01:** classify 76 deadcode findings. Remove only separately evidenced
    entries; set a no-new-unexplained baseline.
 7. **PERF-01:** replace avoidable real-time waits with clocks/short test values

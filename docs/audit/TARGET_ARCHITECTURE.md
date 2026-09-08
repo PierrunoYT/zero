@@ -59,6 +59,11 @@ adapters. `internal/cli` remains the executable composition edge, but each
 subcommand composes a small service rather than sharing one monolithic callback
 bag.
 
+The measured concentration and this facade-preserving direction were added to
+the existing upstream
+[architecture discussion #1002](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742),
+covering ARCH-01 through ARCH-04 without proposing a competing rewrite.
+
 ## Target components
 
 ### 1. Security-bound I/O primitives

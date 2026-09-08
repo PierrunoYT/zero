@@ -46,6 +46,9 @@ Zero product failure.
 | `npm audit --package-lock-only --omit=dev` | FAIL (dependency findings) | Exit 1; 2 moderate package results through `tuistory`; details below. No lockfile change. |
 | Temporary daemon/ACP short-writer reproductions | PASS (finding reproduced) | Both focused package tests confirmed nil return after incomplete protocol writes; combined run 0.003s. Filed as #1026/#1027; tests removed, not committed. |
 | Temporary OAuth slow-header reproduction | PASS (finding reproduced) | `Close` exhausted one second and returned while the accepted connection remained open; focused run 1.20s. Filed as #1028; test removed, not committed. |
+| `tuistory@0.10.0` advisory reachability review | PASS (not reachable) | The helper does not import/call the five affected Hono APIs; DEP-01 remains vulnerable inventory, not a demonstrated exploit. |
+| Temporary lockfile-only `npm audit fix` | PASS | In a temporary copy, resolved `@hono/node-server@1.19.17` and `hono@4.13.7`; follow-up audit found 0 vulnerabilities. Temporary files were deleted; repository lockfile unchanged. |
+| Upstream GitHub tracker reconciliation | PASS | Live API check: 66 open issues, 71 open PRs, and 12 discussions. Issues #1026-#1031 are open/unlabeled; discussions #1002 and #1032-#1036 are open; all five private reports remain in `triage` (two High, three Medium). |
 | `git diff --check` | PASS | Exit 0, no whitespace diagnostics. |
 | `git diff HEAD --check` | PASS | Exit 0, no whitespace diagnostics. |
 
@@ -59,9 +62,11 @@ vulnerable package results with fixes available:
 | `@hono/node-server@1.19.14` | `tuistory@0.10.0` | GHSA-frvp-7c67-39w9 |
 | `hono@4.12.27` | `@hono/node-server`, `tuistory` | GHSA-8j4g-w8fx-2239; GHSA-f23p-vx2j-j53r; GHSA-79qm-7rj5-m7r9; GHSA-54fx-42gc-7vw4 |
 
-This is a dependency exposure result, not proof that Zero reaches each affected
-Hono API. No production dependency was changed because this task authorized
-audit documentation only. See DEP-01 in [Known Issues](KNOWN_ISSUES.md#dep-01--transitive-npm-advisory-exposure).
+Follow-up source review found that `tuistory@0.10.0` does not invoke any of the
+five affected Hono APIs. A temporary lockfile-only audit fix cleared the audit
+without changing the repository. This remains dependency inventory, not proof
+of a reachable Zero exploit. See DEP-01 in
+[Known Issues](KNOWN_ISSUES.md#dep-01--transitive-npm-advisory-exposure).
 
 ## Deadcode detail
 
@@ -104,7 +109,7 @@ status are recorded here:
 | Check | Final outcome |
 |---|---|
 | Exactly ten files under `docs/audit` | PASS; exact requested filename set, no extra audit files. |
-| Relative Markdown link targets exist | PASS; every parsed relative target exists. |
+| Relative Markdown link targets exist | PASS; 365 inline links parsed and every relative target exists. |
 | Source/document anchors are valid | PASS; source line ranges are within file length and document heading anchors resolve. |
 | `git diff --check` / `git diff HEAD --check` | PASS; no output. |
 | Generated `./zero` absent | PASS after removing the ignored 30,752,930-byte build artifact. |

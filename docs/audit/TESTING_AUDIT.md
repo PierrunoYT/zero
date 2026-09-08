@@ -78,7 +78,8 @@ fail for the intended reason:
 
 Static invalid-input tests are not substitutes for check/use interleavings.
 Tests should call the vulnerable layer directly if earlier guards would reject
-the fixture.
+the fixture. TEST-02 is deliberately distributed as acceptance scope on those
+findings rather than filed as one umbrella upstream issue.
 
 ### TEST-03 — No fuzzing
 
@@ -88,6 +89,9 @@ normalization, redaction/control-byte normalization, and shell/permission
 parsers. Seed with existing regression cases and keep deterministic unit tests
 for every discovered bug. Fuzzing complements—not replaces—platform and
 interleaving tests.
+
+The proposed target order, CI budgets, and native-platform guardrails are in
+Ideas [discussion #1035](https://github.com/Gitlawb/zero/discussions/1035).
 
 ### QUAL-01 — Advisory dead-code backlog
 
@@ -102,10 +106,12 @@ whole-program reachability.
 ### TEST-04 — Node helper checks are not visibly part of main CI
 
 The audit's `node --test scripts/action-summary.test.mjs` passed all 12 tests,
-but the reviewed CI workflow has no Node test step. Likewise `npm audit` is not a
-gate. Add a small lockfile/Node job if the wrapper/action remains a shipped
-surface. Keep vulnerability scanning separate from applicability decisions so a
-temporary advisory does not encourage blind dependency changes.
+but the reviewed CI workflows have no Node test step. In addition,
+`zero-action-smoke.yml` does not include `scripts/action-summary.mjs` or its test
+path in the workflow trigger, so a helper-only change triggers neither that
+workflow nor main CI. Exact [issue #1030](https://github.com/Gitlawb/zero/issues/1030)
+tracks adding the paths and running the existing suite. npm dependency advisory
+handling remains the separate DEP-01 scope.
 
 ### COR-01 — Daemon and ACP writers assume complete writes
 
@@ -179,10 +185,15 @@ The lockfile resolves `tuistory@0.10.0` ->
   into the moderate package result);
 - GHSA-54fx-42gc-7vw4, language middleware algorithmic complexity DoS.
 
-Audit metadata reports fixes available. These are transitive helper dependencies
-and affected API reachability was not established; perform an upgrade and helper
-smoke matrix, then document dismissals only with call-path evidence. The audit
-did not modify `package-lock.json`.
+Source review of `tuistory@0.10.0` found its loopback relay imports core `Hono`
+and `createAdaptorServer`, then installs custom local-only middleware and
+explicit JSON/text/WebSocket routes. It does not import/call `serveStatic`,
+`cors`, JSX `memo`, `proxy`, or `languageDetector`; the five advisory mechanisms
+are therefore not reachable through the reviewed helper. In a temporary copy,
+`npm audit fix --package-lock-only --ignore-scripts --omit=dev` resolved
+`@hono/node-server@1.19.17` and `hono@4.13.7` and returned zero findings. The
+temporary copy was deleted and the repository lockfile was unchanged. Exact
+maintenance tracking is [issue #1031](https://github.com/Gitlawb/zero/issues/1031).
 
 ### Release
 

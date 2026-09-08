@@ -7,25 +7,42 @@ listed preconditions, not proof of exploitation.
 
 ## Upstream GitHub tracking status
 
-As of 2026-09-08, upstream `Gitlawb/zero` has 63 open issues and 71 open pull
-requests. Review of their titles and bodies found:
+As of 2026-09-08, upstream `Gitlawb/zero` has 66 open issues, 71 open pull
+requests, and 12 discussions. Every audit finding is now routed:
 
 - private vulnerability reports for SEC-01
-  ([GHSA-f484-43mf-99v6](https://github.com/Gitlawb/zero/security/advisories/GHSA-f484-43mf-99v6))
-  and SEC-02
+  ([GHSA-f484-43mf-99v6](https://github.com/Gitlawb/zero/security/advisories/GHSA-f484-43mf-99v6)),
+  SEC-02
   ([GHSA-37cg-763q-376p](https://github.com/Gitlawb/zero/security/advisories/GHSA-37cg-763q-376p)),
-  both in `triage` state;
+  SEC-03
+  ([GHSA-h6h3-r5cg-9rx7](https://github.com/Gitlawb/zero/security/advisories/GHSA-h6h3-r5cg-9rx7)),
+  SEC-05
+  ([GHSA-wp99-wj2j-6r6v](https://github.com/Gitlawb/zero/security/advisories/GHSA-wp99-wj2j-6r6v)),
+  and SEC-08
+  ([GHSA-5794-h26h-ccqc](https://github.com/Gitlawb/zero/security/advisories/GHSA-5794-h26h-ccqc)),
+  all in `triage` state;
 - exact active tracking for TEST-01 ([#939](https://github.com/Gitlawb/zero/issues/939),
   [PR #940](https://github.com/Gitlawb/zero/pull/940)) and PERF-01
   ([PR #955](https://github.com/Gitlawb/zero/pull/955)), plus newly filed exact
   reports for COR-01 ([#1026](https://github.com/Gitlawb/zero/issues/1026),
   [#1027](https://github.com/Gitlawb/zero/issues/1027)) and CON-02
-  ([#1028](https://github.com/Gitlawb/zero/issues/1028));
+  ([#1028](https://github.com/Gitlawb/zero/issues/1028)), SEC-09
+  ([#1029](https://github.com/Gitlawb/zero/issues/1029)), TEST-04
+  ([#1030](https://github.com/Gitlawb/zero/issues/1030)), and DEP-01
+  ([#1031](https://github.com/Gitlawb/zero/issues/1031));
+- Ideas discussions for SEC-06
+  ([#1032](https://github.com/Gitlawb/zero/discussions/1032)), SEC-07
+  ([#1033](https://github.com/Gitlawb/zero/discussions/1033)), ARCH-01 through
+  ARCH-04 ([#1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742)),
+  CON-01 ([#1034](https://github.com/Gitlawb/zero/discussions/1034)), TEST-03
+  ([#1035](https://github.com/Gitlawb/zero/discussions/1035)), and REL-01
+  ([#1036](https://github.com/Gitlawb/zero/discussions/1036));
 - partial tracking for SEC-04 ([#920](https://github.com/Gitlawb/zero/issues/920),
   [PR #943](https://github.com/Gitlawb/zero/pull/943)) and QUAL-01
   ([#904](https://github.com/Gitlawb/zero/issues/904),
   [PR #975](https://github.com/Gitlawb/zero/pull/975)); and
-- no active tracking for the other 16 findings.
+- TEST-02 distributed as regression acceptance scope on the relevant findings,
+  rather than filed as one umbrella testing issue.
 
 Related work on atomic tool writes, keyring capacity, daemon token-file
 protection, and workflow permissions does not cover SEC-02, SEC-07, SEC-08, or
@@ -33,7 +50,7 @@ SEC-09 respectively. Audit IDs remain local identifiers, not GitHub issue
 numbers. The advisory links require participant access until coordinated
 disclosure. Detailed overlap and residual-scope analysis is in
 [Codebase Audit](CODEBASE_AUDIT.md#open-upstream-issue-and-pull-request-reconciliation).
-Issues #1026-#1028 are open and currently unlabeled; an attempted `bug` label
+Issues #1026-#1031 are open and currently unlabeled; an attempted `bug` label
 update returned HTTP 403 because only upstream maintainers can perform that
 triage.
 
@@ -50,14 +67,14 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 |---:|---|---|---|---|---|
 | 1 | SEC-01 | High | Providers | Cross-origin redirects may retain custom authentication headers. | Private GHSA-f484-43mf-99v6; triage |
 | 2 | SEC-02 | High | Tools/filesystem | Workspace write/edit checks are separated from pathname writes. | Private GHSA-37cg-763q-376p; triage; #921/PR #941 address atomicity only |
-| 3 | SEC-03 | Medium-high | MCP/filesystem | Resource scope is decided before a separate pathname read. | Open; regression needed |
-| 4 | SEC-05 | Medium-high | Updater | Downloads and expanded archives lack byte/entry limits. | Open; limits undecided |
-| 5 | SEC-08 | Medium | Remote daemon | Client bearer tokens are accepted in process arguments. | Open; compatibility deprecation needed |
+| 3 | SEC-03 | Medium-high | MCP/filesystem | Resource scope is decided before a separate pathname read. | Private GHSA-h6h3-r5cg-9rx7; triage |
+| 4 | SEC-05 | Medium-high | Updater | Downloads and expanded archives lack byte/entry limits. | Private GHSA-wp99-wj2j-6r6v; triage |
+| 5 | SEC-08 | Medium | Remote daemon | Client bearer tokens are accepted in process arguments. | Private GHSA-5794-h26h-ccqc; triage |
 | 6 | SEC-04 | Medium | Updater | Archive extraction confinement is pathname-based. | Partial #920/PR #943; rooted-race residual open |
-| 7 | SEC-06 | Medium | Release | Sibling SHA-256 assets do not independently authenticate artifacts. | Open; signing design needed |
-| 8 | SEC-07 | Medium | OAuth | File token storage defaults to mode-0600 plaintext. | Open; #937/PR #1007 solve a different keyring limit |
+| 7 | SEC-06 | Medium | Release | Sibling SHA-256 assets do not independently authenticate artifacts. | Ideas discussion #1032 |
+| 8 | SEC-07 | Medium | OAuth | File token storage defaults to mode-0600 plaintext. | Ideas discussion #1033; #937/PR #1007 solve a different keyring limit |
 | 9 | TEST-01 | Medium | CI | Full race detection is not a required CI gate. | Exact #939; PR #940 open |
-| 10 | DEP-01 | Medium | Node helper | npm reports two moderate vulnerable transitive packages. | Open; applicability unproven |
+| 10 | DEP-01 | Medium | Node helper | npm reports two moderate vulnerable transitive packages. | Exact issue #1031; affected APIs reviewed as unreachable |
 
 ## Detailed registry
 
@@ -124,6 +141,9 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 ### SEC-03 — MCP resource canonicalize-then-read TOCTOU
 
+- **Tracking:** private
+  [GHSA-h6h3-r5cg-9rx7](https://github.com/Gitlawb/zero/security/advisories/GHSA-h6h3-r5cg-9rx7),
+  in `triage`.
 - **Evidence:** `EvalSymlinks` and root comparison return a path that is later
   separately statted/read
   ([`resources.go`](../../internal/mcp/resources.go#L142-L164),
@@ -141,6 +161,9 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 ### SEC-05 — Unbounded updater input and expansion
 
+- **Tracking:** private
+  [GHSA-wp99-wj2j-6r6v](https://github.com/Gitlawb/zero/security/advisories/GHSA-wp99-wj2j-6r6v),
+  in `triage`.
 - **Evidence:** metadata decode and archive download are not byte-limited;
   extraction has no file/entry/total expansion budget
   ([`update.go`](../../internal/update/update.go#L334-L359),
@@ -159,6 +182,8 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 ### SEC-06 — Same-source release checksum authenticity
 
+- **Tracking:** Ideas
+  [discussion #1032](https://github.com/Gitlawb/zero/discussions/1032).
 - **Evidence:** updater fetches archive and `.sha256` sibling from the same
   release metadata/source
   ([`apply.go`](../../internal/update/apply.go#L164-L174),
@@ -178,6 +203,8 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 ### SEC-07 — OAuth plaintext file default
 
+- **Tracking:** Ideas
+  [discussion #1033](https://github.com/Gitlawb/zero/discussions/1033).
 - **Evidence:** empty/default storage selects the plaintext file backend
   ([`oauth/store.go`](../../internal/oauth/store.go#L84-L99),
   [`oauth/store.go`](../../internal/oauth/store.go#L161-L189)).
@@ -195,6 +222,9 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 ### SEC-08 — Remote daemon token accepted in argv
 
+- **Tracking:** private
+  [GHSA-5794-h26h-ccqc](https://github.com/Gitlawb/zero/security/advisories/GHSA-5794-h26h-ccqc),
+  in `triage`.
 - **Evidence:** `daemon run`, `attach`, and `link` parse literal `--token`
   arguments
   ([`daemon.go`](../../internal/cli/daemon.go#L276-L317),
@@ -227,20 +257,26 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 ### DEP-01 — Transitive npm advisory exposure
 
+- **Tracking:** exact public
+  [issue #1031](https://github.com/Gitlawb/zero/issues/1031).
 - **Evidence:** npm audit reports moderate results for
   `@hono/node-server@1.19.14` and `hono@4.12.27` via `tuistory@0.10.0`.
-- **Potential impact:** depends on whether Zero's helper invokes the affected
-  Windows static path, CORS, SSR memo, proxy, or language middleware paths.
-- **Qualification:** applicability was not established; this is not a confirmed
-  exploitable Zero path.
-- **Remediation:** map helper call paths, test the supported Node/platform matrix,
-  and upgrade the direct dependency/lockfile when compatible.
+- **Reachability:** source review found `tuistory@0.10.0` imports only core Hono,
+  `createAdaptorServer`, and its own loopback relay routes; it does not import or
+  call the five affected static/CORS/SSR memo/proxy/language APIs.
+- **Qualification:** the affected APIs are not reachable through the reviewed
+  helper; this remains vulnerable dependency inventory, not an exploit claim.
+- **Remediation:** refresh the lockfile within existing compatible ranges and
+  test the supported Node/platform helper matrix.
 - **Acceptance:** audit is clean or every remaining advisory has a versioned,
   evidence-backed reachability decision and review date; helper tests pass.
 - **Detail:** [Testing Audit](TESTING_AUDIT.md#dependency-and-supply-chain-testing).
 
 ### ARCH-01 — Large CLI/TUI/agent concentration
 
+- **Tracking:** existing Ideas
+  [discussion #1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742)
+  covers ARCH-01 through ARCH-04.
 - **Evidence:** `tui/model.go` is 6,064 lines, `agent/loop.go` 3,487, and
   `cli/app.go` 1,589; CLI imports 59 internal packages and TUI 39.
 - **Impact:** high review surface, implicit state coupling, expensive regression
@@ -258,18 +294,18 @@ that should follow the high-priority boundary fixes from ordinary medium debt.
 
 | ID | Severity | Finding | Evidence / acceptance summary |
 |---|---|---|---|
-| ARCH-02 | Medium | Config resolution imports and validates runtime domains. | [`resolver.go`](../../internal/config/resolver.go#L1-L17); separate merge/normalization from narrow validators while preserving exact precedence and trust gates. |
-| ARCH-03 | Medium | Permission identifiers and parsing are mirrored across agent/swarm/specialist/CLI. | [`agent/types.go`](../../internal/agent/types.go#L20-L71), [`swarm/team.go`](../../internal/swarm/team.go#L290-L320); one cycle-free enum, aliases only at ingress, unknown fails closed. |
-| ARCH-04 | Medium | `tools.Result` and `agent.ToolResult` overlap and carry legacy fields. | [`tools/types.go`](../../internal/tools/types.go#L95-L152), [`agent/types.go`](../../internal/agent/types.go#L73-L128); one canonical internal outcome after persisted/API compatibility inventory. |
-| REL-01 | Medium | Stateful cleanup errors are discarded or only partly reported. | Agent/MCP/execution/daemon examples in [Concurrency Audit](CONCURRENCY_AUDIT.md#rel-01--stateful-cleanup-errors-are-inconsistently-observable); classify, join actionable errors, otherwise redact-safe diagnostics. |
-| CON-01 | Low-medium | MCP timeout reaper can remain if a client factory ignores context forever. | [`registry.go`](../../internal/mcp/registry.go#L115-L143); require/test context compliance or an independently closable/bounded worker. |
+| ARCH-02 | Medium | Config resolution imports and validates runtime domains. | [Discussion #1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742); separate merge/normalization from narrow validators while preserving exact precedence and trust gates. |
+| ARCH-03 | Medium | Permission identifiers and parsing are mirrored across agent/swarm/specialist/CLI. | [Discussion #1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742); one cycle-free enum, aliases only at ingress, unknown fails closed. |
+| ARCH-04 | Medium | `tools.Result` and `agent.ToolResult` overlap and carry legacy fields. | [Discussion #1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742); one canonical internal outcome after persisted/API compatibility inventory. |
+| REL-01 | Medium | Stateful cleanup errors are discarded or only partly reported. | Ideas [discussion #1036](https://github.com/Gitlawb/zero/discussions/1036) defines classification before owner-specific bugs are split; evidence in [Concurrency Audit](CONCURRENCY_AUDIT.md#rel-01--stateful-cleanup-errors-are-inconsistently-observable). |
+| CON-01 | Low-medium | MCP timeout reaper can remain if a client factory ignores context forever. | Ideas [discussion #1034](https://github.com/Gitlawb/zero/discussions/1034); require/test context compliance or decide on an independently closable attempt contract. |
 | CON-02 | Low-medium | OAuth loopback HTTP servers have no I/O bounds or joined Serve completion. | Exact [issue #1028](https://github.com/Gitlawb/zero/issues/1028); a temporary slow-header test confirmed an open accepted connection after the one-second close budget. Details: [Concurrency Audit](CONCURRENCY_AUDIT.md#con-02--oauth-loopback-servers-lack-io-bounds-and-a-joined-lifecycle). |
 | COR-01 | Low-medium | Daemon and ACP generic writers do not detect nil-error short writes. | Exact [issue #1026](https://github.com/Gitlawb/zero/issues/1026) and [issue #1027](https://github.com/Gitlawb/zero/issues/1027); temporary tests confirmed silent incomplete records. Write completely or return `io.ErrShortWrite`. |
-| SEC-09 | Low | Release checkout retains workflow Git credentials by default. | [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L33-L43), [`release-artifacts.yml`](../../.github/workflows/release-artifacts.yml#L126-L133); disable persistence unless a later Git step requires it. |
+| SEC-09 | Low | Release checkout retains workflow Git credentials by default. | Exact [issue #1029](https://github.com/Gitlawb/zero/issues/1029); disable persistence because no later Git command requires it. |
 | QUAL-01 | Low-medium | Advisory deadcode reports 76 unreachable functions. | Partial #904/PR #975 concerns a smaller `-test` set; classify the repository target's 76 `-test=false` results by platform/compatibility/dormancy/removability. |
-| TEST-02 | Medium | Priority redirect/path/update negative interleavings lack regression tests. | Add direct deterministic tests and prove each fails for the claimed reason before remediation. |
-| TEST-03 | Low-medium | No Go fuzz targets were found. | Seed high-risk parsers; preserve deterministic regression for every finding. |
-| TEST-04 | Low-medium | Node action-summary tests and npm audit are not main-CI gates. | Add a small shipped-wrapper job or document why that surface is released elsewhere. |
+| TEST-02 | Medium | Priority redirect/path/update negative interleavings lack regression tests. | Distributed acceptance scope on the relevant security/correctness/lifecycle tracking; deliberately no umbrella issue. |
+| TEST-03 | Low-medium | No Go fuzz targets were found. | Ideas [discussion #1035](https://github.com/Gitlawb/zero/discussions/1035); pilot bounded high-risk parsers and preserve deterministic regressions. |
+| TEST-04 | Low-medium | Shipped action-summary tests are neither run nor triggered by their paths in CI. | Exact [issue #1030](https://github.com/Gitlawb/zero/issues/1030); add helper paths and run the existing 12-test suite. |
 | PERF-01 | Low-medium | Full test feedback is dominated by real-time provider tests. | Exact remediation is open in PR #955; baseline was 3m35s plain and 4m11s race in this orb. Preserve realistic integration coverage while reviewing its test-time backoff/parallelism approach. |
 
 ## Not findings / controls to preserve

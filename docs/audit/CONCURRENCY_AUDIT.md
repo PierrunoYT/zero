@@ -110,6 +110,10 @@ the reaper remain. Startup latency is bounded and current production transports
 are context-aware, so this is a lifecycle robustness risk, not evidence of a
 present leak under normal adapters.
 
+The contract decision is tracked in Ideas
+[discussion #1034](https://github.com/Gitlawb/zero/discussions/1034); it
+explicitly does not claim a built-in leak.
+
 **Recommendation.** Make context compliance part of the factory contract and
 test it. Where an API cannot be interrupted, supervise it with an independently
 closable resource or bounded worker strategy; do not claim a timeout fully owns
@@ -138,6 +142,10 @@ Routine response-body closes and temporary-file cleanup do not all need to fail
 the operation. The issue is lack of a consistent classification between
 best-effort hygiene and stateful teardown that can leave processes, locks, or
 policy resources behind.
+
+Ideas [discussion #1036](https://github.com/Gitlawb/zero/discussions/1036)
+records the cleanup classification question. Any reproduced owner-specific bug
+should become its own issue rather than one cross-repository cleanup ticket.
 
 **Recommendation.** Define cleanup classes. Join/return stateful errors when the
 caller can act; otherwise emit bounded, redaction-safe structured diagnostics.

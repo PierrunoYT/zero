@@ -128,6 +128,9 @@ platform's expected error set.
 - **Severity:** Medium-high
 - **Confidence:** high in the window; exploitation requires a concurrent local
   filesystem actor and an MCP read request.
+- **Tracking:** private
+  [GHSA-h6h3-r5cg-9rx7](https://github.com/Gitlawb/zero/security/advisories/GHSA-h6h3-r5cg-9rx7),
+  in `triage`.
 
 **Observed behavior.** Resource reads call `EvalSymlinks`, compare the canonical
 path against canonical allowed roots, and return a string path
@@ -189,6 +192,9 @@ and Windows reparse tests.
 
 - **Severity:** Medium-high
 - **Confidence:** high.
+- **Tracking:** private
+  [GHSA-wp99-wj2j-6r6v](https://github.com/Gitlawb/zero/security/advisories/GHSA-wp99-wj2j-6r6v),
+  in `triage`; maintainers may reclassify it as reliability hardening.
 
 `downloadFile` streams an HTTP body to disk with unbounded `io.Copy`
 ([`apply.go`](../../internal/update/apply.go#L362-L390)); release metadata JSON is
@@ -215,6 +221,8 @@ many empty entries, cleanup after rejection, and no partial install.
 
 - **Severity:** Medium
 - **Confidence:** high as a trust-model observation.
+- **Tracking:** Ideas
+  [discussion #1032](https://github.com/Gitlawb/zero/discussions/1032).
 
 The updater downloads the archive and `.sha256` sibling from release metadata,
 then validates digest and expected filename
@@ -238,6 +246,8 @@ strong OIDC/provenance and reviewed environment controls
 
 - **Severity:** Medium
 - **Confidence:** high.
+- **Tracking:** Ideas
+  [discussion #1033](https://github.com/Gitlawb/zero/discussions/1033).
 
 The unified OAuth token store documents `file` as the default and returns a
 plaintext file backend when storage is empty
@@ -264,6 +274,9 @@ and ensure headless/keyring-unavailable failures have actionable recovery.
 - **Severity:** Medium
 - **Confidence:** high in exposure; impact depends on host process/history
   visibility.
+- **Tracking:** private
+  [GHSA-5794-h26h-ccqc](https://github.com/Gitlawb/zero/security/advisories/GHSA-5794-h26h-ccqc),
+  in `triage`.
 
 Remote daemon `run` and `attach` parse both `--token value` and `--token=value`
 ([`daemon.go`](../../internal/cli/daemon.go#L276-L317),
@@ -294,6 +307,8 @@ permissions/error redaction, and prove saved links remain secret-free.
 
 - **Severity:** Low
 - **Confidence:** high as defense-in-depth.
+- **Tracking:** exact public
+  [issue #1029](https://github.com/Gitlawb/zero/issues/1029).
 
 CI explicitly configures `actions/checkout` with `persist-credentials: false`
 ([`ci.yml`](../../.github/workflows/ci.yml#L20-L26)), but package and npm release
@@ -313,11 +328,14 @@ least-privilege job permissions and explicit step-scoped publication tokens.
 `npm audit --package-lock-only --omit=dev` reported two moderate vulnerable
 transitive packages through `tuistory@0.10.0`:
 `@hono/node-server@1.19.14` (GHSA-frvp-7c67-39w9) and `hono@4.12.27` (four
-advisories). Fixes are reported available. Zero vendors these helpers for local
-browser/terminal control; the audit did not prove that Zero invokes the affected
-Hono static, CORS, memo, proxy, or language paths. Treat DEP-01 as exposed
-dependency inventory pending an applicability test, not a confirmed Zero
-vulnerability. See [Testing Audit](TESTING_AUDIT.md#dependency-and-supply-chain-testing).
+advisories). Fixes are reported available. Follow-up source review found that
+`tuistory@0.10.0` does not import or call the affected Hono static, CORS, SSR
+memo, proxy, or language APIs. A temporary lockfile-only audit fix resolved
+`@hono/node-server@1.19.17` and `hono@4.13.7` and returned zero findings without
+changing the repository. Treat DEP-01 as non-reachable vulnerable inventory,
+not a confirmed Zero vulnerability; exact maintenance tracking is
+[issue #1031](https://github.com/Gitlawb/zero/issues/1031). See
+[Testing Audit](TESTING_AUDIT.md#dependency-and-supply-chain-testing).
 
 ## Controls to preserve
 

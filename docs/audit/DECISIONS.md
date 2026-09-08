@@ -4,6 +4,15 @@ These records capture recommendations from the audit of revision `1b5db17`.
 They are **proposed**, not implemented or maintainer-approved. Each should become
 a normal ADR/design review before production work.
 
+Upstream decision venues now exist for release authenticity
+([discussion #1032](https://github.com/Gitlawb/zero/discussions/1032)), OAuth
+storage ([#1033](https://github.com/Gitlawb/zero/discussions/1033)), architecture
+([#1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742)),
+MCP cancellation contracts ([#1034](https://github.com/Gitlawb/zero/discussions/1034)),
+fuzzing ([#1035](https://github.com/Gitlawb/zero/discussions/1035)), and cleanup
+error policy ([#1036](https://github.com/Gitlawb/zero/discussions/1036)). A
+discussion records a decision request; it is not implementation approval.
+
 ## D-01 — Evolve the modular monolith; do not rewrite
 
 - **Status:** Proposed

@@ -4,10 +4,12 @@
 - **Audited revision:** `1b5db17` (`main`)
 - **Scope:** the complete Go repository, its build/release automation, and the
   Node wrapper dependencies that ship the Go binary.
-- **GitHub tracking check:** 2026-09-08 against upstream `Gitlawb/zero`; 63 open
-  issues and 71 open pull requests were reconciled by title and body. The two
-  High findings were submitted through private vulnerability reporting, and
-  three independently reproduced engineering bugs were filed publicly.
+- **GitHub tracking check:** 2026-09-08 against upstream `Gitlawb/zero`; 66 open
+  issues, 71 open pull requests, and 12 discussions were reconciled by title and
+  body. Five potential-security findings were submitted privately, seven
+  findings have exact public issue/PR tracking, nine design findings are routed
+  to Ideas discussions, two have partial public coverage, and TEST-02 is
+  distributed test scope rather than a standalone ticket.
 - **Change policy:** audit documentation only; no production remediation or
   refactoring was performed.
 
@@ -120,7 +122,7 @@ demonstrated. Preconditions are documented in the specialist audits.
 | 7 | SEC-06 | Medium | Release archive and checksum come from the same source without an independent signature. | Checksums detect corruption and mismatches, not replacement of both assets by a compromised publisher/source. |
 | 8 | SEC-07 | Medium | OAuth tokens default to mode-0600 plaintext JSON. | Permissions and atomic publication are strong, but local at-rest confidentiality is weaker than the API-key credential store default. |
 | 9 | TEST-01 | Medium | CI runs plain `go test ./...`, not the repository's race-enabled `make test`. | Concurrency is extensive; the manual full race run passed, but regressions are not continuously gated. |
-| 10 | DEP-01 | Medium | npm audit reports two transitive moderate vulnerable packages through `tuistory`. | Fixes are available; applicability to Zero's helper use was not proven, so this is dependency exposure rather than a confirmed Zero exploit. |
+| 10 | DEP-01 | Medium | npm audit reports two transitive moderate vulnerable packages through `tuistory`. | Source review found none of the five affected Hono APIs reachable from `tuistory@0.10.0`; a compatible lockfile-only refresh cleared the audit in a temporary copy. |
 
 The canonical registry, lower-ranked items, evidence links, and acceptance
 criteria are in [Known Issues](KNOWN_ISSUES.md).
@@ -164,7 +166,7 @@ qualifications remain in the linked specialist sections.
 | SEC-08 | Medium | Remote daemon `run`, `attach`, and `link` accept a literal bearer token through `--token` ([detail](SECURITY_AUDIT.md#sec-08--remote-daemon-bearer-tokens-are-accepted-in-argv)). | The optional value can enter shell history or process inspection. TLS, constant-time comparison, environment/token-file input, and secret-free link files are existing controls. | Add/document token-file or protected input, deprecate literal argv compatibly, and test that argv, errors, logs, and links remain secret-free. |
 | TEST-01 | Medium | CI runs plain tests although `make test` enables `-race` ([detail](CONCURRENCY_AUDIT.md#test-01--race-detection-is-not-a-ci-gate)). | A future memory race can merge despite this audit's full race run passing. | Require a full Linux race job while retaining plain native-platform tests. |
 | TEST-02 | Medium | Redirect, pathname-swap, update-limit, daemon-token, short-write, OAuth-shutdown, and cleanup failure mechanisms lack direct adversarial regressions ([detail](TESTING_AUDIT.md#test-02--missing-adversarial-boundary-cases)). | A remediation may test the wrong layer or regress silently. | Add deterministic tests that fail on the unfixed mechanism for the claimed reason before production changes. |
-| DEP-01 | Medium | npm audit reports moderate findings in `@hono/node-server@1.19.14` and `hono@4.12.27` through `tuistory@0.10.0` ([detail](TESTING_AUDIT.md#dependency-and-supply-chain-testing)). | Dependency exposure exists, but use of the affected Hono paths by Zero was not established. | Map reachability, test the supported helper/platform matrix, then upgrade or record a time-bounded evidence-backed exception. |
+| DEP-01 | Medium | npm audit reports moderate findings in `@hono/node-server@1.19.14` and `hono@4.12.27` through `tuistory@0.10.0` ([detail](TESTING_AUDIT.md#dependency-and-supply-chain-testing)). | Source review found no import/call of the affected static, CORS, SSR memo, proxy, or language APIs; this is vulnerable inventory, not a demonstrated reachable exploit. | Refresh the lockfile within existing compatible ranges, test the helper/platform matrix, and retain the reachability record. |
 | ARCH-01 | Medium | `tui/model.go`, `agent/loop.go`, and `cli/app.go` are 6,064, 3,487, and 1,589 lines; CLI/TUI dependency fan-out is high ([detail](CURRENT_ARCHITECTURE.md#current-pressure-points)). | Change review, state ownership, regression analysis, and lifecycle reasoning are expensive; size alone is not a correctness defect. | Preserve root facades and extract one behavior-compatible command service, agent collaborator, or feature-owned TUI model per review. |
 | ARCH-02 | Medium | Config resolution imports runtime feature packages and performs domain-specific validation ([`resolver.go`](../../internal/config/resolver.go#L1-L17)). | Configuration layering is coupled to the features it configures, increasing fan-out and import-cycle pressure. | Separate parse/layer/trust normalization from narrow cycle-free validators without changing precedence or fail-closed restrictions. |
 | ARCH-03 | Medium | Permission names, aliases, parsing, and ordering are mirrored across agent, swarm, specialist, and CLI surfaces ([detail](TARGET_ARCHITECTURE.md#2-canonical-runtime-contracts)). | Vocabulary can drift and unknown values may behave inconsistently across boundaries. | Establish one cycle-free canonical enum/order; convert legacy aliases only at ingress and fail closed on unknown values. |
@@ -175,28 +177,32 @@ qualifications remain in the linked specialist sections.
 | COR-01 | Low-medium | Daemon framing and ACP newline writers do not reject a legal nil-error short write ([detail](TESTING_AUDIT.md#cor-01--daemon-and-acp-writers-assume-complete-writes)). | A generic writer can silently emit a truncated protocol record, although common production writers normally return an error. | Retry to completion or return `io.ErrShortWrite`; add partial and zero-progress writer tests without changing schemas. |
 | QUAL-01 | Low-medium | `make deadcode` exits successfully but reports 76 unreachable declarations ([detail](TESTING_AUDIT.md#qual-01--advisory-dead-code-backlog)). | Unclassified dormant/platform/compatibility code raises maintenance cost; bulk deletion could break supported variants. | Classify each result and enforce a no-new-unexplained baseline; remove only separately evidenced dead code. |
 | TEST-03 | Low-medium | No Go fuzz targets were found ([detail](TESTING_AUDIT.md#test-03--no-fuzzing)). | Parser and protocol edge cases rely entirely on example-based coverage. | Seed focused fuzzers for high-risk parsers, archive names, protocol frames, and redaction while retaining deterministic regressions. |
-| TEST-04 | Low-medium | Node action-summary tests and npm advisory policy are not visible as main-CI gates ([detail](TESTING_AUDIT.md#test-04--node-helper-checks-are-not-visibly-part-of-main-ci)). | A shipped wrapper or lockfile regression can bypass the primary Go quality path. | Add a small lockfile/helper job or document and enforce the separate release gate. |
+| TEST-04 | Low-medium | The shipped action-summary tests are not run by CI, and their implementation/test paths do not trigger action-smoke CI ([detail](TESTING_AUDIT.md#test-04--node-helper-checks-are-not-visibly-part-of-main-ci)). | A shipped action regression can bypass the primary Go quality path despite an existing 12-test suite. | Add the helper paths to the workflow filter and execute the existing Node tests as a required step. |
 | PERF-01 | Low-medium | The uncached suite took 3m35s and the race suite 4m11s, dominated by provider tests with real-time waits ([detail](TESTING_AUDIT.md#perf-01--slow-full-suite-feedback)). | Slow feedback discourages frequent full/race execution; no production hot-path defect was established. | Introduce clocks/short test durations while retaining one realistic integration case per timeout class and scenario benchmarks for extracted hot paths. |
 | SEC-09 | Low | Release workflow checkouts retain Actions' persisted Git credential by default while CI disables it ([detail](SECURITY_AUDIT.md#sec-09--release-checkouts-retain-workflow-credentials)). | Trusted release steps receive avoidable credential availability; no exfiltration was observed. | Set `persist-credentials: false` unless a documented later Git operation requires it; continue explicit step-scoped publication tokens. |
 
 ## Open upstream issue and pull-request reconciliation
 
 The audit findings above use local IDs; they are not GitHub issue numbers. A
-live REST API check of upstream `Gitlawb/zero` on 2026-09-08 returned 63 open
-issues and 71 open pull requests. Titles and bodies were compared with each
-finding's mechanism and acceptance criteria, not matched by broad keywords
+live API check of upstream `Gitlawb/zero` on 2026-09-08 returned 66 open issues,
+71 open pull requests, and 12 discussions. Titles and bodies were compared with
+each finding's mechanism and acceptance criteria, not matched by broad keywords
 alone.
 
-### Private reports for the High findings
+### Private vulnerability reports
 
 Upstream [requires potential vulnerabilities to be reported privately](../../SECURITY.md).
-No public security issue was opened. These links are visible only to advisory
-participants until maintainers coordinate disclosure.
+No corresponding public issue was opened for these five reports. These links
+are visible only to advisory participants until maintainers coordinate
+disclosure.
 
 | Audit finding | Private upstream report | Verification submitted |
 |---|---|---|
 | SEC-01 | [GHSA-f484-43mf-99v6](https://github.com/Gitlawb/zero/security/advisories/GHSA-f484-43mf-99v6) (`triage`) | An isolated two-server test on `1b5db17` confirmed that a custom `X-Provider-Key` reaches a cross-origin HTTP 307 target. No real provider was tested. |
 | SEC-02 | [GHSA-37cg-763q-376p](https://github.com/Gitlawb/zero/security/advisories/GHSA-37cg-763q-376p) (`triage`) | Source-level check/use interleaving, prerequisites, platform qualifications, and the required deterministic component-swap regression were reported. No timing-loop exploit was claimed. |
+| SEC-03 | [GHSA-h6h3-r5cg-9rx7](https://github.com/Gitlawb/zero/security/advisories/GHSA-h6h3-r5cg-9rx7) (`triage`) | The separated canonicalization and pathname read, same-local-actor prerequisite, existing controls, and required deterministic swap test were reported without claiming a production exploit. |
+| SEC-05 | [GHSA-wp99-wj2j-6r6v](https://github.com/Gitlawb/zero/security/advisories/GHSA-wp99-wj2j-6r6v) (`triage`) | Unbounded metadata, download, and extraction paths plus separate limit/cleanup test criteria were reported; maintainers may reclassify this as reliability hardening. |
+| SEC-08 | [GHSA-5794-h26h-ccqc](https://github.com/Gitlawb/zero/security/advisories/GHSA-5794-h26h-ccqc) (`triage`) | Literal argv exposure and host-visibility prerequisites were reported while preserving the existing TLS, constant-time, token-file/environment, and token-free-link controls. |
 
 ### Exact active matches
 
@@ -206,6 +212,20 @@ participants until maintainers coordinate disclosure.
 | PERF-01 | [PR #955](https://github.com/Gitlawb/zero/pull/955) | Exact remediation in progress. It parallelizes isolated provider tests and shrinks retry backoffs during tests while retaining assertions and race coverage. |
 | COR-01 | [Issue #1026](https://github.com/Gitlawb/zero/issues/1026), [Issue #1027](https://github.com/Gitlawb/zero/issues/1027) | Exact, split by protocol and call site. Temporary package tests confirmed that both daemon framing and ACP newline JSON return success after a legal nil-error short write. The tests were removed after verification. |
 | CON-02 | [Issue #1028](https://github.com/Gitlawb/zero/issues/1028) | Exact. A temporary package test confirmed that one accepted partial-header connection makes `Close` exhaust its one-second `Shutdown` context, after which a timed client read proves the connection remains open. The test was removed after verification. |
+| SEC-09 | [Issue #1029](https://github.com/Gitlawb/zero/issues/1029) | Exact defense-in-depth tracking. Release checkouts persist credentials although no later Git command needs them and publication already receives an explicit token. |
+| TEST-04 | [Issue #1030](https://github.com/Gitlawb/zero/issues/1030) | Exact. It records the passing 12-test helper suite, absent CI execution, and missing helper paths in the action-smoke trigger. npm advisory handling remains DEP-01. |
+| DEP-01 | [Issue #1031](https://github.com/Gitlawb/zero/issues/1031) | Exact maintenance tracking. Source review found the five affected Hono APIs unreachable; a temporary lockfile-only `npm audit fix` resolved `1.19.17`/`4.13.7` and returned zero findings. |
+
+### Design and policy discussions
+
+| Audit finding | Upstream discussion | Scope decision |
+|---|---|---|
+| SEC-06 | [Discussion #1032](https://github.com/Gitlawb/zero/discussions/1032) | Decides whether checksums remain the complete trust model or an independently pinned signing/attestation identity is required. |
+| SEC-07 | [Discussion #1033](https://github.com/Gitlawb/zero/discussions/1033) | Covers keyring/encrypted-file default policy, headless behavior, compatibility, and reversible migration without calling mode-0600 storage world-readable. |
+| ARCH-01/02/03/04 | [Discussion #1002 comment](https://github.com/Gitlawb/zero/discussions/1002#discussioncomment-18351742) | Adds measured CLI/TUI/agent concentration and a facade-preserving modular-monolith plan to the existing architecture discussion rather than opening a duplicate. |
+| CON-01 | [Discussion #1034](https://github.com/Gitlawb/zero/discussions/1034) | Requests a decision on context compliance versus an independently closable factory-attempt contract; no built-in leak is claimed. |
+| TEST-03 | [Discussion #1035](https://github.com/Gitlawb/zero/discussions/1035) | Proposes a bounded parser/protocol fuzzing pilot with deterministic regression promotion and native-platform guardrails. |
+| REL-01 | [Discussion #1036](https://github.com/Gitlawb/zero/discussions/1036) | Defines cleanup-error classes before any concrete owner-boundary bugs are split into separate issues. |
 
 ### Partial matches that must retain residual scope
 
@@ -218,19 +238,18 @@ participants until maintainers coordinate disclosure.
 
 | Audit finding | Related item | Why it is not the same finding |
 |---|---|---|
-| SEC-02 | [Issue #921](https://github.com/Gitlawb/zero/issues/921), [PR #941](https://github.com/Gitlawb/zero/pull/941) | Atomic temp-and-replace prevents partial-file publication, but it does not bind workspace authorization and the final write to one rooted filesystem object. The component-swap TOCTOU remains untracked. |
+| SEC-02 | [Issue #921](https://github.com/Gitlawb/zero/issues/921), [PR #941](https://github.com/Gitlawb/zero/pull/941) | Atomic temp-and-replace prevents partial-file publication, but it does not bind workspace authorization and the final write to one rooted filesystem object. The component-swap TOCTOU is instead tracked privately as [GHSA-37cg-763q-376p](https://github.com/Gitlawb/zero/security/advisories/GHSA-37cg-763q-376p). |
 | SEC-07 | [Issue #937](https://github.com/Gitlawb/zero/issues/937), [PR #1007](https://github.com/Gitlawb/zero/pull/1007) | These fix oversized multi-login keyring blobs, not the default selection of plaintext OAuth file storage. |
 | SEC-08 | [PR #685](https://github.com/Gitlawb/zero/pull/685) | This protects a daemon token file from agent/sandbox reads; it does not remove literal bearer tokens from client argv or shell history. |
 | SEC-09 | [PR #951](https://github.com/Gitlawb/zero/pull/951) | This hardens workflow token permissions and timeouts but does not set `persist-credentials: false` on release checkouts. |
 
-**Coverage result across channels:** the 2 High findings now have private
-reports; 4 other findings have exact public tracking; 2 have partial public
-tracking with explicit residuals; and 16 have no active tracking. Neither High
-finding has a public issue or PR, as required by upstream security policy.
-Potential vulnerabilities must stay in their private advisories until
-maintainers coordinate disclosure. For non-security and safely disclosable
-residual work, create approved, scoped upstream issues and reference the audit
-IDs. Issues #1026-#1028 are open without labels because this contributor lacks
+**Coverage result across channels:** 5 findings have private reports; 7 have
+exact public issue/PR tracking; 9 design findings are routed to Ideas
+discussions; 2 retain explicitly documented partial issue/PR coverage; and
+TEST-02 is distributed acceptance scope for the relevant remediations rather
+than a standalone umbrella ticket. No audit finding remains unrouted. Potential
+vulnerabilities stay private until maintainers coordinate disclosure. Public
+issues #1026-#1031 are open without labels because this contributor lacks
 upstream label permissions; label/approval triage remains with maintainers. The
 same point-in-time status is recorded in
 [Known Issues](KNOWN_ISSUES.md#upstream-github-tracking-status).
