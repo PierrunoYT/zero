@@ -22,6 +22,7 @@ import (
 
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
+	ModelRPM             *zeroruntime.ModelRPMLimiter
 	Cwd                  string
 	Version              string // CLI build version, shown on the home screen; empty hides it
 	UserConfigPath       string
@@ -98,6 +99,11 @@ type Options struct {
 	// KeyBindings configures remappable TUI keybindings. An empty/zero
 	// KeyBindingsConfig means "use built-in defaults" for each action.
 	KeyBindings config.KeyBindingsConfig
+
+	// StartupNotices are shown as system notices when the session opens: facts
+	// about the session the user should see before the first prompt, decided by
+	// the caller that built it. Blank entries are skipped.
+	StartupNotices []string
 
 	// STT configures speech-to-text dictation (§ docs/dictation.md).
 	STT config.STTConfig

@@ -154,7 +154,7 @@ func runTestFormatter(t *testing.T, ctx context.Context, target, written string)
 		t.Fatal(err)
 	}
 	defer root.Close()
-	return maybeFormatWrittenFile(ctx, root, filepath.Base(target), target, filepath.Dir(target), written, 0o644)
+	return maybeFormatWrittenFile(ctx, root, filepath.Base(target), target, filepath.Dir(target), nil, written, 0o644)
 }
 
 func formatterScriptExtension() string {

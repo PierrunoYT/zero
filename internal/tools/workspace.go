@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -264,6 +265,13 @@ func scopedReadRoots(workspaceRoot string, scope PathScope) ([]string, error) {
 }
 
 func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	return resolveScopedReadPathForGOOS(runtimeGOOS(), workspaceRoot, scope, requestedPath)
+}
+
+// resolveScopedReadPathForGOOS is resolveScopedReadPath with the host OS
+// injected, so the Windows-only missing-POSIX-path hint can be checked for
+// every platform from any one of them (the same seam as detectShellRuntime).
+func resolveScopedReadPathForGOOS(goos string, workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
 	// Spill files (truncated tool output saved under the per-uid temp dir) are
 	// readable regardless of scope: the truncation notice tells the model to
 	// read_file/grep them, which must actually work. resolveSpillReadPath
@@ -273,7 +281,15 @@ func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath 
 		return spillPath, spillPath, nil
 	}
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
-		return resolveWorkspacePath(workspaceRoot, requestedPath)
+		absolute, relative, err := resolveWorkspacePath(workspaceRoot, requestedPath)
+		if err != nil {
+			// The hint only belongs on this branch: the scoped loop below runs
+			// only when filepath.IsAbs(requestedPath) holds, which a
+			// POSIX-looking path never does on Windows. Confinement errors are
+			// not missing-path errors, so the annotator leaves them unchanged.
+			err = annotateMissingPosixPathError(goos, workspaceRoot, requestedPath, err)
+		}
+		return absolute, relative, err
 	}
 	roots, err := scopedReadRoots(workspaceRoot, scope)
 	if err != nil {
@@ -382,22 +398,6 @@ func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPat
 	return "", "", firstErr
 }
 
-func resolveScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPath string) (rootedScopedPath, error) {
-	absolute, display, err := resolveScopedTargetPath(workspaceRoot, scope, requestedPath)
-	if err != nil {
-		return rootedScopedPath{}, err
-	}
-	roots, err := scopedRoots(workspaceRoot, scope)
-	if err != nil {
-		return rootedScopedPath{}, err
-	}
-	root, relative, err := rootedPathWithin(roots, absolute)
-	if err != nil {
-		return rootedScopedPath{}, err
-	}
-	return rootedScopedPath{absolute: absolute, display: display, root: root, relative: relative}, nil
-}
-
 func rootedPathWithin(roots []string, absolute string) (string, string, error) {
 	for _, candidate := range roots {
 		root, err := filepath.Abs(candidate)
@@ -419,4 +419,93 @@ func rootedPathWithin(roots []string, absolute string) (string, string, error) {
 		return root, relative, nil
 	}
 	return "", "", outsideWorkspaceError(absolute)
+}
+
+// errWriteRootSubstituted reports that the granted root directory changed
+// identity between the pre-open stat and the descriptor open, so the handle may
+// point outside the validated boundary. The operation fails closed.
+var errWriteRootSubstituted = errors.New("write root changed identity between validation and open")
+
+// writeRootBeforeOpen is a deterministic test hook. Production leaves it nil;
+// tests use it to substitute the root path after its identity is captured but
+// before os.OpenRoot resolves it, exercising the same check-to-use window a
+// concurrent attacker would race.
+var writeRootBeforeOpen func(path string)
+
+// openScopedWriteRoot opens the granted write root that contains absolutePath
+// and returns a descriptor-bound handle plus the path relative to it. The
+// caller closes the handle.
+//
+// absolutePath is expected to be symlink-resolved, as resolveScopedPath and
+// resolveScopedTargetPath return it. Each configured root is resolved before
+// comparison so a workspace that legitimately sits under a platform alias
+// (macOS /var -> /private/var, Windows 8.3 short names) still matches. Every
+// mutation is then performed relative to the returned handle, so no component
+// above the target can be swapped for an escaping link between the pathname
+// check and the open.
+func openScopedWriteRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	var firstErr error
+	for _, configuredRoot := range roots {
+		resolvedRoot, err := filepath.Abs(configuredRoot)
+		if err == nil {
+			resolvedRoot, err = filepath.EvalSymlinks(resolvedRoot)
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		// Capture the root directory identity BEFORE opening the handle.
+		// os.OpenRoot resolves every component again, so replacing the root path
+		// between this stat and the open (a symlink or directory swap) would bind
+		// the returned descriptor to a different, possibly external directory.
+		// Comparing identities after the open closes that check-to-use window.
+		expectedStat, err := os.Stat(resolvedRoot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
+		relativePath, err := filepath.Rel(resolvedRoot, candidate)
+		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+			continue
+		}
+		if writeRootBeforeOpen != nil {
+			writeRootBeforeOpen(resolvedRoot)
+		}
+		root, err := os.OpenRoot(resolvedRoot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		actualStat, err := root.Stat(".")
+		if err != nil {
+			_ = root.Close()
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !os.SameFile(expectedStat, actualStat) {
+			_ = root.Close()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%w: %s", errWriteRootSubstituted, resolvedRoot)
+			}
+			continue
+		}
+		return root, relativePath, nil
+	}
+	if firstErr != nil {
+		return nil, "", firstErr
+	}
+	return nil, "", fmt.Errorf("%s must stay inside the configured write roots", absolutePath)
 }

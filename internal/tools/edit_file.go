@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 )
 
@@ -63,19 +62,21 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
 
-	target, err := resolveScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath)
+	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
-	absolutePath, relativePath := target.absolute, target.display
-	root, err := os.OpenRoot(target.root)
+	// Anchor both the read and the write on the granted write root: bytes and
+	// identity come from the same descriptor-bound object, and the commit
+	// below writes back through that same root, so a parent swapped for an
+	// escaping symlink between validation and use cannot redirect either.
+	root, rootedRelative, err := openScopedWriteRoot(tool.workspaceRoot, tool.scope, absolutePath)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
 	defer root.Close()
-	// Bind both workspace containment and credential identity to the handle the
-	// content is actually read from.
-	readFile, readInfo, err := protectedRootRead(root, target.relative, absolutePath, tool.workspaceRoot)
+	// Bind the credential decision to the same handle the content is read from.
+	readFile, readInfo, err := protectedRootRead(root, rootedRelative, absolutePath, tool.workspaceRoot)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
@@ -169,15 +170,15 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	if err := commitRootedFileContents(root, target.relative, readInfo, &content, updated); err != nil {
+	if err := commitRootedFileContents(root, absolutePath, rootedRelative, readInfo, &content, updated); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker re-baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	formatting := tool.formatter(ctx, root, target.relative, absolutePath, tool.workspaceRoot, updated, readInfo.Mode())
-	published, newInfo, err := readRootedFile(root, target.relative)
+	formatting := tool.formatter(ctx, root, rootedRelative, absolutePath, tool.workspaceRoot, tool.scope, updated, readInfo.Mode().Perm())
+	published, newInfo, err := readRootedFile(root, rootedRelative)
 	if err != nil {
 		options.FileTracker.Forget(absolutePath)
 		return errorResult("Error reading written file " + relativePath + ": " + err.Error())

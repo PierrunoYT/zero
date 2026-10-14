@@ -41,7 +41,7 @@ func TestPostWriteEvidenceUsesVerifiedFinalFile(t *testing.T) {
 				if read.Status != StatusOK {
 					t.Fatal(read.Output)
 				}
-				formatter := func(context.Context, *os.Root, string, string, string, string, os.FileMode) formatOnWriteResult {
+				formatter := func(context.Context, *os.Root, string, string, string, PathScope, string, os.FileMode) formatOnWriteResult {
 					if err := os.Remove(target); err != nil {
 						t.Fatal(err)
 					}
@@ -201,7 +201,7 @@ func TestFormatOnWriteSkipsUnknownExtensions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	formatting := maybeFormatWrittenFile(context.Background(), root, "notes.xyz", filepath.Join(dir, "notes.xyz"), dir, "raw   text", 0o644)
+	formatting := maybeFormatWrittenFile(context.Background(), root, "notes.xyz", filepath.Join(dir, "notes.xyz"), dir, nil, "raw   text", 0o644)
 	if formatting.Content != "raw   text" {
 		t.Fatalf("unknown extension must pass through: %q", formatting.Content)
 	}
@@ -223,7 +223,7 @@ func TestFormatOnWriteFormatterLookupFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	formatting := maybeFormatWrittenFile(context.Background(), root, filepath.Base(targetPath), targetPath, filepath.Dir(targetPath), uglyContent, 0o644)
+	formatting := maybeFormatWrittenFile(context.Background(), root, filepath.Base(targetPath), targetPath, filepath.Dir(targetPath), nil, uglyContent, 0o644)
 	if formatting.Content != uglyContent {
 		t.Fatalf("missing formatter must return written content, got %q", formatting.Content)
 	}
@@ -273,7 +273,7 @@ printf 'formatted\n'
 		t.Fatal(err)
 	}
 	defer root.Close()
-	formatting := maybeFormatWrittenFile(context.Background(), root, "target.mock", target, dir, "raw\n", 0o644)
+	formatting := maybeFormatWrittenFile(context.Background(), root, "target.mock", target, dir, nil, "raw\n", 0o644)
 	if formatting.Content != "formatted\n" {
 		t.Fatalf("stdin formatter result = %q, want formatted content", formatting.Content)
 	}
@@ -474,7 +474,7 @@ printf formatted
 				t.Fatal(err)
 			}
 			defer root.Close()
-			formatting := maybeFormatWrittenFile(context.Background(), root, "ordinary.mock", target, dir, "raw", 0o600)
+			formatting := maybeFormatWrittenFile(context.Background(), root, "ordinary.mock", target, dir, nil, "raw", 0o600)
 			want := "raw"
 			if kind == "control" {
 				want = "formatted"
@@ -535,7 +535,7 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 				}}
 				var result Result
 				formatterCalled := false
-				formatter := func(_ context.Context, _ *os.Root, _, _, _, written string, _ os.FileMode) formatOnWriteResult {
+				formatter := func(_ context.Context, _ *os.Root, _, _, _ string, _ PathScope, written string, _ os.FileMode) formatOnWriteResult {
 					formatterCalled = true
 					// The injected formatter boundary is entered only after the rooted
 					// write and returns immediately before publication/post-write read.
@@ -585,4 +585,123 @@ func TestPostWriteFormatterSwapCannotPublishOrObserveToken(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Prettier's JavaScript configs are modules, so loading one is arbitrary code
+// execution from the workspace. Every prettier command must therefore disable
+// config resolution; this pins that, because a future entry copied without the
+// flag would silently reopen the hole.
+func TestFormatOnWritePrettierDisablesProjectConfig(t *testing.T) {
+	for extension, command := range formatterCommands {
+		if command[0] != "prettier" {
+			continue
+		}
+		found := false
+		for _, argument := range command[1:] {
+			if argument == "--no-config" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("prettier command for %s is %#v; it must pass --no-config so a project .prettierrc.js is never evaluated", extension, command)
+		}
+	}
+}
+
+// A formatter that resolves inside the workspace is repository-controlled. npm
+// run puts node_modules/.bin on PATH, so a cloned project can shadow the real
+// binary; it must be refused rather than executed with Zero's privileges.
+func TestFormatOnWriteRejectsFormatterResolvedInsideWorkspace(t *testing.T) {
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	marker := filepath.Join(root, "formatter-ran")
+	binaryName := "plantedfmt" + formatterScriptExtension()
+	if err := os.WriteFile(filepath.Join(root, binaryName), []byte(plantingFormatterScript(marker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	registerFormatterCommand(t, ".plantedfmt", binaryName)
+
+	target := filepath.Join(root, "subject.plantedfmt")
+	const written = "written   but   not   formatted\n"
+	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	formatting := runTestFormatter(t, context.Background(), target, written)
+	if formatting.Content != written {
+		t.Fatalf("workspace-planted formatter result = %q, want the written bytes", formatting.Content)
+	}
+	if formatting.Skipped != formatSkippedInsideWriteRoot {
+		t.Fatalf("workspace-planted formatter skip = %q, want %q", formatting.Skipped, formatSkippedInsideWriteRoot)
+	}
+	notice := formatting.notice("subject.plantedfmt")
+	if !strings.Contains(notice, formatSkippedInsideWriteRoot) {
+		t.Fatalf("workspace-planted formatter notice = %q, want the skip reason", notice)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("a formatter binary resolved inside the workspace was executed")
+	}
+}
+
+// The formatter can evaluate project code, so it must not inherit credentials.
+// PATH and ordinary variables survive; the provider keys the sandbox scrubs do
+// not.
+func TestFormatOnWriteScrubsCredentialsFromFormatterEnvironment(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "envdump")
+	installFakeFormatter(t, ".envfmt", "envfmt", envDumpFormatterScript(marker))
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	t.Setenv("OPENAI_API_KEY", "sk-super-secret-value")
+	t.Setenv("ZERO_FORMAT_TEST_CONTROL", "present")
+
+	target := filepath.Join(t.TempDir(), "subject.envfmt")
+	const written = "x\n"
+	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestFormatter(t, context.Background(), target, written)
+
+	dumped, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("formatter did not run: %v", err)
+	}
+	if strings.Contains(string(dumped), "sk-super-secret-value") {
+		t.Fatal("formatter inherited a credential from the environment")
+	}
+	if !strings.Contains(string(dumped), "ZERO_FORMAT_TEST_CONTROL=present") {
+		t.Fatal("formatter env dump did not contain the control variable, so the formatter may not have run")
+	}
+}
+
+// plantingFormatterScript leaves a marker when executed, so a test can prove
+// the refusal happened before the binary ran.
+func plantingFormatterScript(marker string) string {
+	if runtime.GOOS == "windows" {
+		return "@echo off\r\necho ran> \"" + marker + "\"\r\nexit /b 0\r\n"
+	}
+	return "#!/bin/sh\necho ran > \"" + marker + "\"\nexit 0\n"
+}
+
+// envDumpFormatterScript writes its environment to marker.
+func envDumpFormatterScript(marker string) string {
+	if runtime.GOOS == "windows" {
+		return "@echo off\r\nset > \"" + marker + "\"\r\nexit /b 0\r\n"
+	}
+	return "#!/bin/sh\nenv > \"" + marker + "\"\nexit 0\n"
+}
+
+// registerFormatterCommand registers an already-on-PATH binary for extension
+// for the test's duration.
+func registerFormatterCommand(t *testing.T, extension, binaryName string) {
+	t.Helper()
+	previous, existed := formatterCommands[extension]
+	formatterCommands[extension] = []string{binaryName}
+	t.Cleanup(func() {
+		if existed {
+			formatterCommands[extension] = previous
+			return
+		}
+		delete(formatterCommands, extension)
+	})
 }

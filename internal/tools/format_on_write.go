@@ -37,35 +37,48 @@ var formatOnWriteTimeout = 10 * time.Second
 // formatOnWriteResult is the content after formatting, plus whether the
 // formatting that was supposed to happen actually did.
 //
-// A TIMEOUT IS NOT THE SAME KIND OF MISS AS THE OTHERS. Every other way this
-// falls back is a standing fact about the environment: the toggle is off, the
-// extension has no formatter, the binary is not installed. Those are silent on
-// purpose, because nothing is wrong and saying so on every write would be
-// noise. A deadline firing is different: formatting was configured, available
-// and expected, and the file was written unformatted anyway, on a machine that
-// was merely slow. Left silent, the caller believes it wrote canonical style
-// and finds out from a CI format check it cannot see, which is the thing this
-// feature exists to prevent.
+// A TIMEOUT IS NOT THE SAME KIND OF MISS AS THE OTHERS. The toggle being off,
+// an extension with no formatter, or a binary that is not installed are
+// standing facts about the environment. Those stay silent, because nothing is
+// wrong and saying so on every write would be noise. A deadline firing is
+// different: formatting was configured, available and expected, and the file
+// was written unformatted anyway, on a machine that was merely slow. Left
+// silent, the caller believes it wrote canonical style and finds out from a CI
+// format check it cannot see, which is the thing this feature exists to
+// prevent. A formatter binary that resolves inside a write root is also
+// reported: skipping it is a security decision, and a silent skip looks like
+// format-on-write simply stopped working.
 type formatOnWriteResult struct {
 	Content string
 	// Formatter is the binary that was run, named in the notice so the user can
 	// tell a slow gofmt from a slow prettier.
 	Formatter string
 	TimedOut  bool
+	// Skipped is set when a formatter was found but not run. Empty when
+	// formatting was not applicable, ran, or failed for another recorded reason.
+	Skipped string
 }
 
 // notice is the line appended to the tool summary when formatting was expected
-// and did not happen, and empty in every other case.
+// and did not happen (timeout or a refused workspace binary), and empty in
+// every other case.
 func (result formatOnWriteResult) notice(relativePath string) string {
-	if !result.TimedOut {
-		return ""
+	if result.TimedOut {
+		return "\n\nNote: " + relativePath + " was written but not formatted: " +
+			result.Formatter + " did not finish within " + formatOnWriteTimeout.String() +
+			". The file holds exactly what was written, so a project format check may still flag it."
 	}
-	return "\n\nNote: " + relativePath + " was written but not formatted: " +
-		result.Formatter + " did not finish within " + formatOnWriteTimeout.String() +
-		". The file holds exactly what was written, so a project format check may still flag it."
+	if result.Skipped != "" {
+		return "\n\nNote: " + relativePath + " was written but not formatted: " + result.Skipped + "."
+	}
+	return ""
 }
 
-type writtenFileFormatter func(context.Context, *os.Root, string, string, string, string, os.FileMode) formatOnWriteResult
+// formatSkippedInsideWriteRoot is the formatOnWriteResult.Skipped value when
+// the resolved formatter binary lives under a granted write root.
+const formatSkippedInsideWriteRoot = "skipped, binary resolves inside the workspace"
+
+type writtenFileFormatter func(ctx context.Context, root *os.Root, relativePath, absolutePath, workspaceRoot string, scope PathScope, writtenContent string, mode os.FileMode) formatOnWriteResult
 
 const formatterPathPlaceholder = "{zero_file_path}"
 
@@ -73,21 +86,34 @@ const formatterPathPlaceholder = "{zero_file_path}"
 // is replaced with the destination path solely as the formatter's filename hint.
 // All formatters consume stdin and emit formatted content on stdout; a missing
 // binary silently skips formatting.
+//
+// PRETTIER IS INVOKED WITH --no-config ON PURPOSE. Prettier resolves config
+// relative to the target file (here, the --stdin-filepath hint). Its JavaScript
+// configs (.prettierrc.js, .prettierrc.cjs, prettier.config.js) are MODULES:
+// loading one runs arbitrary code from the workspace, and a malicious
+// dependency pulled by a plugin runs too. A declarative config can still name a
+// plugin by path, so it is not a safe subset. That code would execute with
+// Zero's full privileges, outside the Landlock/seccomp confinement applied to
+// shell commands. Prettier therefore runs on its built-in defaults, and project
+// configuration is not honored: .prettierrc, .prettierrc.json, .prettierrc.yaml,
+// prettier.config.js, the prettier key in package.json, and .editorconfig are
+// all ignored by --no-config. The remaining formatters keep honoring their own
+// non-executable project config.
 var formatterCommands = map[string][]string{
 	".go":    {"gofmt"},
 	".rs":    {"rustfmt", "--emit", "stdout"},
 	".py":    {"ruff", "format", "--quiet", "--stdin-filename", formatterPathPlaceholder, "-"},
-	".ts":    {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".tsx":   {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".js":    {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".jsx":   {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".json":  {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".css":   {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".scss":  {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".html":  {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".md":    {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".yaml":  {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
-	".yml":   {"prettier", "--log-level", "silent", "--stdin-filepath", formatterPathPlaceholder},
+	".ts":    {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".tsx":   {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".js":    {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".jsx":   {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".json":  {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".css":   {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".scss":  {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".html":  {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".md":    {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".yaml":  {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
+	".yml":   {"prettier", "--log-level", "silent", "--no-config", "--stdin-filepath", formatterPathPlaceholder},
 	".zig":   {"zig", "fmt", "--stdin"},
 	".dart":  {"dart", "format", "--output=show", "--stdin-name", formatterPathPlaceholder},
 	".tf":    {"terraform", "fmt", "-"},
@@ -114,7 +140,7 @@ func formatOnWriteEnabled() bool {
 // through the rooted, credential-checked write path. The destination pathname is
 // passed only through each formatter's filename-hint option so project settings
 // resolve from the same ancestors as the real file.
-func maybeFormatWrittenFile(ctx context.Context, root *os.Root, relativePath, absolutePath, workspaceRoot, writtenContent string, mode os.FileMode) formatOnWriteResult {
+func maybeFormatWrittenFile(ctx context.Context, root *os.Root, relativePath, absolutePath, workspaceRoot string, scope PathScope, writtenContent string, mode os.FileMode) formatOnWriteResult {
 	unformatted := formatOnWriteResult{Content: writtenContent}
 	if !formatOnWriteEnabled() {
 		return unformatted
@@ -125,6 +151,16 @@ func maybeFormatWrittenFile(ctx context.Context, root *os.Root, relativePath, ab
 	}
 	binaryPath, err := exec.LookPath(command[0])
 	if err != nil {
+		return unformatted
+	}
+	// A binary that resolves inside a write root is repository-controlled: npm
+	// run puts node_modules/.bin on PATH, so a cloned project can shadow
+	// prettier (or gofmt) with its own executable and have it run with Zero's
+	// privileges. Skipping formatting is the safe fallback; running an
+	// untrusted formatter is never worth canonical bytes. The skip is recorded
+	// on the result: a silent return looks like format-on-write stopped working.
+	if roots, rootsErr := scopedRoots(workspaceRoot, scope); rootsErr == nil && formatterBinaryInWriteRoots(binaryPath, roots) {
+		unformatted.Skipped = formatSkippedInsideWriteRoot
 		return unformatted
 	}
 	arguments := make([]string, len(command)-1)
@@ -163,4 +199,39 @@ func maybeFormatWrittenFile(ctx context.Context, root *os.Root, relativePath, ab
 		return unformatted
 	}
 	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
+}
+
+// formatterBinaryInWriteRoots reports whether the resolved formatter binary
+// lives under one of the configured write roots (the workspace or an /add-dir
+// root). Both sides are symlink-resolved before comparison so an aliased or
+// linked path cannot hide a workspace-planted binary. A binary that cannot be
+// resolved is treated as untrusted, because trust cannot be established.
+func formatterBinaryInWriteRoots(binaryPath string, roots []string) bool {
+	resolvedBinary, err := filepath.Abs(binaryPath)
+	if err != nil {
+		return false
+	}
+	if evaluatedBinary, err := filepath.EvalSymlinks(resolvedBinary); err == nil {
+		resolvedBinary = evaluatedBinary
+	}
+	for _, root := range roots {
+		resolvedRoot, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		if evaluated, err := filepath.EvalSymlinks(resolvedRoot); err == nil {
+			resolvedRoot = evaluated
+		}
+		relative, err := filepath.Rel(resolvedRoot, resolvedBinary)
+		if err != nil {
+			continue
+		}
+		if relative == "." {
+			return true
+		}
+		if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
+			return true
+		}
+	}
+	return false
 }

@@ -22,19 +22,26 @@ var fileWriteBeforeCommit func(path string)
 // the file descriptor directly.
 var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
 
-// commitRootedFileContents binds an overwrite to the file identity and bytes that
-// the caller observed. A create uses exclusive creation. An overwrite opens the
-// observed object without truncation, verifies identity/content through that
-// handle, then truncates and writes the same handle. A path replacement before
-// or during commit therefore fails instead of publishing stale rich evidence.
+// commitRootedFileContents binds an overwrite to the file identity and bytes
+// that the caller observed, opening every component through an already-open
+// *os.Root descriptor rather than re-resolving the absolute path. Because the
+// ancestor directories are traversed relative to the root handle, a parent
+// swapped for a symlink that escapes the workspace between validation and this
+// call is refused by the kernel instead of redirecting the write.
+//
+// A create uses exclusive creation THROUGH THE ROOT. An overwrite opens the
+// observed object without truncation, verifies identity/content and the
+// protected-credential decision through that handle, then truncates and writes
+// the same handle. relative is the target expressed relative to root;
+// absolutePath is retained only for the test hook.
 //
 // expectedInfo nil means the caller observed a missing path. expectedContent
 // may be nil for an existing but unreadable file; that path may still be
 // overwritten, but callers must omit rich before/after evidence.
-func commitRootedFileContents(root *os.Root, relative string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
+func commitRootedFileContents(root *os.Root, absolutePath, relative string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
 	path := filepath.Join(root.Name(), relative)
 	if fileWriteBeforeCommit != nil {
-		fileWriteBeforeCommit(path)
+		fileWriteBeforeCommit(absolutePath)
 	}
 
 	if expectedInfo == nil {
@@ -53,7 +60,7 @@ func commitRootedFileContents(root *os.Root, relative string, expectedInfo os.Fi
 			_ = file.Close()
 			return err
 		}
-		return writeAndVerifyFileIdentity(root, relative, file, openedInfo, content, false)
+		return writeAndVerifyRootedFileIdentity(root, relative, file, openedInfo, content, false)
 	}
 
 	flags := os.O_WRONLY
@@ -94,10 +101,10 @@ func commitRootedFileContents(root *os.Root, relative string, expectedInfo os.Fi
 			return errFileChangedDuringWrite
 		}
 	}
-	return writeAndVerifyFileIdentity(root, relative, file, openedInfo, content, true)
+	return writeAndVerifyRootedFileIdentity(root, relative, file, openedInfo, content, true)
 }
 
-func writeAndVerifyFileIdentity(root *os.Root, relative string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
+func writeAndVerifyRootedFileIdentity(root *os.Root, relative string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
 	if truncate {
 		if err := file.Truncate(0); err != nil {
 			_ = file.Close()
