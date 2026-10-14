@@ -12,10 +12,16 @@ func TestIsolateUserDirsRedirectsAndRestores(t *testing.T) {
 	// helper hands them back (set ones restored, unset ones unset again).
 	t.Setenv("HOME", "before-home")
 	t.Setenv("XDG_STATE_HOME", "before-state")
+	// t.Setenv registers restoration of the inherited value before it is
+	// cleared, so later tests in this process still see it.
+	t.Setenv("XDG_DATA_HOME", "")
 	os.Unsetenv("XDG_DATA_HOME")
 
 	root := t.TempDir()
-	restore := IsolateUserDirs(root)
+	restore, err := IsolateUserDirs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -35,7 +41,9 @@ func TestIsolateUserDirsRedirectsAndRestores(t *testing.T) {
 		}
 	}
 
-	restore()
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
 	if got := os.Getenv("HOME"); got != "before-home" {
 		t.Errorf("HOME after restore = %q, want before-home", got)
 	}
@@ -44,5 +52,29 @@ func TestIsolateUserDirsRedirectsAndRestores(t *testing.T) {
 	}
 	if _, set := os.LookupEnv("XDG_DATA_HOME"); set {
 		t.Error("XDG_DATA_HOME was unset before and must be unset again after restore")
+	}
+}
+
+func TestIsolateUserDirsFailsClosed(t *testing.T) {
+	for _, name := range userDirEnv {
+		t.Setenv(name, "before-"+strings.ToLower(name))
+	}
+
+	// A NUL byte is rejected by Setenv on every supported platform, so the
+	// very first redirect fails.
+	restore, err := IsolateUserDirs("bad\x00root")
+	if err == nil {
+		if restore != nil {
+			_ = restore()
+		}
+		t.Fatal("IsolateUserDirs succeeded with a root Setenv must reject")
+	}
+	if restore != nil {
+		t.Error("IsolateUserDirs returned a restore func alongside an error")
+	}
+	for _, name := range userDirEnv {
+		if got, want := os.Getenv(name), "before-"+strings.ToLower(name); got != want {
+			t.Errorf("%s after failed isolation = %q, want %q", name, got, want)
+		}
 	}
 }

@@ -21,9 +21,20 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	isolatedUserDirsRoot = root
-	restore := testutil.IsolateUserDirs(root)
+	restore, err := testutil.IsolateUserDirs(root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tui tests: isolate user dirs:", err)
+		_ = os.RemoveAll(root)
+		os.Exit(1)
+	}
 	code := m.Run()
-	restore()
-	_ = os.RemoveAll(root)
+	if err := restore(); err != nil {
+		fmt.Fprintln(os.Stderr, "tui tests: restore user dirs:", err)
+		code = 1
+	}
+	if err := os.RemoveAll(root); err != nil {
+		fmt.Fprintln(os.Stderr, "tui tests: remove isolated user dirs:", err)
+		code = 1
+	}
 	os.Exit(code)
 }
