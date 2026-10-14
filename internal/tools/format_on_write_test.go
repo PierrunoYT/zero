@@ -237,7 +237,8 @@ func TestFormatOnWriteUsesStdinAndScrubsSensitiveEnvironment(t *testing.T) {
 		t.Skip("POSIX formatter fixture")
 	}
 	dir := t.TempDir()
-	formatter := filepath.Join(dir, "zero-test-formatter")
+	// Outside the write root: a formatter binary inside it is refused.
+	formatter := filepath.Join(t.TempDir(), "zero-test-formatter")
 	script := `#!/bin/sh
 [ "$#" -eq 0 ] || exit 20
 if [ -n "$ZERO_DAEMON_REMOTE_TOKEN" ] || [ -n "$ZERO_DAEMON_REMOTE_TOKEN_FILE" ] || [ -n "$ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED" ] || [ -n "$ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_IDENTITY" ]; then exit 21; fi
@@ -442,7 +443,8 @@ func TestFormatOnWriteRejectsDestinationSwapDuringFormatter(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			helper := filepath.Join(dir, "formatter")
+			// Outside the write root: a formatter binary inside it is refused.
+			helper := filepath.Join(t.TempDir(), "formatter")
 			script := `#!/bin/sh
 set -eu
 case "$3" in
