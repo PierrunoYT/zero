@@ -134,6 +134,145 @@ func TestWriteConfigDataSyncsCreatedDirectories(t *testing.T) {
 	}
 }
 
+func TestLockingMutatorSyncsCreatedDirectories(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "a")
+	dir := filepath.Join(outer, "b")
+	path := filepath.Join(dir, "config.json")
+	failure := errors.New("injected sync failure")
+	dirSync := syncConfigDirFn
+	t.Cleanup(func() { syncConfigDirFn = dirSync })
+
+	exists := func(p string) bool {
+		t.Helper()
+		_, err := os.Lstat(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+
+	// Every exported mutator acquires the config lock before it writes, and
+	// the lock file is a sibling of the config, so the lock path is what first
+	// creates the config directory. The barrier for those new entries has to
+	// run there, before the lock file exists: by the time writeConfigData
+	// looks, nothing is missing any more.
+	for _, fail := range []bool{true, false} {
+		var calls []string
+		syncConfigDirFn = func(got string) error {
+			calls = append(calls, got)
+			if got == outer || got == root {
+				if exists(path+".lock") || exists(path) {
+					t.Fatalf("parent sync of %s ran after the lock file or config was created", got)
+				}
+			}
+			if fail && got == root {
+				return failure
+			}
+			return dirSync(got)
+		}
+		_, err := UpdateNotify(path, func(NotifyConfig) NotifyConfig {
+			return NotifyConfig{Mode: "off"}
+		})
+		if fail {
+			if !errors.Is(err, failure) {
+				t.Fatalf("error = %v, want injected sync failure", err)
+			}
+			if want := []string{outer, root}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("sync calls = %v, want %v", calls, want)
+			}
+			// The directories this attempt created are gone again, so the
+			// retry below re-creates them and re-runs the barrier instead of
+			// finding them present and reporting a durability it never had.
+			if exists(outer) {
+				t.Fatalf("%s must be rolled back after a failed parent sync", outer)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{outer, root, dir}; !reflect.DeepEqual(calls, want) {
+			t.Fatalf("sync calls = %v, want %v", calls, want)
+		}
+		got, err := UserNotify(path)
+		if err != nil || got.Mode != "off" {
+			t.Fatalf("UserNotify = %+v, %v; want mode off", got, err)
+		}
+	}
+}
+
+func TestWriteConfigDataRollsBackOnlyCreatedDirectories(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing")
+	if err := os.Mkdir(existing, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(existing, "keep")
+	if err := os.WriteFile(keep, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outer := filepath.Join(existing, "a")
+	dir := filepath.Join(outer, "b")
+	path := filepath.Join(dir, "config.json")
+	failure := errors.New("injected sync failure")
+	dirSync := syncConfigDirFn
+	t.Cleanup(func() { syncConfigDirFn = dirSync })
+	stat := func(p string) error {
+		_, err := os.Lstat(p)
+		return err
+	}
+
+	// The barrier for "a" fails: both directories this call created go, the
+	// pre-existing directory and its file stay.
+	syncConfigDirFn = func(got string) error {
+		if got == existing {
+			return failure
+		}
+		return dirSync(got)
+	}
+	if err := writeConfigData(path, []byte(`{}`)); !errors.Is(err, failure) {
+		t.Fatalf("error = %v, want injected sync failure", err)
+	}
+	for _, p := range []string{dir, outer} {
+		if err := stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s must be removed after a failed parent sync: %v", p, err)
+		}
+	}
+	for _, p := range []string{existing, keep} {
+		if err := stat(p); err != nil {
+			t.Fatalf("pre-existing %s must survive the rollback: %v", p, err)
+		}
+	}
+
+	// A directory another process populated in the meantime is not ours to
+	// remove: it stays, the failed rollback is reported with the barrier
+	// failure, and the write still does not acknowledge the save.
+	intruder := filepath.Join(dir, "other.lock")
+	syncConfigDirFn = func(got string) error {
+		if got == existing {
+			if err := os.WriteFile(intruder, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return failure
+		}
+		return dirSync(got)
+	}
+	err := writeConfigData(path, []byte(`{}`))
+	if !errors.Is(err, failure) {
+		t.Fatalf("error = %v, want injected sync failure", err)
+	}
+	if err := stat(intruder); err != nil {
+		t.Fatalf("a populated directory must not be removed: %v", err)
+	}
+	if !strings.Contains(err.Error(), "roll back config directory") {
+		t.Fatalf("error must report the failed rollback: %v", err)
+	}
+	if err := stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config must not be written after a failed directory sync: %v", err)
+	}
+}
+
 func TestSyncConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := syncConfigDir(dir); err != nil {
