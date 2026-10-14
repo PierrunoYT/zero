@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,7 @@ func TestIsolateUserDirsRedirectsAndRestores(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, dir := range map[string]string{"home": home, "config": config, "cache": cache} {
-		if rel, err := filepath.Rel(root, dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if !PathWithin(root, dir) {
 			t.Errorf("%s dir %q is outside the isolated root %q", name, dir, root)
 		}
 	}
@@ -75,6 +76,66 @@ func TestIsolateUserDirsFailsClosed(t *testing.T) {
 	for _, name := range userDirEnv {
 		if got, want := os.Getenv(name), "before-"+strings.ToLower(name); got != want {
 			t.Errorf("%s after failed isolation = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestIsolateUserDirsRollsBackPartialRedirect(t *testing.T) {
+	for _, name := range userDirEnv {
+		t.Setenv(name, "before-"+strings.ToLower(name))
+	}
+
+	// Let the first redirect (HOME) succeed, then fail the second, so the
+	// rollback has to undo a variable that really was changed.
+	failing := userDirEnv[1]
+	t.Cleanup(func() { setenv = os.Setenv })
+	setenv = func(name, value string) error {
+		if name == failing {
+			return errors.New("injected setenv failure")
+		}
+		return os.Setenv(name, value)
+	}
+
+	restore, err := IsolateUserDirs(t.TempDir())
+	if err == nil {
+		if restore != nil {
+			_ = restore()
+		}
+		t.Fatalf("IsolateUserDirs succeeded although setting %s failed", failing)
+	}
+	if !strings.Contains(err.Error(), failing) {
+		t.Errorf("error %q does not name the failing variable %s", err, failing)
+	}
+	for _, name := range userDirEnv {
+		if got, want := os.Getenv(name), "before-"+strings.ToLower(name); got != want {
+			t.Errorf("%s after partial isolation = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestPathWithinComparesPhysicalPaths(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	for _, tc := range []struct {
+		root, path string
+		want       bool
+	}{
+		{root, root, true},
+		{root, filepath.Join(alias, "not", "created", "yet"), true},
+		{alias, filepath.Join(root, "child"), true},
+		{root, base, false},
+		{alias, filepath.Join(base, "sibling"), false},
+	} {
+		if got := PathWithin(tc.root, tc.path); got != tc.want {
+			t.Errorf("PathWithin(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
 		}
 	}
 }

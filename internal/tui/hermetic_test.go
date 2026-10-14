@@ -4,16 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/testutil"
 )
-
-func underRoot(root, dir string) bool {
-	rel, err := filepath.Rel(root, dir)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
 
 // Guards TestMain: the per-user directories every newModel reads (and the ones
 // tests could write to) must resolve inside the isolated root on every OS.
@@ -34,7 +29,7 @@ func TestUserDirsAreIsolatedFromTheDeveloperHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, dir := range map[string]string{"home": home, "config": userConfig, "cache": cache} {
-		if !underRoot(isolatedUserDirsRoot, dir) {
+		if !testutil.PathWithin(isolatedUserDirsRoot, dir) {
 			t.Errorf("%s dir %q is outside the isolated root %q", name, dir, isolatedUserDirsRoot)
 		}
 	}

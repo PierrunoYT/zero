@@ -4,7 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 )
+
+// setenv is os.Setenv, swappable so tests can fail a redirect part way through.
+var setenv = os.Setenv
 
 // userDirEnv lists every variable that os.UserHomeDir, os.UserConfigDir and
 // os.UserCacheDir (and Zero's own config.UserConfigDir) read, across Linux,
@@ -54,11 +59,38 @@ func IsolateUserDirs(root string) (restore func() error, err error) {
 	}
 	for _, name := range userDirEnv {
 		value, set := os.LookupEnv(name)
-		if err := os.Setenv(name, root); err != nil {
+		if err := setenv(name, root); err != nil {
 			setErr := fmt.Errorf("isolate %s: %w", name, err)
 			return nil, errors.Join(setErr, restore())
 		}
 		previous = append(previous, saved{name: name, value: value, set: set})
 	}
 	return restore, nil
+}
+
+// PathWithin reports whether path is root or lies beneath it, comparing the
+// physical forms so symlinked temp dirs (/var vs /private/var on macOS) and
+// Windows short names do not cause false results. Components that do not
+// exist yet are kept as spelled under their nearest existing ancestor.
+func PathWithin(root, path string) bool {
+	rel, err := filepath.Rel(physicalPath(root), physicalPath(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func physicalPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	var missing []string
+	for current := path; ; {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(append([]string{resolved}, missing...)...)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
+	}
 }
