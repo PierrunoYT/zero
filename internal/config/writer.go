@@ -1119,17 +1119,22 @@ func writeConfigFile(path string, cfg FileConfig) error {
 var syncConfigFileFn = (*os.File).Sync
 var syncConfigDirFn = syncConfigDir
 
-// Windows cannot sync directory handles, and a directory that cannot be opened
-// (e.g. writable but not readable) cannot be synced either; rename durability
-// is best effort in both cases, matching the sessions store. Only a failed
-// Sync or Close is reported.
+// Windows cannot sync directory handles, so rename durability is best effort
+// there, matching the sessions store. Elsewhere a directory the user can write
+// but not read cannot be opened for syncing either; that is also best effort,
+// because the write it follows has already succeeded. Every other failure to
+// open, sync, or close the directory is reported: the barrier was requested and
+// not reached, so the caller must not acknowledge the save.
 func syncConfigDir(dir string) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
 	d, err := os.Open(dir)
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrPermission) {
+			return nil
+		}
+		return err
 	}
 	return errors.Join(d.Sync(), d.Close())
 }

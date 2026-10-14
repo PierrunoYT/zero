@@ -139,20 +139,30 @@ func TestSyncConfigDir(t *testing.T) {
 	if err := syncConfigDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	// A directory that cannot be opened is best effort, as in the sessions
-	// store: the rename has already happened, so the save is not a failure.
-	if err := syncConfigDir(filepath.Join(dir, "missing")); err != nil {
-		t.Fatalf("unopenable directory must be best effort: %v", err)
+	err := syncConfigDir(filepath.Join(dir, "missing"))
+	if runtime.GOOS == "windows" {
+		// Directory handles cannot be synced on Windows, so every call is a
+		// no-op there, including one for a directory that does not exist.
+		if err != nil {
+			t.Fatalf("syncConfigDir must be a no-op on windows: %v", err)
+		}
+		return
 	}
-	if runtime.GOOS != "windows" {
-		unreadable := filepath.Join(dir, "unreadable")
-		if err := os.Mkdir(unreadable, 0o300); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
-		if err := syncConfigDir(unreadable); err != nil {
-			t.Fatalf("write-only directory must be best effort: %v", err)
-		}
+	// A directory that is gone means the persistence barrier was never
+	// reached, so the caller must not acknowledge the save.
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing directory: error = %v, want %v", err, os.ErrNotExist)
+	}
+	// A directory the user can write but not read cannot be opened for
+	// syncing; that is best effort, as in the sessions store, because the
+	// write it follows has already succeeded.
+	unreadable := filepath.Join(dir, "unreadable")
+	if err := os.Mkdir(unreadable, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
+	if err := syncConfigDir(unreadable); err != nil {
+		t.Fatalf("write-only directory must be best effort: %v", err)
 	}
 }
 
