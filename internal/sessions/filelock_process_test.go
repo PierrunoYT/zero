@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,8 @@ func TestSessionFileLockHelperProcess(t *testing.T) {
 		return
 	}
 	store := NewStore(StoreOptions{RootDir: os.Getenv("ZERO_SESSIONS_LOCK_ROOT")})
-	if _, err := store.lockSession("s"); err != nil {
+	unlock, err := store.lockSession("s")
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
@@ -93,5 +95,8 @@ func TestSessionFileLockHelperProcess(t *testing.T) {
 		os.Exit(3)
 	}
 	_, _ = io.Copy(io.Discard, os.Stdin)
-	// Deliberately exit without calling the unlock function.
+	// The unlock closure is the only reference to the open lock file/handle.
+	// Keep it alive until stdin closes, or GC finalization of the file could
+	// release the OS lock while this helper is meant to be holding it.
+	runtime.KeepAlive(unlock) // deliberately exit without calling unlock
 }
