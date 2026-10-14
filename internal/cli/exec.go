@@ -181,7 +181,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	// A mode seeds model/effort/max-turns/tool filters as a preset. Expand it up
 	// front — before tool-filter validation and the --list-tools branch — so a
@@ -347,6 +347,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	} else if notice != "" {
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
 	}
+	// Before any tool runs, and before the MCP servers and plugins below start
+	// through the same sandbox, so a run that goes ahead with reduced isolation
+	// says so where its output starts, not only when someone runs `zero doctor`.
+	// A notice that cannot be written stops the run, as the image and effort
+	// notices further down do: going ahead would mean reduced isolation and no
+	// warning delivered.
+	if notice := sandboxEngine.DegradedNotice(); notice != "" {
+		if _, err := fmt.Fprintln(stderr, "[zero] "+notice); err != nil {
+			return exitCrash
+		}
+	}
 	executionRunner.SetPreparer(sandboxEngine)
 	if permissionMode != agent.PermissionModePlan {
 		mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
@@ -452,20 +463,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// escalation so post-switch turns are attributed to the escalated model.
 	currentModel := resolved.Provider.Model
 	// Optimized OpenAI turn sessions (ZERO_OPENAI_TURN_SESSION, default off). nil
-	// when gated off or the profile is ineligible: agent.Run then wraps the
-	// provider in its default adapter. This is the run's STARTING session provider
-	// and is used whether or not escalation is enabled.
-	turnSessions, _ := providers.OptimizedTurnSessions(resolved.Provider, provider, providers.Options{})
+	// when gated off or ineligible, unless a configured RPM limiter needs to
+	// wrap the default adapter. The limiter is shared across model switches.
+	sessionOptions := providers.Options{ModelRPM: zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)}
+	turnSessions, _ := providers.ConfiguredTurnSessions(resolved.Provider, provider, sessionOptions)
 	// Both switchers come from one shared builder so exec and the interactive TUI
 	// cannot drift on the nil contracts the agent loop depends on. The session
-	// switcher is nil unless this run STARTED optimized, which is what keeps a
-	// default-adapter run on the default adapter.
+	// switcher preserves the starting transport and shares the RPM limiter.
 	var modelSwitcher func(context.Context, string) (agent.Provider, error)
 	var modelSessionSwitcher func(context.Context, string) (zeroruntime.TurnSessionProvider, error)
 	if options.allowEscalation {
 		modelSwitcher, modelSessionSwitcher = providers.EscalationSwitchers(
 			resolved.Provider, provider, deps.newProvider,
 			func(modelID string) { currentModel = modelID },
+			sessionOptions,
 		)
 	}
 
@@ -659,6 +670,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Summarizer:           summarizerFactory(resolved, deps.newProvider),
 		ContextWindowFor: func(modelID string) int {
 			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
+		},
+		SupportsVision: func(modelID string) bool {
+			return modelregistry.SupportsVision(modelRegistry, modelID)
 		},
 		ReasoningEffort: forwardEffort,
 		Trace:           traceRecorder,
