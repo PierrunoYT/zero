@@ -67,6 +67,12 @@ func TestDetectInteractiveCommandAllowsNonInteractive(t *testing.T) {
 		"tail -n 50 app.log",
 		"ssh host 'uptime'",
 		"grep -r foo .",
+		// After the `--` separator the following tokens are positional operands,
+		// not shell flags, so `-ec` must not be read as the `-c` command flag.
+		"bash -- -ec 'vim file.txt'",
+		"sh -- -c 'less /var/log/syslog'",
+		// bash and sh reject --command as an invalid option and run nothing.
+		`bash --command "less /var/log/syslog"`,
 	}
 	for _, command := range cases {
 		t.Run(command, func(t *testing.T) {
@@ -181,6 +187,11 @@ func TestDetectInteractiveThroughWrappersAndShellC(t *testing.T) {
 		{name: "env with assignment option", command: "env -i EDITOR=x vim file.txt", wantCmd: "vim"},
 		{name: "sh -c payload", command: "sh -c 'vim file.txt'", wantCmd: "vim"},
 		{name: "bash -c payload", command: `bash -c "less /var/log/syslog"`, wantCmd: "less"},
+		// POSIX getopt clusters the command flag with other short options; the
+		// payload must still be located and recursed into (ZERO-ESC-02).
+		{name: "sh -ec grouped flags", command: "sh -ec 'vim file.txt'", wantCmd: "vim"},
+		{name: "bash -lc grouped flags", command: `bash -lc "less /var/log/syslog"`, wantCmd: "less"},
+		{name: "zsh -xc grouped flags", command: "zsh -xc 'nano notes.txt'", wantCmd: "nano"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,7 +206,71 @@ func TestDetectInteractiveThroughWrappersAndShellC(t *testing.T) {
 	}
 }
 
-// Audit finding (MED): the interactive-program detector must not be bypassed by
+// Audit ZERO-ESC-02: shell payload extraction must honor POSIX getopt
+// short-option clustering, so a command hidden behind `bash -ec`/`sh -lc`/
+// `zsh -xc` is still recognized, while unrelated options and option values are
+// not mistaken for the command flag. `--command` is not a POSIX shell option
+// (bash rejects it as invalid; it is PowerShell's flag), so it carries no
+// payload here.
+func TestShellDashCPayloadCommandFlagForms(t *testing.T) {
+	cases := []struct {
+		arg  string
+		want bool
+	}{
+		{arg: "-c", want: true},
+		{arg: "-ec", want: true},
+		{arg: "-lc", want: true},
+		{arg: "-xc", want: true},
+		{arg: "-ce", want: true},
+		{arg: "--command", want: false},
+		{arg: "-xec", want: true},
+		{arg: "-e", want: false},
+		{arg: "-o", want: false},
+		{arg: "-O", want: false},
+		// `-o`/`-O` consume the rest of the cluster as their value, so a later
+		// `c` is that value (e.g. `-o c`), not the command flag.
+		{arg: "-oc", want: false},
+		{arg: "-Oc", want: false},
+		{arg: "--norc", want: false},
+		{arg: "--command=payload", want: false},
+		{arg: "-", want: false},
+		{arg: "", want: false},
+		{arg: "c", want: false},
+	}
+	for _, shell := range []string{"bash", "sh"} {
+		for _, tc := range cases {
+			got := shellDashCPayload(shell, []string{shell, tc.arg, "vim file.txt"}) == "vim file.txt"
+			if got != tc.want {
+				t.Errorf("%s %q carries a command payload = %v, want %v", shell, tc.arg, got, tc.want)
+			}
+		}
+	}
+}
+
+// Audit: the `--` separator ends option processing, so a `-c`/`-ec` token
+// appearing after it is a positional operand, not the shell command flag. A
+// payload hidden behind `bash -- -ec '...'` must not be recursed into.
+func TestShellDashCPayloadStopsAtDashDash(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields []string
+		want   string
+	}{
+		{name: "dashdash before clustered flag", fields: []string{"bash", "--", "-ec", "vim file.txt"}, want: ""},
+		{name: "dashdash before bare flag", fields: []string{"sh", "--", "-c", "less file"}, want: ""},
+		// The command string is exactly the -c operand; a trailing `--` becomes $0.
+		{name: "real flag before dashdash", fields: []string{"bash", "-c", "vim file.txt", "--"}, want: "vim file.txt"},
+		{name: "no dashdash grouped flag", fields: []string{"bash", "-ec", "vim file.txt"}, want: "vim file.txt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shellDashCPayload(tc.fields[0], tc.fields); got != tc.want {
+				t.Fatalf("shellDashCPayload(%v) = %q, want %q", tc.fields, got, tc.want)
+			}
+		})
+	}
+}
+
 // quote/escape characters embedded INSIDE the program token (e.g. `vi\m`,
 // `v"i"m`, `'v'im`), not just surrounding it.
 func TestDetectInteractiveStripsEmbeddedQuotingFromToken(t *testing.T) {
