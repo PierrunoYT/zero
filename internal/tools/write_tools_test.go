@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -456,7 +457,11 @@ func TestWriteFileToolFailsClosedWhenExistingTargetIsUnreadable(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("overwrite of an unreadable existing file reported %v, want an error: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "cannot read the existing file") {
+	// On Windows, os.Root.Stat opens the target with FILE_GENERIC_READ, so a file
+	// whose bytes cannot be read is already refused by the existence check; the
+	// rooted-read layer itself is covered through the readRooted seam in
+	// TestWriteFileToolRejectsOverwriteWhenPreimageCannotBeRead.
+	if runtime.GOOS != "windows" && !strings.Contains(result.Output, "cannot read the existing file") {
 		t.Fatalf("error = %q, want the fail-closed encoding-preservation message", result.Output)
 	}
 	got, err := os.ReadFile(path)
@@ -782,7 +787,9 @@ func TestWriteFileToolRejectsOverwriteWhenPreimageCannotBeRead(t *testing.T) {
 	path := filepath.Join(root, "private.txt")
 	writeTestFile(t, path, "before\n")
 	tool := NewScopedWriteFileTool(root, nil).(writeFileTool)
-	tool.readFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	tool.readRooted = func(*os.Root, string) ([]byte, os.FileInfo, error) {
+		return nil, nil, os.ErrPermission
+	}
 	registry := NewRegistry()
 	registry.Register(tool)
 	result := registry.RunWithOptions(context.Background(), tool.Name(), map[string]any{
@@ -790,6 +797,9 @@ func TestWriteFileToolRejectsOverwriteWhenPreimageCannotBeRead(t *testing.T) {
 	}, RunOptions{PermissionGranted: true})
 	if result.Status != StatusError {
 		t.Fatalf("unreadable preimage must reject overwrite: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "cannot read the existing file") {
+		t.Fatalf("error = %q, want the fail-closed encoding-preservation message", result.Output)
 	}
 	if len(result.FileDiffs) != 0 {
 		t.Fatalf("unreadable preimage must not produce a create-like diff: %#v", result.FileDiffs)

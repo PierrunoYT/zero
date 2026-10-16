@@ -9,11 +9,20 @@ import (
 	"strings"
 )
 
+// writePreimageBeforeObserve is a deterministic test hook. Production leaves
+// it nil. Tests substitute the pathname after the write root is open and
+// before existence or bytes are read, so a dissenting absolute-path resolution
+// cannot be mistaken for the rooted object.
+var writePreimageBeforeObserve func(absolutePath string)
+
 type writeFileTool struct {
 	baseTool
 	workspaceRoot string
 	scope         PathScope
-	readFile      func(string) ([]byte, error)
+	// readRooted reads an existing file through the granted write root. Tests
+	// replace it to simulate an unreadable preimage; production uses
+	// readRootedFile so bytes and identity come from the same descriptor.
+	readRooted func(*os.Root, string) ([]byte, os.FileInfo, error)
 }
 
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -38,7 +47,7 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
-		readFile:      os.ReadFile,
+		readRooted:    readRootedFile,
 	}
 }
 
@@ -78,10 +87,25 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err != nil {
 		return errorResult("Error writing file " + requestedPath + ": " + err.Error())
 	}
+	// Anchor observation and mutation on the granted write root. The pathname
+	// checks above say what was REQUESTED; this handle enforces what actually
+	// happens, so a parent directory swapped for an escaping symlink after
+	// validation cannot redirect the create or overwrite. Existence and prior
+	// bytes must come from the same handle: os.Stat on the absolute path stores
+	// a pathname and, on Windows, fills volume and file index only when
+	// os.SameFile re-opens that path, so a same-name substitution compares equal.
+	root, rootedRelative, err := openScopedWriteRoot(tool.workspaceRoot, tool.scope, absolutePath)
+	if err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
+	if writePreimageBeforeObserve != nil {
+		writePreimageBeforeObserve(absolutePath)
+	}
 
 	existed := false
 	var priorInfo os.FileInfo
-	if info, err := os.Stat(absolutePath); err == nil {
+	if info, err := root.Stat(rootedRelative); err == nil {
 		existed = true
 		priorInfo = info
 		if !overwrite {
@@ -93,17 +117,26 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 
 	// On overwrite, refuse to clobber a tracked file that changed on disk outside
 	// Zero since it was last read — the new content was likely composed against a
-	// stale view. Only read current bytes when there is a baseline to compare,
-	// so a first-touch create/overwrite stays a single write with no extra read.
+	// stale view. The rooted read below is also the preimage: one descriptor-bound
+	// snapshot supplies both the conflict check and the bytes passed to commit,
+	// and those bytes carry what read_file normalizes away — a BOM, CRLF endings —
+	// so the rewrite can keep them.
+	readRooted := tool.readRooted
+	if readRooted == nil {
+		readRooted = readRootedFile
+	}
+	priorContent := ""
+	priorContentKnown := !existed
+	var encoding writeFileEncoding
 	if existed {
 		if options.FileTracker != nil && !options.FileTracker.SeenWhole(absolutePath) {
 			return errorResult(fileUnseenMessage(relativePath))
 		}
+		current, info, rerr := readRooted(root, rootedRelative)
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
 			// unknown (it may have been replaced or removed out from under us).
-			current, rerr := tool.readFile(absolutePath)
 			if rerr != nil {
 				return errorResult(fileConflictMessage(relativePath))
 			}
@@ -111,33 +144,28 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 				return errorResult(fileConflictMessage(relativePath))
 			}
 		}
-	}
-
-	// Capture the prior content (before we replace it) so an overwrite can show a
-	// real diff, and so the bytes read_file normalizes away — a BOM, CRLF endings —
-	// survive the rewrite. A fresh create stays "" and previews as all-additions.
-	//
-	// Fail CLOSED when an existing target cannot be read: those bytes are the only
-	// evidence of the convention to restore, so overwriting without them would
-	// write the model's normalized content over a CRLF/BOM file and silently
-	// destroy exactly what this read exists to preserve.
-	priorContent := ""
-	priorContentKnown := !existed
-	var encoding writeFileEncoding
-	if existed {
-		prev, rerr := tool.readFile(absolutePath)
+		// Fail CLOSED when an existing target cannot be read: those bytes are the
+		// only evidence of the convention to restore, so overwriting without them
+		// would write the model's normalized content over a CRLF/BOM file and
+		// silently destroy exactly what this read exists to preserve.
 		if rerr != nil {
 			return errorResult("Error writing file " + relativePath + ": cannot read the existing file to preserve its line endings and BOM: " + rerr.Error())
 		}
-		priorContent = string(prev)
+		// Prefer the identity from the opened object over root.Stat. Both
+		// capture it at observation time; the opened object is the one whose
+		// bytes were just read.
+		priorInfo = info
+		priorContent = string(current)
 		priorContentKnown = true
-		encoding = resolveWriteFileEncoding(prev, content, bom, lineEndings)
+		encoding = resolveWriteFileEncoding(current, content, bom, lineEndings)
 		content = encoding.apply(content)
 	}
 	modelEquivalentContent := content
 
-	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	if dir := filepath.Dir(rootedRelative); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return errorResult("Error writing file " + relativePath + ": " + err.Error())
+		}
 	}
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
@@ -146,7 +174,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if priorContentKnown {
 		expectedContent = &priorContent
 	}
-	if err := commitFileContents(absolutePath, priorInfo, expectedContent, content); err != nil {
+	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
@@ -163,13 +191,14 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo := formatting.Info
 	if newInfo == nil {
-		newInfo, _ = os.Stat(absolutePath)
+		newInfo, _ = root.Stat(rootedRelative)
 	}
 	// Encoding preservation must be the last thing to touch the bytes. Formatters
 	// such as gofmt normalize endings to LF, so re-impose the same BOM and ending
-	// decision on their output and publish it through the same guarded commit.
-	// The result is then the preserved form of what the model sent whenever the
-	// formatter changed nothing else, which keeps the whole-file observation.
+	// decision on their output and publish it through the same rooted, guarded
+	// commit. The result is then the preserved form of what the model sent
+	// whenever the formatter changed nothing else, which keeps the whole-file
+	// observation.
 	if existed && finalContentKnown {
 		if reencoded := encoding.apply(content); reencoded != content {
 			if newInfo == nil {
@@ -177,12 +206,12 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 				return errorResult("Error writing file " + relativePath + ": cannot restore line endings and BOM after formatting: the formatted file could not be inspected")
 			}
 			formatted := content
-			if err := commitFileContents(absolutePath, newInfo, &formatted, reencoded); err != nil {
+			if err := commitRootedFileContents(root, absolutePath, rootedRelative, newInfo, &formatted, reencoded); err != nil {
 				options.FileTracker.Forget(absolutePath)
 				return errorResult("Error writing file " + relativePath + ": cannot restore line endings and BOM after formatting: " + err.Error())
 			}
 			content = reencoded
-			newInfo, _ = os.Stat(absolutePath)
+			newInfo, _ = root.Stat(rootedRelative)
 		}
 	}
 	if finalContentKnown {
