@@ -164,7 +164,9 @@ func ResolveProviderRowOwnership(persisted []ProviderProfile, resolvedNames []st
 		if resolved == "" {
 			continue
 		}
-		if resolved == name || resolved == persistedName {
+		// Only a concrete row with the requested spelling shadows the persisted
+		// row. The persisted spelling in the list is that row itself.
+		if resolved == name {
 			return ProviderRowOwnership{Lookup: lookup, Shadowed: true, Reason: fmt.Sprintf(
 				"%q is not the saved provider %q — this resolved row comes from project config or the environment",
 				name, persistedName)}

@@ -2022,7 +2022,25 @@ func writeConfigData(path string, data []byte) error {
 	}
 	// The replacement is already visible if this fails; do not roll it back.
 	if err := syncConfigDirFn(dir); err != nil {
-		return fmt.Errorf("sync config directory %s: %w", dir, err)
+		return &configPublishedError{err: fmt.Errorf("sync config directory %s: %w", dir, err)}
 	}
 	return nil
+}
+
+// configPublishedError reports a write that failed after the new config was
+// already published by the rename. Callers must still not acknowledge the save,
+// but must not undo state that the published config now refers to either.
+type configPublishedError struct {
+	err error
+}
+
+func (e *configPublishedError) Error() string { return e.err.Error() }
+
+func (e *configPublishedError) Unwrap() error { return e.err }
+
+// configWasPublished reports whether err came from a write whose replacement
+// config is already visible on disk.
+func configWasPublished(err error) bool {
+	var published *configPublishedError
+	return errors.As(err, &published)
 }

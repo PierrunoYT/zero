@@ -780,7 +780,7 @@ func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -806,7 +806,7 @@ func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "remove", "openai", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "remove", "openai", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -834,7 +834,7 @@ func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -853,7 +853,7 @@ func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -868,6 +868,229 @@ func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
 	}
 	if payload.Renamed != nil || payload.ConfigPath != configPath || payload.Persisted {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+// Two env-derived providers and no saved active provider is the case issue
+// #1130 reports: the resolver only elects an active provider by itself when
+// there is exactly one, so `providers list/use/remove/rename` used to exit 3
+// with `active provider "" not found` before doing anything.
+func TestRunProvidersSubcommandsWithMultipleEnvDerivedProviders(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "list", args: []string{"providers", "list"}, want: "openai"},
+		{name: "list json", args: []string{"providers", "list", "--json"}, want: `"name": "openai"`},
+		{name: "use", args: []string{"providers", "use", "openai"}, want: "is not saved in config.json"},
+		{name: "remove", args: []string{"providers", "remove", "openai"}, want: "nothing to remove there"},
+		{name: "rename", args: []string{"providers", "rename", "openai", "renamed"}, want: "no saved profile to rename"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+			var stdout, stderr bytes.Buffer
+
+			exitCode := runWithDeps(tt.args, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+			if exitCode != exitSuccess {
+				t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.want) {
+				t.Fatalf("stdout = %q, want it to contain %q", stdout.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestRunProvidersListShowsEveryEnvDerivedProvider(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	names := make(map[string]bool, len(payload.Providers))
+	for _, provider := range payload.Providers {
+		names[provider.Name] = true
+	}
+	for _, want := range []string{"openai", "google"} {
+		if !names[want] {
+			t.Fatalf("providers = %v, want %q listed", names, want)
+		}
+	}
+}
+
+// The provider-management commands report what is CONFIGURED, not what a run
+// would use: with env-derived providers and no saved active provider they must
+// not present any provider as selected. Electing firstUsableProvider in
+// resolveCommandCenterConfig made `providers current` claim `openai` while
+// `zero exec` in the same environment still exited 3 with `no active provider
+// configured` — and it read the OAuth store on this path (maintainer review of
+// this PR).
+func TestRunProvidersSubcommandsElectNoActiveProvider(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	deps := func(t *testing.T) appDeps {
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+		return providerEnvSetupDeps(t, configPath, env)
+	}
+
+	t.Run("current shows nothing selected", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		exitCode := runWithDeps([]string{"providers", "current"}, &stdout, &stderr, deps(t))
+
+		if exitCode != exitSuccess {
+			t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "(none)") {
+			t.Fatalf("stdout = %q, want an empty selection", stdout.String())
+		}
+		if strings.Contains(stdout.String(), "openai") {
+			t.Fatalf("stdout = %q, want no provider elected as current", stdout.String())
+		}
+	})
+
+	t.Run("list marks nothing active", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		exitCode := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, deps(t))
+
+		if exitCode != exitSuccess {
+			t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+		}
+		var payload struct {
+			Providers []struct {
+				Name   string `json:"name"`
+				Active bool   `json:"active"`
+			} `json:"providers"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+		}
+		if len(payload.Providers) < 2 {
+			t.Fatalf("providers = %+v, want both env-derived profiles listed", payload.Providers)
+		}
+		for _, provider := range payload.Providers {
+			if provider.Active {
+				t.Fatalf("provider %q marked active, want nothing active", provider.Name)
+			}
+		}
+	})
+
+	t.Run("use json leaves activeProvider empty", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, deps(t))
+
+		if exitCode != exitSuccess {
+			t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+		}
+		var payload struct {
+			ActiveProvider string `json:"activeProvider"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+		}
+		if payload.ActiveProvider != "" {
+			t.Fatalf("activeProvider = %q, want it empty for an unpersisted selection", payload.ActiveProvider)
+		}
+	})
+}
+
+// A base-URL-only environment (OPENAI_BASE_URL / GEMINI_BASE_URL set, no API
+// keys) is the other half of issue #1130: electing firstUsableProvider made
+// `providers list` exit 3 because the election demands a credential. The list
+// must succeed and still mark nothing active. The resolver itself keeps only
+// the keyless openai-compatible profile here (a google profile without a
+// credential is dropped during normalization), so `openai` is the expected
+// entry — pinning that as-is keeps this test about the COMMAND, not the
+// resolver.
+func TestRunProvidersListWithBaseURLOnlyProviders(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_BASE_URL": "https://openai.proxy.example.com/v1",
+		"GEMINI_BASE_URL": "https://gemini.proxy.example.com",
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name   string `json:"name"`
+			Active bool   `json:"active"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	names := make(map[string]bool, len(payload.Providers))
+	for _, provider := range payload.Providers {
+		if provider.Active {
+			t.Fatalf("provider %q marked active, want nothing active", provider.Name)
+		}
+		names[provider.Name] = true
+	}
+	if !names["openai"] {
+		t.Fatalf("providers = %v, want the base-URL-only openai profile listed", names)
+	}
+}
+
+// `zero config` is NOT one of the provider-management commands: it reports the
+// resolved configuration, so a missing active provider has to stay actionable
+// (the headless contract the resolver documents for `zero config` / `zero
+// exec`). Only the interactive TUI recovers from that state.
+func TestRunConfigSummaryStillFailsWithNoActiveProvider(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"config"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+	if exitCode == exitSuccess {
+		t.Fatalf("exit code = %d, want the actionable resolve error: %s", exitCode, stdout.String())
+	}
+	message := stderr.String()
+	if message == "" {
+		message = stdout.String()
+	}
+	if !strings.Contains(message, "no active provider configured") {
+		t.Fatalf("output = %q / %q, want the actionable resolve error", stdout.String(), stderr.String())
 	}
 }
 
@@ -1252,7 +1475,7 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 			},
 		})
 		var stdout, stderr bytes.Buffer
-		if code := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("use failed: code=%d stderr=%s", code, stderr.String())
 		}
 		if active := readFileConfig(t, configPath).ActiveProvider; active != "OpenAI" {
@@ -1261,12 +1484,11 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 	})
 
 	t.Run("environment provider accepts case variant", func(t *testing.T) {
-		t.Setenv("OPENAI_API_KEY", "sk-env")
-		t.Setenv(config.ActiveProviderEnv, "openai")
 		configPath := filepath.Join(t.TempDir(), "config.json")
 		writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 		var stdout, stderr bytes.Buffer
-		if code := runWithDeps([]string{"providers", "use", "OpenAI"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		deps := providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env", config.ActiveProviderEnv: "openai"})
+		if code := runWithDeps([]string{"providers", "use", "OpenAI"}, &stdout, &stderr, deps); code != exitSuccess {
 			t.Fatalf("environment use failed: code=%d stderr=%s", code, stderr.String())
 		}
 	})
@@ -1283,16 +1505,8 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		deps := providerSetupDeps(configPath)
-		deps.resolveConfig = func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
-			return config.Resolve(config.ResolveOptions{
-				UserConfigPath: configPath,
-				Env:            map[string]string{},
-				Overrides:      overrides,
-			})
-		}
 		var stdout, stderr bytes.Buffer
-		if code := runWithDeps([]string{"providers", "use", "ſ"}, &stdout, &stderr, deps); code != exitCrash {
+		if code := runWithDeps([]string{"providers", "use", "ſ"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitCrash {
 			t.Fatalf("use exit = %d, want crash for distinct identity; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 		}
 		after, err := os.ReadFile(configPath)

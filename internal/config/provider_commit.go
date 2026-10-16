@@ -115,6 +115,13 @@ func runProviderProfileOperation(path string, allowMissing bool, allowInvalidInp
 			publishErr = publishProviderConfig(path, op.config)
 		}
 		if publishErr != nil {
+			if configWasPublished(publishErr) {
+				// The config on disk already refers to the new credentials, so
+				// rolling them back would recreate the mismatch this transaction
+				// exists to prevent. Keep them and report the durability failure.
+				published = true
+				return FileConfig{}, fmt.Errorf("provider configuration was committed, but making it durable failed: %w", publishErr)
+			}
 			return FileConfig{}, errors.Join(publishErr, op.rollbackCredentials())
 		}
 		published = true

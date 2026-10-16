@@ -546,6 +546,56 @@ func TestPublishProviderCredentialRollbackDoesNotResurrectConcurrentDeletion(t *
 	}
 }
 
+// A directory sync that fails after the rename has already published the new
+// config must keep the credential that config now refers to; rolling it back
+// would leave apiKeyStored pointing at nothing.
+func TestPublishProviderCredentialKeepsKeyWhenSyncFailsAfterPublish(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("injected directory sync failure after rename")
+	dirSync := syncConfigDirFn
+	t.Cleanup(func() { syncConfigDirFn = dirSync })
+	injected := false
+	syncConfigDirFn = func(got string) error {
+		if data, err := os.ReadFile(path); err == nil && strings.Contains(string(data), `"apiKeyStored": true`) {
+			injected = true
+			return failure
+		}
+		return dirSync(got)
+	}
+
+	err := PublishProviderCredential(path, "work", "sk-new")
+	if !injected {
+		t.Fatal("the directory sync after the rename was never reached")
+	}
+	if !errors.Is(err, failure) {
+		t.Fatalf("PublishProviderCredential error = %v, want the post-publish sync failure", err)
+	}
+	var cfg FileConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Providers[0].APIKeyStored {
+		t.Fatal("published config should mark the key as stored")
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok, err := store.Get("work")
+	if err != nil || !ok || key != "sk-new" {
+		t.Fatalf("published config marks apiKeyStored but the store lost the key (present=%v, len=%d, err=%v)", ok, len(key), err)
+	}
+}
+
 func TestRepairUnnamedProviderStoredIdentity(t *testing.T) {
 	for _, shared := range []bool{false, true} {
 		for _, destination := range []bool{false, true} {

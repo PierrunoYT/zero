@@ -114,6 +114,17 @@ func TestResolveProviderRowOwnership(t *testing.T) {
 			wantPersisted: "OpenAI",
 		},
 		{
+			// The TUI passes the saved rows as the resolved names, so the user
+			// row itself is normally in the list. Its own spelling is not a
+			// shadowing row.
+			name:          "sole case variant listed under its persisted spelling",
+			persisted:     []string{"OpenAI"},
+			resolved:      []string{"OpenAI"},
+			row:           "openai",
+			wantBacked:    true,
+			wantPersisted: "OpenAI",
+		},
+		{
 			name:       "project row after unusable user row is filtered out",
 			persisted:  []string{"work"},
 			resolved:   []string{"WORK"},
