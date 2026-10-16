@@ -995,7 +995,7 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 			},
 		})
 		var stdout, stderr bytes.Buffer
-		if code := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("use failed: code=%d stderr=%s", code, stderr.String())
 		}
 		if active := readFileConfig(t, configPath).ActiveProvider; active != "OpenAI" {
@@ -1004,11 +1004,11 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 	})
 
 	t.Run("environment provider accepts case variant", func(t *testing.T) {
-		t.Setenv("OPENAI_API_KEY", "sk-env")
 		configPath := filepath.Join(t.TempDir(), "config.json")
 		writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 		var stdout, stderr bytes.Buffer
-		if code := runWithDeps([]string{"providers", "use", "OpenAI"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		deps := providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"})
+		if code := runWithDeps([]string{"providers", "use", "OpenAI"}, &stdout, &stderr, deps); code != exitSuccess {
 			t.Fatalf("environment use failed: code=%d stderr=%s", code, stderr.String())
 		}
 	})
@@ -1024,7 +1024,7 @@ func TestRunProvidersUseMatchesCredentialIdentityButNotUnicodeCaseFold(t *testin
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
-		if code := runWithDeps([]string{"providers", "use", "ſ"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitCrash {
+		if code := runWithDeps([]string{"providers", "use", "ſ"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitCrash {
 			t.Fatalf("use exit = %d, want crash for distinct identity; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 		}
 		after, err := os.ReadFile(configPath)
