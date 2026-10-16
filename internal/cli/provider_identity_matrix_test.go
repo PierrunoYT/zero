@@ -74,7 +74,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		})
 		var stdout, stderr bytes.Buffer
 
-		if code := runWithDeps([]string{"providers", "remove", "work"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "remove", "work"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 		}
 		if cfg := readFileConfig(t, configPath); len(cfg.Providers) != 0 {
@@ -91,7 +91,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		})
 		var stdout, stderr bytes.Buffer
 
-		if code := runWithDeps([]string{"providers", "rename", "work", "acme"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "rename", "work", "acme"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 		}
 		cfg := readFileConfig(t, configPath)
@@ -109,7 +109,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 
 		// "Work" matches neither row exactly and both by identity.
-		if code := runWithDeps([]string{"providers", "remove", "Work"}, &stdout, &stderr, providerSetupDeps(configPath)); code == exitSuccess {
+		if code := runWithDeps([]string{"providers", "remove", "Work"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code == exitSuccess {
 			t.Fatalf("ambiguous removal reported success: %s", stdout.String())
 		}
 		if !strings.Contains(stderr.String(), "ambiguous provider") {
@@ -134,7 +134,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		})
 		var stdout, stderr bytes.Buffer
 
-		if code := runWithDeps([]string{"providers", "remove", "work"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "remove", "work"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 		}
 		cfg := readFileConfig(t, configPath)
@@ -162,7 +162,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		})
 		var stdout, stderr bytes.Buffer
 
-		if code := runWithDeps([]string{"providers", "remove", "work"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "remove", "work"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 		}
 		// The surviving WORK row never claimed the credential, so keeping the
@@ -181,7 +181,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		})
 		var stdout, stderr bytes.Buffer
 
-		if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "remove", "WORK"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 		}
 		cfg := readFileConfig(t, configPath)
@@ -200,7 +200,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		})
 		var stdout, stderr bytes.Buffer
 
-		if code := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "use", "openai"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 		}
 		if cfg := readFileConfig(t, configPath); cfg.ActiveProvider != "OpenAI" {
@@ -215,7 +215,7 @@ func TestProviderIdentityMatrix(t *testing.T) {
 		})
 		var stdout, stderr bytes.Buffer
 
-		if code := runWithDeps([]string{"providers", "remove", "s"}, &stdout, &stderr, providerSetupDeps(configPath)); code != exitSuccess {
+		if code := runWithDeps([]string{"providers", "remove", "s"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{})); code != exitSuccess {
 			t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
 		}
 		// strings.EqualFold folds these two together; the credential store does
