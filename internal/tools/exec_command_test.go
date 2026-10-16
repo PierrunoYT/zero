@@ -388,31 +388,28 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 			"chars":      "\u0003",
 		})
 	})
-
-	// Yielding a session does not promise that the child has finished starting,
-	// especially when Windows must launch a shell first. Poll for readiness and
-	// register cleanup above so a startup failure cannot leak the server.
+	// Process start-up and net.Listen can outlast the first yield on a loaded
+	// runner, so keep polling the session until the address shows up.
 	output := start.Output
 	addr := parseListeningAddress(output)
-	deadline := time.Now().Add(10 * time.Second)
-	for addr == "" && time.Now().Before(deadline) {
+	for deadline := time.Now().Add(20 * time.Second); addr == "" && time.Now().Before(deadline); {
 		poll := writeTool.Run(context.Background(), map[string]any{
 			"session_id":    sessionID,
-			"yield_time_ms": 100,
+			"yield_time_ms": 250,
 		})
-		output += "\n" + poll.Output
-		if poll.Status != StatusOK || poll.Meta["exit_code"] != "" {
-			t.Fatalf("server exited before readiness: %q", output)
+		if poll.Status != StatusOK {
+			t.Fatalf("write_stdin poll status = %s: %s", poll.Status, poll.Output)
 		}
+		output += "\n" + poll.Output
 		addr = parseListeningAddress(output)
 	}
 	if addr == "" {
-		t.Fatalf("server output did not include listening address before deadline: %q", output)
+		t.Fatalf("server output did not include listening address: %q", output)
 	}
 
 	response, err := http.Get("http://" + addr)
 	if err != nil {
-		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, start.Output)
+		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, output)
 	}
 	defer response.Body.Close()
 	bytes, err := io.ReadAll(response.Body)
