@@ -66,6 +66,10 @@ func storedProviderKey(t *testing.T, configPath string, provider string) (string
 // how a future boundary gets covered, rather than another per-finding test.
 func TestProviderIdentityMatrix(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	// The mutation-name lookup resolves source names from the process
+	// environment, not deps; an exported OPENAI_API_KEY would add a concrete
+	// "openai" row and correctly refuse the case-variant use below.
+	clearProviderEnv(t)
 
 	t.Run("case-variant remove targets the sole persisted row", func(t *testing.T) {
 		configPath := seedProviderIdentityFixture(t, providerIdentityFixture{
