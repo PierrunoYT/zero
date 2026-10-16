@@ -71,8 +71,6 @@ func TestDetectInteractiveCommandAllowsNonInteractive(t *testing.T) {
 		// not shell flags, so `-ec` must not be read as the `-c` command flag.
 		"bash -- -ec 'vim file.txt'",
 		"sh -- -c 'less /var/log/syslog'",
-		// bash and sh reject --command as an invalid option and run nothing.
-		`bash --command "less /var/log/syslog"`,
 	}
 	for _, command := range cases {
 		t.Run(command, func(t *testing.T) {
@@ -192,6 +190,7 @@ func TestDetectInteractiveThroughWrappersAndShellC(t *testing.T) {
 		{name: "sh -ec grouped flags", command: "sh -ec 'vim file.txt'", wantCmd: "vim"},
 		{name: "bash -lc grouped flags", command: `bash -lc "less /var/log/syslog"`, wantCmd: "less"},
 		{name: "zsh -xc grouped flags", command: "zsh -xc 'nano notes.txt'", wantCmd: "nano"},
+		{name: "bash --command long flag", command: `bash --command "less /var/log/syslog"`, wantCmd: "less"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,11 +207,9 @@ func TestDetectInteractiveThroughWrappersAndShellC(t *testing.T) {
 
 // Audit ZERO-ESC-02: shell payload extraction must honor POSIX getopt
 // short-option clustering, so a command hidden behind `bash -ec`/`sh -lc`/
-// `zsh -xc` is still recognized, while unrelated options and option values are
-// not mistaken for the command flag. `--command` is not a POSIX shell option
-// (bash rejects it as invalid; it is PowerShell's flag), so it carries no
-// payload here.
-func TestShellDashCPayloadCommandFlagForms(t *testing.T) {
+// `zsh -xc` (and the legacy `--command`) is still recognized, while unrelated
+// options and option values are not mistaken for the command flag.
+func TestShellCommandFlag(t *testing.T) {
 	cases := []struct {
 		arg  string
 		want bool
@@ -222,7 +219,7 @@ func TestShellDashCPayloadCommandFlagForms(t *testing.T) {
 		{arg: "-lc", want: true},
 		{arg: "-xc", want: true},
 		{arg: "-ce", want: true},
-		{arg: "--command", want: false},
+		{arg: "--command", want: true},
 		{arg: "-xec", want: true},
 		{arg: "-e", want: false},
 		{arg: "-o", want: false},
@@ -237,7 +234,7 @@ func TestShellDashCPayloadCommandFlagForms(t *testing.T) {
 		{arg: "", want: false},
 		{arg: "c", want: false},
 	}
-	for _, shell := range []string{"bash", "sh"} {
+	for _, shell := range []string{"bash", "sh", "zsh", "ksh", "dash"} {
 		for _, tc := range cases {
 			got := shellDashCPayload(shell, []string{shell, tc.arg, "vim file.txt"}) == "vim file.txt"
 			if got != tc.want {

@@ -802,6 +802,16 @@ func shellCommandPayloadIndex(program string, args []string) (int, bool) {
 			(!strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "+")) {
 			return 0, false
 		}
+		if option == "--command" {
+			// bash, sh and dash reject --command as an invalid option and run
+			// nothing, but it is still read as the command flag, as #1066 does:
+			// classifying a payload that never runs costs nothing, and it covers
+			// any shell build that accepts the long form.
+			if noExecute || dumpStrings {
+				return 0, false
+			}
+			return shellCommandSourceIndex(args, index)
+		}
 		if strings.HasPrefix(option, "--") {
 			if program != "bash" {
 				return 0, false
@@ -869,17 +879,23 @@ func shellCommandPayloadIndex(program string, args []string) (int, bool) {
 			if noExecute || dumpStrings {
 				return 0, false
 			}
-			sourceIndex := index + 1
-			if sourceIndex < len(args) && args[sourceIndex] == "--" {
-				sourceIndex++
-			}
-			if sourceIndex >= len(args) {
-				return 0, false
-			}
-			return sourceIndex, true
+			return shellCommandSourceIndex(args, index)
 		}
 	}
 	return 0, false
+}
+
+// shellCommandSourceIndex returns the index of the command string that follows
+// the command flag at args[flagIndex], skipping one `--` between them.
+func shellCommandSourceIndex(args []string, flagIndex int) (int, bool) {
+	sourceIndex := flagIndex + 1
+	if sourceIndex < len(args) && args[sourceIndex] == "--" {
+		sourceIndex++
+	}
+	if sourceIndex >= len(args) {
+		return 0, false
+	}
+	return sourceIndex, true
 }
 
 func fallbackCommandInterpreterPayload(program string, args []string) string {

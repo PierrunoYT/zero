@@ -41,9 +41,8 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "sh -lc wraps destructive payload", script: `sh -lc 'shred -u secret.txt'`, destructive: true},
 		{name: "zsh -xc wraps destructive payload", script: `zsh -xc 'parted /dev/sda mklabel gpt'`, destructive: true},
 		{name: "bash -ec wraps network payload", script: `bash -ec 'curl https://x.test'`, network: true},
-		// bash and sh have no --command option: bash exits 2 with "invalid
-		// option" and never runs the operand, so it is not an editor launch.
-		{name: "bash --command is not a bash option", script: `bash --command 'vim file'`, interactive: false},
+		{name: "bash --command wraps editor", script: `bash --command 'vim file'`, interactive: true},
+		{name: "bash --command wraps destructive payload", script: `bash --command 'fdisk /dev/sda'`, destructive: true},
 		// `--` ends option processing, so a `-ec`/`-c` after it is a positional
 		// operand, not the shell command flag: the quoted text must NOT be parsed
 		// as a payload command and must not trigger its classification.
@@ -132,7 +131,10 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "bash clustered login command", script: `bash -lc 'curl https://x.test'`, network: true},
 		{name: "bash clustered command erexit", script: `bash -ce 'git push origin main'`, network: true},
 		{name: "dash clustered command erexit", script: `dash -ce 'curl https://x.test'`, network: true},
-		{name: "bash long command flag is invalid", script: `bash --command 'curl https://x.test'`, network: false},
+		{name: "bash long command flag", script: `bash --command 'curl https://x.test'`, network: true},
+		{name: "sh long command flag before separator", script: `sh --command -- 'curl https://x.test'`, network: true},
+		{name: "bash long command flag noexec", script: `bash -n --command 'curl https://x.test'`, network: false},
+		{name: "bash joined long command flag", script: `bash --command='curl https://x.test'`, network: false},
 		{name: "bash args after command payload are positional", script: `bash -c 'echo ok' curl https://x.test`, network: false},
 		{name: "bash script makes later command flag positional", script: `bash /dev/null -c 'curl https://x.test'`, network: false},
 		{name: "bash option terminator makes command flag positional", script: `bash -- -c 'curl https://x.test'`, network: false},
