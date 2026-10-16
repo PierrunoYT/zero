@@ -559,6 +559,37 @@ func TestRunProvidersUseJSONFlagsEnvOverride(t *testing.T) {
 	}
 }
 
+// effectiveProvider is the row the override resolved to, not the raw
+// ZERO_PROVIDER spelling, which envProvider already reports.
+func TestRunProvidersUseJSONReportsResolvedEffectiveProvider(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "WORK")
+	var stdout, stderr bytes.Buffer
+	deps := providerSetupDeps(providersUseOverrideConfig(t))
+	cwd := t.TempDir()
+	deps.getwd = func() (string, error) { return cwd, nil }
+	deps.getenv = func(key string) string {
+		if key == config.ActiveProviderEnv {
+			return "WORK"
+		}
+		return ""
+	}
+
+	if code := runWithDeps([]string{"providers", "use", "fast", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d: %s", code, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		EffectiveProvider   string `json:"effectiveProvider"`
+		EnvProvider         string `json:"envProvider"`
+		EnvProviderResolves bool   `json:"envProviderResolves"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if !payload.EnvProviderResolves || payload.EnvProvider != "WORK" || payload.EffectiveProvider != "work" {
+		t.Fatalf("want envProvider WORK resolving to effectiveProvider work, got %#v", payload)
+	}
+}
+
 func TestRunProvidersUseExplainsUnresolvableOverride(t *testing.T) {
 	t.Setenv(config.ActiveProviderEnv, "removed")
 	configPath := providersUseOverrideConfig(t)

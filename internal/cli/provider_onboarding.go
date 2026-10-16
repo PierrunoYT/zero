@@ -117,7 +117,9 @@ func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps app
 			payload["envProviderResolves"] = overrideResolution.resolves()
 			switch overrideResolution {
 			case activeProviderOverrideResolved:
-				payload["effectiveProvider"] = override
+				// The row resolution actually made effective; envProvider already
+				// carries the raw ZERO_PROVIDER spelling.
+				payload["effectiveProvider"] = resolvedOverride
 			case activeProviderOverrideDeferred:
 				payload["envProviderResolution"] = "deferred"
 			case activeProviderOverrideConfigError:
