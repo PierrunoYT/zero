@@ -185,6 +185,11 @@ describe a version that is no longer on disk. Prefer `mise upgrade`.
 go install github.com/Gitlawb/zero/cmd/zero@latest
 ```
 
+Every release so far declares the module path `github.com/Gitlawb/zero`, so
+`go install` has to use that path; `github.com/Twigpine/zero/cmd/zero@latest`
+fails with "module declares its path as" until a release is tagged with the new
+module path.
+
 This builds from source, so it needs Go 1.26.9+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 

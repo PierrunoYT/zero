@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/gitsafe"
+	"github.com/Twigpine/zero/internal/gitsafe"
 )
 
 type scratchFileBaseline map[string]bool

@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/testutil"
+	"github.com/Twigpine/zero/internal/testutil"
 )
 
 // isolatedUserDirsRoot is where TestMain points every per-user directory.

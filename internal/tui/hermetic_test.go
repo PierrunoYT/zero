@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/testutil"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/testutil"
 )
 
 // Guards TestMain: the per-user directories every newModel reads (and the ones

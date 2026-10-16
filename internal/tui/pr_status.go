@@ -14,7 +14,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/Gitlawb/zero/internal/gitsafe"
+	"github.com/Twigpine/zero/internal/gitsafe"
 )
 
 type PrStatus string

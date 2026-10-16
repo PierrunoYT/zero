@@ -153,7 +153,7 @@ func TestAutomaticStatusAndDiffSkipSubmoduleWorkTrees(t *testing.T) {
 	for _, dir := range automaticGitPackages {
 		fset, files := parsePackage(t, dir)
 		for _, file := range files {
-			gitsafeName := importName(file, "github.com/Gitlawb/zero/internal/gitsafe")
+			gitsafeName := importName(file, "github.com/Twigpine/zero/internal/gitsafe")
 			ast.Inspect(file, func(node ast.Node) bool {
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
@@ -198,7 +198,7 @@ func TestTUICommandRunnerSendsGitThroughCommand(t *testing.T) {
 	if runner == nil {
 		t.Fatal("defaultPRCommandRunner not found in internal/tui")
 	}
-	gitsafeName := importName(runnerFile, "github.com/Gitlawb/zero/internal/gitsafe")
+	gitsafeName := importName(runnerFile, "github.com/Twigpine/zero/internal/gitsafe")
 	calls := false
 	if gitsafeName != "" {
 		ast.Inspect(runner.Body, func(node ast.Node) bool {
